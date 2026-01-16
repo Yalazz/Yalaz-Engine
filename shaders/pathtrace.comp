@@ -1,0 +1,72 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rgba32f) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform PushConstants {
+    mat4 invView;
+    mat4 invProjection;
+    vec3 cameraPos;
+    uint frameIndex;
+} pc;
+
+layout(std140, binding = 4) uniform GPUSceneData {
+    mat4 view;
+    mat4 proj;
+    mat4 viewproj;
+    vec4 ambientColor;
+    vec4 sunlightDirection;
+    vec4 sunlightColor;
+} scene;
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imageSize = imageSize(outImage);
+
+    if (pixelCoord.x >= imageSize.x || pixelCoord.y >= imageSize.y)
+        return;
+
+    vec2 uv = (vec2(pixelCoord) + 0.5) / vec2(imageSize) * 2.0 - 1.0;
+    uv.y *= -1.0;
+
+    // Kamera ışını üretimi
+    vec4 rayClip = vec4(uv, -1.0, 1.0);
+    vec4 rayView = pc.invProjection * rayClip;
+    rayView = vec4(rayView.xyz / rayView.w, 0.0);
+    vec3 rayDir = normalize((pc.invView * rayView).xyz);
+    vec3 rayOrigin = pc.cameraPos;
+
+    // Küre ile çarpışma testi
+    vec3 sphereCenter = vec3(0.0, 0.0, -5.0);
+    float radius = 1.0;
+    vec3 oc = rayOrigin - sphereCenter;
+
+    float a = dot(rayDir, rayDir);
+    float b = 2.0 * dot(oc, rayDir);
+    float c = dot(oc, oc) - radius * radius;
+    float discriminant = b * b - 4.0 * a * c;
+
+    vec3 color = vec3(0.0);
+
+    if (discriminant > 0.0) {
+        float t = (-b - sqrt(discriminant)) / (2.0 * a);
+        if (t > 0.001) {
+            vec3 hitPos = rayOrigin + t * rayDir;
+            vec3 normal = normalize(hitPos - sphereCenter);
+
+            vec3 lightDir = normalize(scene.sunlightDirection.xyz);
+            float lambert = max(dot(normal, lightDir), 0.0);
+            vec3 lightColor = scene.sunlightColor.rgb * scene.sunlightDirection.w;
+
+            color = lambert * lightColor;
+            color += scene.ambientColor.rgb * scene.ambientColor.a;
+        }
+    } else {
+        // Sky rengi (gökyüzü gradient)
+        color = mix(vec3(0.6, 0.7, 0.9), vec3(0.2, 0.3, 0.4), uv.y);
+    }
+
+    imageStore(outImage, pixelCoord, vec4(color, 1.0));
+}

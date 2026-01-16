@@ -1,0 +1,138 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 15,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "mingw-base",
+            "hidden": true,
+            "generator": "MinGW Makefiles",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
+                "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe"
+            }
+        },
+        {
+            "name": "mingw-debug",
+            "displayName": "MinGW Debug",
+            "description": "Debug build with MinGW (Validation ON)",
+            "inherits": "mingw-base",
+            "binaryDir": "${sourceDir}/mingw-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "mingw-release",
+            "displayName": "MinGW Release",
+            "description": "Release build with MinGW (Validation OFF, Optimized)",
+            "inherits": "mingw-base",
+            "binaryDir": "${sourceDir}/mingw-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "vs2022-base",
+            "hidden": true,
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "toolset": "host=x64"
+        },
+        {
+            "name": "vs2022",
+            "displayName": "Visual Studio 2022",
+            "description": "VS2022 multi-config (Debug/Release)",
+            "inherits": "vs2022-base",
+            "binaryDir": "${sourceDir}/build-vs2022",
+            "cacheVariables": {
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install"
+            }
+        },
+        {
+            "name": "ninja-multi",
+            "displayName": "Ninja Multi-Config",
+            "description": "Ninja Multi-Config with MinGW",
+            "generator": "Ninja Multi-Config",
+            "binaryDir": "${sourceDir}/ninja-build",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
+                "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe"
+            }
+        },
+        {
+            "name": "Linux-GCC-Debug",
+            "displayName": "Linux GCC Debug",
+            "description": "Debug build using GCC on Linux",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build-linux-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "/usr/bin/gcc",
+                "CMAKE_CXX_COMPILER": "/usr/bin/g++"
+            }
+        },
+        {
+            "name": "Linux-GCC-Release",
+            "displayName": "Linux GCC Release",
+            "description": "Release build using GCC on Linux",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build-linux-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "/usr/bin/gcc",
+                "CMAKE_CXX_COMPILER": "/usr/bin/g++"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "mingw-debug-build",
+            "displayName": "MinGW Debug Build",
+            "configurePreset": "mingw-debug"
+        },
+        {
+            "name": "mingw-release-build",
+            "displayName": "MinGW Release Build",
+            "configurePreset": "mingw-release"
+        },
+        {
+            "name": "vs2022-debug",
+            "displayName": "VS2022 Debug",
+            "configurePreset": "vs2022",
+            "configuration": "Debug"
+        },
+        {
+            "name": "vs2022-release",
+            "displayName": "VS2022 Release",
+            "configurePreset": "vs2022",
+            "configuration": "Release"
+        },
+        {
+            "name": "ninja-debug",
+            "displayName": "Ninja Debug",
+            "configurePreset": "ninja-multi",
+            "configuration": "Debug"
+        },
+        {
+            "name": "ninja-release",
+            "displayName": "Ninja Release",
+            "configurePreset": "ninja-multi",
+            "configuration": "Release"
+        },
+        {
+            "name": "linux-debug-build",
+            "displayName": "Linux Debug Build",
+            "configurePreset": "Linux-GCC-Debug"
+        },
+        {
+            "name": "linux-release-build",
+            "displayName": "Linux Release Build",
+            "configurePreset": "Linux-GCC-Release"
+        }
+    ],
+    "testPresets": []
+}

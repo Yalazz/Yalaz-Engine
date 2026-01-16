@@ -1,0 +1,97 @@
+# ===========================================
+# BUILD DIRECTORIES (all compilers/IDEs)
+# ===========================================
+bin/
+build/
+out/
+lib/
+x64/
+Debug/
+Release/
+MinSizeRel/
+RelWithDebInfo/
+
+# CMake build directories
+mingw/
+mingw-*/
+cmake-build-*/
+ninja-build/
+Ninja/
+NinjaCLion/
+NinjaVSC/
+NinjaVSCDE/
+NinjaVSCDebugger/
+mingwSDL/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ===========================================
+# IDE / EDITOR FILES
+# ===========================================
+.idea/
+.vs/
+.vscode/
+.Clion/
+.cmake/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+
+# ===========================================
+# COMPILED FILES
+# ===========================================
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.spv
+
+# ===========================================
+# TEMPORARY FILES
+# ===========================================
+*.tmp
+*.temp
+*.log
+*.cache
+tmpclaude-*
+nul
+
+# ===========================================
+# OS FILES
+# ===========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===========================================
+# MISC JUNK FILES
+# ===========================================
+C
+cd
+cmake
+git
+rmdir
+C:*
+*.vert
+!shaders/*.vert
+Testing/
+
+# ===========================================
+# LARGE THIRD PARTY (use submodules instead)
+# ===========================================
+SDL2-2.30.10/
+
+# ===========================================
+# CLAUDE TEMP FILES
+# ===========================================
+.claude/
