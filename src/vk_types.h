@@ -214,14 +214,13 @@ struct GPUMeshBuffers {
 //}; // Toplam: 72 byte
 
 struct GPUDrawPushConstants {
-    glm::mat4 worldMatrix;         // 64 byte
-    VkDeviceAddress vertexBuffer;  // 8 byte
-    float outlineScale;            // 4 byte (Outline için)
-    float padding[3];              // 12 byte (16-byte hizalama için)
-
-
-    glm::vec4 baseColor;
-};
+    glm::mat4 worldMatrix;         // 64 bytes, offset 0-63
+    VkDeviceAddress vertexBuffer;  // 8 bytes, offset 64-71
+    float outlineScale;            // 4 bytes, offset 72-75
+    float padding[5];              // 20 bytes, offset 76-95 (for vec4 16-byte alignment)
+    glm::vec4 baseColor;           // 16 bytes, offset 96-111
+};  // Total: 112 bytes - matches GLSL std430 layout
+static_assert(sizeof(GPUDrawPushConstants) == 112, "GPUDrawPushConstants must be 112 bytes for GPU alignment");
 
 // =============================================================================
 // GRID PUSH CONSTANTS - For dynamic infinite grid rendering

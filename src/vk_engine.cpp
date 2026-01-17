@@ -4536,7 +4536,8 @@ void VulkanEngine::init_outline_wireframe_pipeline()
     VkShaderModule vertShader;
     VkShaderModule fragShader;
 
-    vkutil::load_shader_module("../../shaders/mesh.vert.spv", _device, &vertShader);
+    // Use outline.vert instead of mesh.vert - outline.vert doesn't require materialData
+    vkutil::load_shader_module("../../shaders/outline.vert.spv", _device, &vertShader);
     vkutil::load_shader_module("../../shaders/outline.frag.spv", _device, &fragShader);
 
     VkPushConstantRange push_constant{};
@@ -4544,23 +4545,24 @@ void VulkanEngine::init_outline_wireframe_pipeline()
     push_constant.size = sizeof(GPUDrawPushConstants);
     push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
+    // Only use scene data layout - outline shader doesn't need material data
     VkDescriptorSetLayout layouts[] = {
-        _gpuSceneDataDescriptorLayout,
-        _drawImageDescriptorLayout
+        _gpuSceneDataDescriptorLayout
     };
 
     VkPipelineLayoutCreateInfo pipeline_layout_info{};
     pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipeline_layout_info.setLayoutCount = 2;
+    pipeline_layout_info.setLayoutCount = 1;  // Only scene data layout
     pipeline_layout_info.pSetLayouts = layouts;
     pipeline_layout_info.pushConstantRangeCount = 1;
     pipeline_layout_info.pPushConstantRanges = &push_constant;
 
-    vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_wireframeOutlinePipelineLayout);
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_wireframeOutlinePipelineLayout));
 
     PipelineBuilder builder;
     builder._pipelineLayout = _wireframeOutlinePipelineLayout;
     builder.set_shaders(vertShader, fragShader);
+    builder.set_vertex_input(Vertex::get_vertex_description()); // Add vertex input for position
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_LINE);  // Wireframe çizim
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
@@ -9450,11 +9452,17 @@ void VulkanEngine::init_vulkan()
     features12.descriptorIndexing = true;
     features12.runtimeDescriptorArray = true; // Bu satırı ekleyin
 
+    // Vulkan 1.0 features - enable fillModeNonSolid for wireframe rendering
+    VkPhysicalDeviceFeatures features10{};
+    features10.fillModeNonSolid = VK_TRUE;
+    features10.wideLines = VK_TRUE;
+
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
     vkb::PhysicalDevice physicalDevice = selector
         .set_minimum_version(1, 3)
         .set_required_features_13(features)
         .set_required_features_12(features12)
+        .set_required_features(features10)
         .set_surface(_surface)
         .select()
         .value();
@@ -9610,13 +9618,13 @@ void VulkanEngine::init_material_preview_pipeline() {
     push_constant.size = sizeof(GPUDrawPushConstants);
     push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
+    // Material preview shader only uses Set 0 (SceneData), no Set 1 needed
     VkDescriptorSetLayout layouts[] = {
-        _gpuSceneDataDescriptorLayout,
-        _drawImageDescriptorLayout
+        _gpuSceneDataDescriptorLayout
     };
 
     VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
-    pipeline_layout_info.setLayoutCount = 2;
+    pipeline_layout_info.setLayoutCount = 1;
     pipeline_layout_info.pSetLayouts = layouts;
     pipeline_layout_info.pushConstantRangeCount = 1;
     pipeline_layout_info.pPushConstantRanges = &push_constant;
@@ -10132,7 +10140,10 @@ void VulkanEngine::init_pipelines() {
     init_material_preview_pipeline();  //  Bunu yeni ekledik
 
     // === WIREFRAME PIPELINE (İsteğe Bağlı) ===
-    init_wireframe_pipeline();         //  Eğer wireframe istiyorsan ekle
+    // Note: init_outline_wireframe_pipeline already provides wireframe rendering
+    // init_wireframe_pipeline uses mesh.vert which requires materialData descriptor
+    // Disabled for now to avoid descriptor layout mismatch
+    // init_wireframe_pipeline();
 }
 
 void VulkanEngine::init_wireframe_pipeline() {
@@ -10371,13 +10382,13 @@ void VulkanEngine::init_emissive_pipeline() {
     pushConstant.size = sizeof(GPUDrawPushConstants);
     pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // Emissive shader only uses scene data at set 0, not set 1
     VkDescriptorSetLayout layouts[] = {
-        _gpuSceneDataDescriptorLayout,
-        _drawImageDescriptorLayout
+        _gpuSceneDataDescriptorLayout
     };
 
     VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
-    layoutInfo.setLayoutCount = 2;
+    layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = layouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstant;
@@ -10425,9 +10436,9 @@ void VulkanEngine::init_2d_pipeline(bool enableBackfaceCulling)
         _2dPipelineLayout = VK_NULL_HANDLE;
     }
 
+    // 2D shader only uses scene data at set 0, not set 1
     VkDescriptorSetLayout setLayouts[] = {
-        _gpuSceneDataDescriptorLayout,
-        _drawImageDescriptorLayout
+        _gpuSceneDataDescriptorLayout
     };
 
     VkPushConstantRange pushRange{};
@@ -10437,7 +10448,7 @@ void VulkanEngine::init_2d_pipeline(bool enableBackfaceCulling)
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 2;
+    layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = setLayouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
@@ -10744,17 +10755,26 @@ void VulkanEngine::init_pathtrace_pipeline()
 {
     VkShaderModule computeShader;
     if (!vkutil::load_shader_module("../../shaders/pathtrace.comp.spv", _device, &computeShader)) {
-        throw std::runtime_error("failed to load pathtrace.comp.spv!");
+        fmt::print("Warning: pathtrace.comp.spv not found, skipping pathtrace pipeline\n");
+        return; // Skip pathtrace pipeline if shader not found
     }
 
     VkDescriptorSetLayout setLayouts[] = {
         _drawImageDescriptorLayout
     };
 
+    // Push constant range for PathTracePushConstants
+    VkPushConstantRange pushConstant{};
+    pushConstant.offset = 0;
+    pushConstant.size = sizeof(PathTracePushConstants);
+    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = setLayouts;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstant;
 
     VK_CHECK(vkCreatePipelineLayout(_device, &pipelineLayoutInfo, nullptr, &_pathTracePipelineLayout));
 
@@ -10782,12 +10802,18 @@ void VulkanEngine::init_pathtrace_pipeline()
 //}
 void VulkanEngine::draw_rendered_pathtraced(VkCommandBuffer cmd)
 {
-    // Push constant verisi hazırla (kamera + frameIndex)
-    PathTracePushConstants pc;
+    // Skip if pipeline wasn't initialized
+    if (_pathTracePipeline == VK_NULL_HANDLE) return;
+
+    // Push constant verisi hazırla (kamera + lighting + frameIndex)
+    PathTracePushConstants pc{};
     pc.invView = glm::inverse(sceneData.view);
     pc.invProj = glm::inverse(sceneData.proj);
-    pc.cameraPos = mainCamera.position;
-    pc.frameIndex = _frameNumber; // <== class üyesi
+    pc.cameraPos = glm::vec4(mainCamera.position, 0.0f);
+    pc.sunlightDir = sceneData.sunlightDirection;
+    pc.sunlightColor = sceneData.sunlightColor;
+    pc.ambientColor = sceneData.ambientColor;
+    pc.frameIndex = _frameNumber;
 
     // Pipeline'ı bağla
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _pathTracePipeline);
@@ -11476,9 +11502,9 @@ void VulkanEngine::init_grid_pipeline() {
     depthStencil.depthWriteEnable = VK_FALSE;  // Don't write to depth - grid is transparent
     depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
 
+    // Grid shader only uses Set 0 (SceneData), no Set 1 needed
     VkDescriptorSetLayout setLayouts[] = {
-        _gpuSceneDataDescriptorLayout,
-        _drawImageDescriptorLayout
+        _gpuSceneDataDescriptorLayout
     };
 
     // Use GridPushConstants for the grid pipeline
@@ -11489,7 +11515,7 @@ void VulkanEngine::init_grid_pipeline() {
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 2;
+    pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = setLayouts;
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
@@ -11501,19 +11527,29 @@ void VulkanEngine::init_grid_pipeline() {
     viewportState.viewportCount = 1;
     viewportState.scissorCount = 1;
 
+    // Use dynamic rendering (VK 1.3) instead of renderPass
+    VkFormat colorFormat = _drawImage.imageFormat;
+    VkPipelineRenderingCreateInfo renderInfo{};
+    renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderInfo.colorAttachmentCount = 1;
+    renderInfo.pColorAttachmentFormats = &colorFormat;
+    renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &renderInfo;  // Dynamic rendering instead of renderPass
     pipelineInfo.stageCount = 2;
     pipelineInfo.pStages = shaderStages;
     pipelineInfo.pVertexInputState = &vertexInputInfo;
     pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;  // This was missing!
     pipelineInfo.pRasterizationState = &rasterizer;
     pipelineInfo.pMultisampleState = &multisampling;
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = gridPipelineLayout;
-    pipelineInfo.renderPass = _renderPass;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;  // Using dynamic rendering
     pipelineInfo.subpass = 0;
 
     VK_CHECK(vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &gridPipeline));

@@ -49,11 +49,15 @@ struct DeletionQueue
 };
 
 struct PathTracePushConstants {
-    glm::mat4 invView;
-    glm::mat4 invProj;
-    glm::vec3 cameraPos;
-    uint32_t frameIndex;
-};
+    glm::mat4 invView;          // 64 bytes
+    glm::mat4 invProj;          // 64 bytes
+    glm::vec4 cameraPos;        // 16 bytes (xyz = pos, w = unused) - aligned for GPU
+    glm::vec4 sunlightDir;      // 16 bytes (xyz = direction, w = intensity)
+    glm::vec4 sunlightColor;    // 16 bytes
+    glm::vec4 ambientColor;     // 16 bytes (rgb = color, a = intensity)
+    uint32_t frameIndex;        // 4 bytes
+    uint32_t padding[3];        // 12 bytes for alignment
+};  // Total: 208 bytes
 
 
 

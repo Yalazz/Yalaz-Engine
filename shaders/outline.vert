@@ -5,12 +5,13 @@
 
 layout(location = 0) in vec3 inPosition;
 
+// Push constants - must match C++ GPUDrawPushConstants (112 bytes)
 layout(push_constant) uniform PushConstants {
-    mat4 worldMatrix;
-    uvec2 vertexBuffer;
-    float outlineScale;
-    float _pad0;
-    vec4 baseColor;
+    mat4 worldMatrix;          // 64 bytes, offset 0-63
+    uvec2 vertexBuffer;        // 8 bytes, offset 64-71 (VkDeviceAddress = uint64)
+    float outlineScale;        // 4 bytes, offset 72-75
+    float padding[5];          // 20 bytes, offset 76-95 (for vec4 16-byte alignment)
+    vec4 baseColor;            // 16 bytes, offset 96-111
 } pushConstants;
 
 // Scene data - MUST match GPUSceneData in vk_types.h

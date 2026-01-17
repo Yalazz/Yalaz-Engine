@@ -1,11 +1,51 @@
 {
-    "version": 3,
+    "version": 6,
     "cmakeMinimumRequired": {
         "major": 3,
         "minor": 15,
         "patch": 0
     },
     "configurePresets": [
+        {
+            "name": "ninja-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
+                "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "debug",
+            "displayName": "Debug",
+            "description": "Debug build with Ninja (Validation ON)",
+            "inherits": "ninja-base",
+            "binaryDir": "${sourceDir}/cmake-build-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "Release",
+            "description": "Release build with Ninja (Validation OFF, Optimized)",
+            "inherits": "ninja-base",
+            "binaryDir": "${sourceDir}/cmake-build-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "relwithdebinfo",
+            "displayName": "RelWithDebInfo",
+            "description": "Release with Debug Info",
+            "inherits": "ninja-base",
+            "binaryDir": "${sourceDir}/cmake-build-relwithdebinfo",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
         {
             "name": "mingw-base",
             "hidden": true,
@@ -18,7 +58,7 @@
         {
             "name": "mingw-debug",
             "displayName": "MinGW Debug",
-            "description": "Debug build with MinGW (Validation ON)",
+            "description": "Debug build with MinGW Makefiles",
             "inherits": "mingw-base",
             "binaryDir": "${sourceDir}/mingw-debug",
             "cacheVariables": {
@@ -28,7 +68,7 @@
         {
             "name": "mingw-release",
             "displayName": "MinGW Release",
-            "description": "Release build with MinGW (Validation OFF, Optimized)",
+            "description": "Release build with MinGW Makefiles",
             "inherits": "mingw-base",
             "binaryDir": "${sourceDir}/mingw-release",
             "cacheVariables": {
@@ -51,44 +91,24 @@
             "cacheVariables": {
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/install"
             }
-        },
-        {
-            "name": "ninja-multi",
-            "displayName": "Ninja Multi-Config",
-            "description": "Ninja Multi-Config with MinGW",
-            "generator": "Ninja Multi-Config",
-            "binaryDir": "${sourceDir}/ninja-build",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
-                "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe"
-            }
-        },
-        {
-            "name": "Linux-GCC-Debug",
-            "displayName": "Linux GCC Debug",
-            "description": "Debug build using GCC on Linux",
-            "generator": "Unix Makefiles",
-            "binaryDir": "${sourceDir}/build-linux-debug",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_C_COMPILER": "/usr/bin/gcc",
-                "CMAKE_CXX_COMPILER": "/usr/bin/g++"
-            }
-        },
-        {
-            "name": "Linux-GCC-Release",
-            "displayName": "Linux GCC Release",
-            "description": "Release build using GCC on Linux",
-            "generator": "Unix Makefiles",
-            "binaryDir": "${sourceDir}/build-linux-release",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_C_COMPILER": "/usr/bin/gcc",
-                "CMAKE_CXX_COMPILER": "/usr/bin/g++"
-            }
         }
     ],
     "buildPresets": [
+        {
+            "name": "debug-build",
+            "displayName": "Debug Build",
+            "configurePreset": "debug"
+        },
+        {
+            "name": "release-build",
+            "displayName": "Release Build",
+            "configurePreset": "release"
+        },
+        {
+            "name": "relwithdebinfo-build",
+            "displayName": "RelWithDebInfo Build",
+            "configurePreset": "relwithdebinfo"
+        },
         {
             "name": "mingw-debug-build",
             "displayName": "MinGW Debug Build",
@@ -110,28 +130,6 @@
             "displayName": "VS2022 Release",
             "configurePreset": "vs2022",
             "configuration": "Release"
-        },
-        {
-            "name": "ninja-debug",
-            "displayName": "Ninja Debug",
-            "configurePreset": "ninja-multi",
-            "configuration": "Debug"
-        },
-        {
-            "name": "ninja-release",
-            "displayName": "Ninja Release",
-            "configurePreset": "ninja-multi",
-            "configuration": "Release"
-        },
-        {
-            "name": "linux-debug-build",
-            "displayName": "Linux Debug Build",
-            "configurePreset": "Linux-GCC-Debug"
-        },
-        {
-            "name": "linux-release-build",
-            "displayName": "Linux Release Build",
-            "configurePreset": "Linux-GCC-Release"
         }
     ],
     "testPresets": []

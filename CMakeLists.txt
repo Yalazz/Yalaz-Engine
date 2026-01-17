@@ -116,7 +116,8 @@ add_subdirectory(src)
 #  *** DİKKAT: -I<dir> (boşluksuz) kullanıyoruz ***
 # =============================================================
 set(SHADER_SRC_DIR  ${PROJECT_SOURCE_DIR}/shaders)
-set(SHADER_BIN_DIR  ${CMAKE_BINARY_DIR}/shaders)
+# Output compiled shaders to project shaders dir (executable expects ../../shaders/ relative to bin/Debug/)
+set(SHADER_BIN_DIR  ${PROJECT_SOURCE_DIR}/shaders)
 file(MAKE_DIRECTORY "${SHADER_BIN_DIR}")
 
 # Tüm shaderları topla

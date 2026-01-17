@@ -10,6 +10,11 @@ set(FASTGLTF_DOWNLOAD_SIMDJSON ON CACHE BOOL "" FORCE)
 
 add_subdirectory(fastgltf)
 
+# Fix simdjson Debug build issue with MinGW (always_inline requires -march=native)
+if (TARGET fastgltf_simdjson AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang"))
+    target_compile_options(fastgltf_simdjson PRIVATE -march=native)
+endif()
+
 # ==========================================================
 # fmt (header-only)
 # ==========================================================
