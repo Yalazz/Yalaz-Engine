@@ -26,7 +26,7 @@ public:
     float targetYaw{ 0.0f };
     float targetPitch{ 0.0f };
     bool focusActive = false;
-    float focusDistance = 5.0f;  // Hedefe olan ideal uzaklýk
+    float focusDistance = 5.0f;  // Hedefe olan ideal uzaklï¿½k
 
 
 

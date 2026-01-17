@@ -55,11 +55,11 @@ target_include_directories(Yalaz_Engine PUBLIC
     "${CMAKE_SOURCE_DIR}/third_party/ImGuizmo"                # ImGuizmo header dosyaları
 )
 
-# Kaynak dosyalar
 target_sources(Yalaz_Engine PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/tinyobjloader/tiny_obj_loader.cc
-    ${CMAKE_SOURCE_DIR}/third_party/ImGuizmo/ImGuizmo.cpp     # ✅ ImGuizmo.cpp dahil edildi
+        ${CMAKE_SOURCE_DIR}/third_party/tinyobjloader/tiny_obj_loader.cc
+        "${CMAKE_SOURCE_DIR}/third_party/ImGuizmo/ImGuizmo.cpp"
 )
+
 
 # Bağlantı yapılacak kütüphaneler
 target_link_libraries(Yalaz_Engine PUBLIC
@@ -68,12 +68,13 @@ target_link_libraries(Yalaz_Engine PUBLIC
     vkbootstrap
     vma
     glm
-    fmt::fmt
+    fmt
     imgui
     fastgltf
     stb_image
     tinyobjloader
     Vulkan::Vulkan
+
 )
 
 add_dependencies(Yalaz_Engine Shaders)
