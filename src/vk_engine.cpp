@@ -2078,12 +2078,12 @@ void VulkanEngine::select_object_under_mouse(float mouseX, float mouseY)
 
     if (hitNode)
     {
-        fmt::println("[SEÇİM] Obje vuruldu ve seçildi!");
+        fmt::print("[SEÇİM] Obje vuruldu ve seçildi!\n");
         selectedNode = hitNode;
     }
     else
     {
-        fmt::println("[SEÇİM] Obje vurulamadı. Seçim yok.");
+        fmt::print("[SEÇİM] Obje vurulamadı. Seçim yok.\n");
     }
 }
 
@@ -4751,7 +4751,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
     if (gpuSceneDataBuffer.buffer == VK_NULL_HANDLE) {
-        fmt::println("❌ gpuSceneDataBuffer null!");
+        fmt::print("gpuSceneDataBuffer null!\n");
         return;
     }
 
@@ -7810,7 +7810,7 @@ void VulkanEngine::run()
                 float mouseX_norm = static_cast<float>(mouseX) / static_cast<float>(winW);
                 float mouseY_norm = static_cast<float>(mouseY) / static_cast<float>(winH);
 
-                fmt::println("[INPUT] Sol tıklama tespit edildi! Mouse = ({:.3f}, {:.3f})", mouseX_norm, mouseY_norm);
+                fmt::print("[INPUT] Sol tıklama tespit edildi! Mouse = ({:.3f}, {:.3f})\n", mouseX_norm, mouseY_norm);
 
                 select_object_under_mouse(mouseX_norm, mouseY_norm);
             }
@@ -7821,7 +7821,7 @@ void VulkanEngine::run()
                     selectedNode = nullptr;
 
                     _showOutline = false;
-                    fmt::println("❌ Outline modu ESC ile devre dışı bırakıldı.");
+                    fmt::print("Outline modu ESC ile devre disi birakildi.\n");
                 }
             }
             if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F11)
@@ -9916,10 +9916,10 @@ void VulkanEngine::init_renderables()
         auto gltfScene = loadGltf(this, path);
         if (gltfScene.has_value()) {
             loadedScenes[name] = *gltfScene;
-            fmt::println(" Loaded GLB: {} as {}", path, name);
+            fmt::print("Loaded GLB: {} as {}\n", path, name);
         }
         else {
-            fmt::println(" Failed to load GLB file: {}", path);
+            fmt::print("Failed to load GLB file: {}\n", path);
         }
     }
 
@@ -9934,10 +9934,10 @@ void VulkanEngine::init_renderables()
 		auto objScene = loadObj(this, path); // load_obj_mesh yerine loadObj kullanmak sanırım daha uygun??! load_obj_mesh bu fonksiyon hala bulunuyor ama gerektiginde statik cisim cagırmak için deneyebilirim-- OBJ CALISMIYOR --
         if (objScene.has_value()) {
             loadedScenes[name] = *objScene;
-            fmt::println("✅ Loaded OBJ: {} as {}", path, name);
+            fmt::print("Loaded OBJ: {} as {}\n", path, name);
         }
         else {
-            fmt::println("⚠️ Failed to load OBJ file: {}", path);
+            fmt::print("Failed to load OBJ file: {}\n", path);
         }
     }
 }
@@ -12162,17 +12162,17 @@ VkShaderModule VulkanEngine::load_shader_module(const char* filePath) {
 
 void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 {
-    fmt::println("[Pipelines] Başlatılıyor...");
+    fmt::print("[Pipelines] Baslatiliyor...\n");
 
     // Shader modüllerini yükle
     VkShaderModule meshFragShader;
     if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", engine->_device, &meshFragShader)) {
-        fmt::println("[Pipelines] mesh_pbr.frag.spv yüklenemedi!");
+        fmt::print("[Pipelines] mesh_pbr.frag.spv yuklenemedi!\n");
     }
 
     VkShaderModule meshVertexShader;
     if (!vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &meshVertexShader)) {
-        fmt::println("[Pipelines] mesh.vert.spv yüklenemedi!");
+        fmt::print("[Pipelines] mesh.vert.spv yuklenemedi!\n");
     }
 
     // Push constant tanımı (shader'da 176 byte kullanılıyor)
@@ -12190,7 +12190,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 
 
     // Descriptor layout tanımı
-    fmt::println("[Pipelines] Descriptor layout oluşturuluyor...");
+    fmt::print("[Pipelines] Descriptor layout olusturuluyor...\n");
     DescriptorLayoutBuilder layoutBuilder;
     layoutBuilder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT); // SceneData
     layoutBuilder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // colorTex
@@ -12217,7 +12217,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     transparentPipeline.layout = newLayout;
 
     // PipelineBuilder kuruluyor
-    fmt::println("[Pipelines] Pipeline yapısı inşa ediliyor...");
+    fmt::print("[Pipelines] Pipeline yapisi insa ediliyor...\n");
     PipelineBuilder pipelineBuilder;
     pipelineBuilder.set_shaders(meshVertexShader, meshFragShader);
     pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
@@ -12239,11 +12239,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     pipelineBuilder._renderInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
 
     // Opaque pipeline
-    fmt::println("[Pipelines] Opaque pipeline oluşturuluyor...");
+    fmt::print("[Pipelines] Opaque pipeline olusturuluyor...\n");
     opaquePipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
 
     // Transparent pipeline
-    fmt::println("[Pipelines] Transparent pipeline oluşturuluyor...");
+    fmt::print("[Pipelines] Transparent pipeline olusturuluyor...\n");
     pipelineBuilder.enable_blending_additive();
     pipelineBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     transparentPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
@@ -12252,7 +12252,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
     vkDestroyShaderModule(engine->_device, meshVertexShader, nullptr);
 
-    fmt::println("[Pipelines] Başarıyla tamamlandı.");
+    fmt::print("[Pipelines] Basariyla tamamlandi.\n");
 }
 
 
@@ -12421,7 +12421,7 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
     const MaterialResources& resources,
     DescriptorAllocatorGrowable& descriptorAllocator)
 {
-    fmt::println("[Material] MaterialInstance yazılıyor...");
+    fmt::print("[Material] MaterialInstance yaziliyor...\n");
 
     MaterialInstance matData;
     matData.passType = pass;
@@ -12461,7 +12461,7 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
     // Descriptor set güncelle
     writer.update_set(device, matData.materialSet);
 
-    fmt::println("[Material] MaterialInstance oluşturuldu.");
+    fmt::print("[Material] MaterialInstance olusturuldu.\n");
     return matData;
 }
 
