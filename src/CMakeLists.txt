@@ -68,10 +68,15 @@ endif()
 
 # macOS specific: Create app bundle for Release
 if(APPLE)
+    # Get Vulkan SDK library path for rpath
+    get_filename_component(VULKAN_LIB_DIR "${Vulkan_LIBRARY}" DIRECTORY)
+
     set_target_properties(Yalaz_Engine PROPERTIES
         MACOSX_BUNDLE FALSE  # Set to TRUE if you want .app bundle
+        # Include both executable path (for SDL2) and Vulkan SDK (for libvulkan)
+        BUILD_RPATH "${VULKAN_LIB_DIR}"
         INSTALL_RPATH "@executable_path"
-        BUILD_WITH_INSTALL_RPATH TRUE
+        BUILD_WITH_INSTALL_RPATH FALSE
     )
 endif()
 
@@ -208,13 +213,38 @@ elseif(APPLE)
         COMMENT "Copying SDL2 library to output directory"
     )
 
-    # Fix the rpath so the executable finds the local SDL2 library
+    # macOS: Copy Vulkan library to the output directory
+    get_filename_component(VULKAN_LIB_DIR "${Vulkan_LIBRARY}" DIRECTORY)
+    add_custom_command(TARGET Yalaz_Engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VULKAN_LIB_DIR}/libvulkan.1.dylib"
+            $<TARGET_FILE_DIR:Yalaz_Engine>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VULKAN_LIB_DIR}/libMoltenVK.dylib"
+            $<TARGET_FILE_DIR:Yalaz_Engine>
+        COMMENT "Copying Vulkan/MoltenVK libraries to output directory"
+    )
+
+    # Fix the rpath so the executable finds local libraries
     add_custom_command(TARGET Yalaz_Engine POST_BUILD
         COMMAND install_name_tool -change
             "@rpath/$<TARGET_FILE_NAME:SDL2::SDL2>"
             "@executable_path/$<TARGET_FILE_NAME:SDL2::SDL2>"
             $<TARGET_FILE:Yalaz_Engine>
-        COMMENT "Fixing SDL2 rpath for standalone distribution"
+        COMMAND install_name_tool -change
+            "@rpath/libvulkan.1.dylib"
+            "@executable_path/libvulkan.1.dylib"
+            $<TARGET_FILE:Yalaz_Engine>
+        COMMENT "Fixing library rpaths for standalone distribution"
+    )
+
+    # Create double-clickable .command launcher for Finder
+    add_custom_command(TARGET Yalaz_Engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "#!/bin/bash" > "$<TARGET_FILE_DIR:Yalaz_Engine>/Yalaz_Engine.command"
+        COMMAND ${CMAKE_COMMAND} -E echo "cd \\\"\\$$\(dirname \\\"\\$$0\\\"\)\\\"" >> "$<TARGET_FILE_DIR:Yalaz_Engine>/Yalaz_Engine.command"
+        COMMAND ${CMAKE_COMMAND} -E echo "./$<TARGET_FILE_NAME:Yalaz_Engine>" >> "$<TARGET_FILE_DIR:Yalaz_Engine>/Yalaz_Engine.command"
+        COMMAND chmod +x "$<TARGET_FILE_DIR:Yalaz_Engine>/Yalaz_Engine.command"
+        COMMENT "Creating Finder launcher (.command)"
     )
 elseif(UNIX)
     # Linux: Copy SDL2 library to the output directory

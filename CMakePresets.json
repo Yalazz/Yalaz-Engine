@@ -245,6 +245,9 @@
             "hidden": true,
             "inherits": "base",
             "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
+            },
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
@@ -297,13 +300,15 @@
         },
         {
             "name": "xcode",
-            "displayName": "Xcode",
-            "description": "Xcode multi-config build for macOS",
+            "displayName": "Xcode (Use Xcode.app, NOT CLion)",
+            "description": "Xcode project - Open with Xcode.app only",
+            "hidden": true,
             "inherits": "base",
             "generator": "Xcode",
             "binaryDir": "${sourceDir}/build/xcode",
             "cacheVariables": {
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist"
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
             },
             "condition": {
                 "type": "equals",
