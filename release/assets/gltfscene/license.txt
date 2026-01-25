@@ -1,0 +1,11 @@
+Model Information:
+* title:	GLTF_003_B293_edit
+* source:	https://sketchfab.com/3d-models/gltf-003-b293-edit-4f88faca0f11459bbba2f0560738379a
+* author:	Jac_Pretorius (https://sketchfab.com/Jac_Pretorius)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "GLTF_003_B293_edit" (https://sketchfab.com/3d-models/gltf-003-b293-edit-4f88faca0f11459bbba2f0560738379a) by Jac_Pretorius (https://sketchfab.com/Jac_Pretorius) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

@@ -1,0 +1,19 @@
+#version 450
+layout (local_size_x = 16, local_size_y = 16) in;
+
+// 2D görüntüye yazma için image binding
+layout(binding = 0, rgba32f) uniform image2D outImage;
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 uv = vec2(pixelCoord) / vec2(imageSize(outImage));
+
+    // Basit grid: UV koordinatlarına göre çizgiler
+    float lineX = step(0.01, abs(fract(uv.x * 10.0) - 0.5));
+    float lineY = step(0.01, abs(fract(uv.y * 10.0) - 0.5));
+
+    float gridLine = 1.0 - max(lineX, lineY);
+    vec4 color = vec4(vec3(gridLine), 1.0);
+
+    imageStore(outImage, pixelCoord, color);
+}

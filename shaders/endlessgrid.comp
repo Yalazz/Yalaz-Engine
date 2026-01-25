@@ -1,0 +1,42 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;
+    vec4 cameraPos;
+} pc;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    vec2 uv = (vec2(px) + 0.5) / imageSize(outImage) * 2.0 - 1.0;
+
+    vec4 ndc = vec4(uv, 0.0, 1.0);
+    vec4 world = pc.invViewProj * ndc;
+    world /= world.w;
+
+    vec2 coord = world.xz;
+
+    float gridScale = 1.0;
+
+    // Minor grid çizgisi (her 1 birim)
+    vec2 minorGrid = abs(fract(coord / gridScale - 0.5) - 0.5);
+    float minorLine = min(minorGrid.x, minorGrid.y);
+    float minor = 1.0 - smoothstep(0.0, 0.02, minorLine); // Çizgi kalınlığı 0.02
+
+    // Major grid çizgisi (her 10 birim)
+    vec2 majorGrid = abs(fract(coord / (gridScale * 10.0) - 0.5) - 0.5);
+    float majorLine = min(majorGrid.x, majorGrid.y);
+    float major = 1.0 - smoothstep(0.0, 0.02, majorLine);
+
+    // Fade: kameraya olan uzaklığa göre
+    float distance = length(coord - pc.cameraPos.xz);
+    float fade = clamp(1.0 - distance / 100.0, 0.0, 1.0);
+
+    float gridValue = mix(minor, major, major); // Major varsa onu baskın yap
+    vec3 color = vec3(gridValue * fade);
+
+    imageStore(outImage, px, vec4(color, 1.0));
+}
