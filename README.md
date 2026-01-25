@@ -789,3 +789,4 @@ MIT License - see [LICENSE](LICENSE) file.
   C++20 • Vulkan 1.3 • Cross-Platform
 </p>
 refresh
+analytics trigger Sun Jan 25 15:48:03 +03 2026
