@@ -5008,8 +5008,38 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     // === ViewMode İşleme ===
     switch (_currentViewMode)
     {
-    case ViewMode::Wireframe:
-        draw_wireframe(cmd, globalDescriptor, viewport, scissor, opaque_draws);
+    case ViewMode::Solid:
+        draw_solid(cmd, globalDescriptor, viewport, scissor, opaque_draws);
+        break;
+
+    case ViewMode::Shaded:
+        // Use simple hemisphere lighting shader (new shaded pipeline)
+        if (_shadedPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadedPipeline);
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadedPipelineLayout,
+                0, 1, &globalDescriptor, 0, nullptr);
+
+            VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+            for (auto idx : opaque_draws) {
+                const RenderObject& r = drawCommands.OpaqueSurfaces[idx];
+                if (r.indexBuffer != lastIndexBuffer) {
+                    lastIndexBuffer = r.indexBuffer;
+                    vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                }
+                GPUDrawPushConstants push{};
+                push.worldMatrix = r.transform;
+                push.vertexBuffer = r.vertexBufferAddress;
+                push.baseColor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+                vkCmdPushConstants(cmd, _shadedPipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(GPUDrawPushConstants), &push);
+                stats.drawcall_count++;
+                stats.triangle_count += r.indexCount / 3;
+                vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+            }
+        }
         break;
 
     case ViewMode::MaterialPreview:
@@ -5020,9 +5050,20 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         draw_rendered(cmd, globalDescriptor, viewport, scissor, opaque_draws);
         break;
 
-    case ViewMode::Shaded:
+    case ViewMode::Wireframe:
+        draw_wireframe(cmd, globalDescriptor, viewport, scissor, opaque_draws);
+        break;
+
+    case ViewMode::Normals:
+        draw_normals(cmd, globalDescriptor, viewport, scissor, opaque_draws);
+        break;
+
+    case ViewMode::UVChecker:
+        draw_uvchecker(cmd, globalDescriptor, viewport, scissor, opaque_draws);
+        break;
+
     default:
-        draw_shaded(cmd, globalDescriptor, viewport, scissor, opaque_draws);
+        draw_rendered(cmd, globalDescriptor, viewport, scissor, opaque_draws);
         break;
     }
 
@@ -5289,7 +5330,139 @@ void VulkanEngine::draw_shaded(
         draw(r);
 }
 
+// =============================================================================
+// DRAW SOLID - Flat color, no lighting (fastest)
+// =============================================================================
+void VulkanEngine::draw_solid(
+    VkCommandBuffer cmd,
+    VkDescriptorSet globalDescriptor,
+    VkViewport viewport,
+    VkRect2D scissor,
+    const std::vector<uint32_t>& opaque_draws)
+{
+    if (_solidPipeline == VK_NULL_HANDLE) return;
 
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _solidPipeline);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Bind only Set 0 (scene data)
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _solidPipelineLayout,
+        0, 1, &globalDescriptor, 0, nullptr);
+
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+
+    for (auto idx : opaque_draws) {
+        const RenderObject& r = drawCommands.OpaqueSurfaces[idx];
+
+        if (r.indexBuffer != lastIndexBuffer) {
+            lastIndexBuffer = r.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+
+        GPUDrawPushConstants push{};
+        push.worldMatrix = r.transform;
+        push.vertexBuffer = r.vertexBufferAddress;
+        push.baseColor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);  // Default gray
+
+        vkCmdPushConstants(cmd, _solidPipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(GPUDrawPushConstants), &push);
+
+        stats.drawcall_count++;
+        stats.triangle_count += r.indexCount / 3;
+
+        vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+    }
+}
+
+// =============================================================================
+// DRAW NORMALS - Visualize world-space normals as RGB
+// =============================================================================
+void VulkanEngine::draw_normals(
+    VkCommandBuffer cmd,
+    VkDescriptorSet globalDescriptor,
+    VkViewport viewport,
+    VkRect2D scissor,
+    const std::vector<uint32_t>& opaque_draws)
+{
+    if (_normalsPipeline == VK_NULL_HANDLE) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _normalsPipeline);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Bind only Set 0 (scene data)
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _normalsPipelineLayout,
+        0, 1, &globalDescriptor, 0, nullptr);
+
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+
+    for (auto idx : opaque_draws) {
+        const RenderObject& r = drawCommands.OpaqueSurfaces[idx];
+
+        if (r.indexBuffer != lastIndexBuffer) {
+            lastIndexBuffer = r.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+
+        GPUDrawPushConstants push{};
+        push.worldMatrix = r.transform;
+        push.vertexBuffer = r.vertexBufferAddress;
+
+        vkCmdPushConstants(cmd, _normalsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+            0, sizeof(GPUDrawPushConstants), &push);
+
+        stats.drawcall_count++;
+        stats.triangle_count += r.indexCount / 3;
+
+        vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+    }
+}
+
+// =============================================================================
+// DRAW UV CHECKER - Procedural checker pattern for UV debugging
+// =============================================================================
+void VulkanEngine::draw_uvchecker(
+    VkCommandBuffer cmd,
+    VkDescriptorSet globalDescriptor,
+    VkViewport viewport,
+    VkRect2D scissor,
+    const std::vector<uint32_t>& opaque_draws)
+{
+    if (_uvCheckerPipeline == VK_NULL_HANDLE) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _uvCheckerPipeline);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Bind only Set 0 (scene data)
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _uvCheckerPipelineLayout,
+        0, 1, &globalDescriptor, 0, nullptr);
+
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+
+    for (auto idx : opaque_draws) {
+        const RenderObject& r = drawCommands.OpaqueSurfaces[idx];
+
+        if (r.indexBuffer != lastIndexBuffer) {
+            lastIndexBuffer = r.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+
+        GPUDrawPushConstants push{};
+        push.worldMatrix = r.transform;
+        push.vertexBuffer = r.vertexBufferAddress;
+
+        vkCmdPushConstants(cmd, _uvCheckerPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+            0, sizeof(GPUDrawPushConstants), &push);
+
+        stats.drawcall_count++;
+        stats.triangle_count += r.indexCount / 3;
+
+        vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+    }
+}
 
 
 
@@ -5622,7 +5795,7 @@ void VulkanEngine::draw_pipeline_settings_imgui() {
 
         // === VIEW MODE ===
         if (ImGui::CollapsingHeader("View Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
-            static const char* viewModes[] = { "Wireframe", "Shaded", "Material Preview", "Rendered", "Path Traced" };
+            static const char* viewModes[] = { "Solid", "Shaded", "Material Preview", "Rendered", "Wireframe", "Normals", "UV Checker" };
             int currentMode = static_cast<int>(_currentViewMode);
 
             ImGui::SetNextItemWidth(-1);
@@ -9701,6 +9874,83 @@ void VulkanEngine::init_vulkan()
     vmaCreateAllocator(&allocatorInfo, &_allocator);
 }
 
+    PipelineBuilder builder;
+    builder._pipelineLayout = _normalsPipelineLayout;
+    builder.set_shaders(vertShader, fragShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_drawImage.imageFormat);
+    builder.set_depth_format(_depthImage.imageFormat);
+
+    builder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    builder._renderInfo.colorAttachmentCount = 1;
+    builder._renderInfo.pColorAttachmentFormats = &builder._colorAttachmentformat;
+    builder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
+    _normalsPipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+}
+
+// =============================================================================
+// UV CHECKER PIPELINE - Procedural checker pattern for UV debugging
+// =============================================================================
+void VulkanEngine::init_uvchecker_pipeline() {
+    VkShaderModule vertShader;
+    VkShaderModule fragShader;
+
+    if (!vkutil::load_shader_module("../../shaders/uvchecker.vert.spv", _device, &vertShader)) {
+        fmt::print("Error: Failed to load uvchecker.vert.spv\n");
+        return;
+    }
+    if (!vkutil::load_shader_module("../../shaders/uvchecker.frag.spv", _device, &fragShader)) {
+        fmt::print("Error: Failed to load uvchecker.frag.spv\n");
+        vkDestroyShaderModule(_device, vertShader, nullptr);
+        return;
+    }
+
+    VkPushConstantRange push_constant{};
+    push_constant.offset = 0;
+    push_constant.size = sizeof(GPUDrawPushConstants);
+    push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayout layouts[] = { _gpuSceneDataDescriptorLayout };
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.setLayoutCount = 1;
+    pipeline_layout_info.pSetLayouts = layouts;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pPushConstantRanges = &push_constant;
+
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_uvCheckerPipelineLayout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _uvCheckerPipelineLayout;
+    builder.set_shaders(vertShader, fragShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_drawImage.imageFormat);
+    builder.set_depth_format(_depthImage.imageFormat);
+
+    builder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    builder._renderInfo.colorAttachmentCount = 1;
+    builder._renderInfo.pColorAttachmentFormats = &builder._colorAttachmentformat;
+    builder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
+    _uvCheckerPipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+}
 
 
 
@@ -9809,6 +10059,147 @@ void VulkanEngine::init_shaded_pipeline()
     vkDestroyShaderModule(_device, fragShader, nullptr);
 }
 
+// =============================================================================
+// SOLID PIPELINE - Flat color, no lighting (fastest debug mode)
+// =============================================================================
+void VulkanEngine::init_solid_pipeline() {
+    VkShaderModule vertShader;
+    VkShaderModule fragShader;
+
+    if (!vkutil::load_shader_module("../../shaders/solid.vert.spv", _device, &vertShader)) {
+        fmt::print("Error: Failed to load solid.vert.spv\n");
+        return;
+    }
+    if (!vkutil::load_shader_module("../../shaders/solid.frag.spv", _device, &fragShader)) {
+        fmt::print("Error: Failed to load solid.frag.spv\n");
+        vkDestroyShaderModule(_device, vertShader, nullptr);
+        return;
+    }
+
+    VkPushConstantRange push_constant{};
+    push_constant.offset = 0;
+    push_constant.size = sizeof(GPUDrawPushConstants);
+    push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayout layouts[] = { _gpuSceneDataDescriptorLayout };
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.setLayoutCount = 1;
+    pipeline_layout_info.pSetLayouts = layouts;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pPushConstantRanges = &push_constant;
+
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_solidPipelineLayout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _solidPipelineLayout;
+    builder.set_shaders(vertShader, fragShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_drawImage.imageFormat);
+    builder.set_depth_format(_depthImage.imageFormat);
+
+    builder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    builder._renderInfo.colorAttachmentCount = 1;
+    builder._renderInfo.pColorAttachmentFormats = &builder._colorAttachmentformat;
+    builder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
+    _solidPipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+}
+
+// =============================================================================
+// SHADED PIPELINE - Hemisphere + N·L studio lighting (no textures)
+// =============================================================================
+void VulkanEngine::init_shaded_pipeline() {
+    VkShaderModule vertShader;
+    VkShaderModule fragShader;
+
+    if (!vkutil::load_shader_module("../../shaders/shaded.vert.spv", _device, &vertShader)) {
+        fmt::print("Error: Failed to load shaded.vert.spv\n");
+        return;
+    }
+    if (!vkutil::load_shader_module("../../shaders/shaded.frag.spv", _device, &fragShader)) {
+        fmt::print("Error: Failed to load shaded.frag.spv\n");
+        vkDestroyShaderModule(_device, vertShader, nullptr);
+        return;
+    }
+
+    VkPushConstantRange push_constant{};
+    push_constant.offset = 0;
+    push_constant.size = sizeof(GPUDrawPushConstants);
+    push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayout layouts[] = { _gpuSceneDataDescriptorLayout };
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.setLayoutCount = 1;
+    pipeline_layout_info.pSetLayouts = layouts;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pPushConstantRanges = &push_constant;
+
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_shadedPipelineLayout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _shadedPipelineLayout;
+    builder.set_shaders(vertShader, fragShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_drawImage.imageFormat);
+    builder.set_depth_format(_depthImage.imageFormat);
+
+    builder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    builder._renderInfo.colorAttachmentCount = 1;
+    builder._renderInfo.pColorAttachmentFormats = &builder._colorAttachmentformat;
+    builder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
+    _shadedPipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+}
+
+// =============================================================================
+// NORMALS PIPELINE - Visualize world-space normals as RGB colors
+// =============================================================================
+void VulkanEngine::init_normals_pipeline() {
+    VkShaderModule vertShader;
+    VkShaderModule fragShader;
+
+    if (!vkutil::load_shader_module("../../shaders/normals.vert.spv", _device, &vertShader)) {
+        fmt::print("Error: Failed to load normals.vert.spv\n");
+        return;
+    }
+    if (!vkutil::load_shader_module("../../shaders/normals.frag.spv", _device, &fragShader)) {
+        fmt::print("Error: Failed to load normals.frag.spv\n");
+        vkDestroyShaderModule(_device, vertShader, nullptr);
+        return;
+    }
+
+    VkPushConstantRange push_constant{};
+    push_constant.offset = 0;
+    push_constant.size = sizeof(GPUDrawPushConstants);
+    push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayout layouts[] = { _gpuSceneDataDescriptorLayout };
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.setLayoutCount = 1;
+    pipeline_layout_info.pSetLayouts = layouts;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pPushConstantRanges = &push_constant;
+
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_normalsPipelineLayout));
 
 
 
@@ -10347,7 +10738,13 @@ void VulkanEngine::init_pipelines() {
     //init_light_sphere(); // Küçük bir ışık küresi oluştur
 
     // === MATERIAL PREVIEW PIPELINE ===
-    init_material_preview_pipeline();  //  Bunu yeni ekledik
+    init_material_preview_pipeline();
+
+    // === VIEW MODE PIPELINES ===
+    init_solid_pipeline();      // Flat color, no lighting
+    init_shaded_pipeline();     // Hemisphere + N·L studio lighting
+    init_normals_pipeline();    // Normal visualization
+    init_uvchecker_pipeline();  // UV checker pattern
 
     // === WIREFRAME PIPELINE ===
     // Note: May fail on MoltenVK/macOS if fillModeNonSolid is not supported

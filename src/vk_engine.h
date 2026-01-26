@@ -464,11 +464,13 @@ public:
     AllocatedBuffer pointLightBuffer;                // GPU’ya gönderilecek buffer
     void sync_point_light_spheres();
     enum class ViewMode {
-        Wireframe = 0,
-        Shaded = 1,            // sadece shader-only objeler (statik_shapes)
-        MaterialPreview = 2,   // materyal debug görüntüsü
-        Rendered = 3,          // GLTF/GLB PBR forward render (gerçek zamanlı)
-        PathTraced = 4         // (yeni) Path tracing için özel render modu
+        Solid = 0,             // Flat color, no lighting - fastest
+        Shaded = 1,            // Hemisphere + N·L studio lighting
+        MaterialPreview = 2,   // IBL-based material preview
+        Rendered = 3,          // Full PBR with scene lights
+        Wireframe = 4,         // Edge visualization
+        Normals = 5,           // World-space normals as RGB
+        UVChecker = 6          // UV checker pattern debug
     };
     bool _showGrid = true;
     bool _showOutline = true;
@@ -476,6 +478,23 @@ public:
     VkPipeline _wireframePipeline = VK_NULL_HANDLE;
     VkPipelineLayout _wireframePipelineLayout = VK_NULL_HANDLE;
     void init_wireframe_pipeline();
+
+    // View mode pipelines
+    VkPipeline _solidPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _solidPipelineLayout = VK_NULL_HANDLE;
+    void init_solid_pipeline();
+
+    VkPipeline _shadedPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _shadedPipelineLayout = VK_NULL_HANDLE;
+    void init_shaded_pipeline();
+
+    VkPipeline _normalsPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _normalsPipelineLayout = VK_NULL_HANDLE;
+    void init_normals_pipeline();
+
+    VkPipeline _uvCheckerPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _uvCheckerPipelineLayout = VK_NULL_HANDLE;
+    void init_uvchecker_pipeline();
     void init_outline_pipeline();
 	/*void draw_outline(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor);*/
     //void draw_visible_objects_panel();
@@ -536,6 +555,27 @@ public:
     GPUMeshBuffers generate_torus_mesh();
     GPUMeshBuffers generate_triangle_mesh();
     void draw_shaded(
+        VkCommandBuffer cmd,
+        VkDescriptorSet globalDescriptor,
+        VkViewport viewport,
+        VkRect2D scissor,
+        const std::vector<uint32_t>& opaque_draws);
+
+    void draw_solid(
+        VkCommandBuffer cmd,
+        VkDescriptorSet globalDescriptor,
+        VkViewport viewport,
+        VkRect2D scissor,
+        const std::vector<uint32_t>& opaque_draws);
+
+    void draw_normals(
+        VkCommandBuffer cmd,
+        VkDescriptorSet globalDescriptor,
+        VkViewport viewport,
+        VkRect2D scissor,
+        const std::vector<uint32_t>& opaque_draws);
+
+    void draw_uvchecker(
         VkCommandBuffer cmd,
         VkDescriptorSet globalDescriptor,
         VkViewport viewport,

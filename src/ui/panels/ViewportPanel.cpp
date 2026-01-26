@@ -31,7 +31,7 @@ void ViewportPanel::RenderViewModeSection() {
     if (ImGui::CollapsingHeader("View Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
-        const char* viewModes[] = { "Wireframe", "Shaded", "Material Preview", "Rendered", "Path Traced" };
+        const char* viewModes[] = { "Solid", "Shaded", "Material Preview", "Rendered", "Wireframe", "Normals", "UV Checker" };
         int currentMode = static_cast<int>(m_Engine->_currentViewMode);
 
         ImGui::SetNextItemWidth(-1);
