@@ -1,4 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
+include(FetchContent)
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 # Vulkan should already be found in the parent CMakeLists.txt
 # Only search if Vulkan::Vulkan target doesn't exist
@@ -12,7 +14,29 @@ endif()
 
 set(FASTGLTF_DOWNLOAD_SIMDJSON ON CACHE BOOL "" FORCE)
 
-add_subdirectory(fastgltf)
+# ==========================================================
+# fastgltf (vendored varsa kullan, yoksa indir)
+# ==========================================================
+
+set(FASTGLTF_DOWNLOAD_SIMDJSON ON CACHE BOOL "" FORCE)
+
+set(_FASTGLTF_VENDOR_OK OFF)
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fastgltf/CMakeLists.txt"
+        AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fastgltf/cmake/compiler_flags.cmake")
+    set(_FASTGLTF_VENDOR_OK ON)
+endif()
+
+if (_FASTGLTF_VENDOR_OK)
+    message(STATUS "Using vendored fastgltf")
+    add_subdirectory(fastgltf)
+else()
+    message(STATUS "Vendored fastgltf broken. Fetching from GitHub...")
+    FetchContent_Declare(fastgltf
+            GIT_REPOSITORY https://github.com/spnda/fastgltf.git
+            GIT_TAG        v0.9.0
+    )
+    FetchContent_MakeAvailable(fastgltf)
+endif()
 
 # Fix simdjson Debug build issue with GCC/Clang (always_inline requires matching arch flags)
 # simdjson performs runtime CPU detection, so -march=native only affects compilation,
@@ -43,7 +67,31 @@ target_compile_definitions(fmt INTERFACE FMT_HEADER_ONLY=1)
 # SDL
 # ==========================================================
 
-add_subdirectory(SDL EXCLUDE_FROM_ALL)
+# ==========================================================
+# SDL2 (vendored varsa kullan, yoksa indir)
+# ==========================================================
+
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON  CACHE BOOL "" FORCE)
+set(SDL_TEST   OFF CACHE BOOL "" FORCE)
+
+set(_SDL_VENDOR_OK OFF)
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/SDL/CMakeLists.txt"
+        AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/SDL/cmake/macros.cmake")
+    set(_SDL_VENDOR_OK ON)
+endif()
+
+if (_SDL_VENDOR_OK)
+    message(STATUS "Using vendored SDL2")
+    add_subdirectory(SDL EXCLUDE_FROM_ALL)
+else()
+    message(STATUS "Vendored SDL2 broken. Fetching SDL2 from GitHub...")
+    FetchContent_Declare(SDL2
+            GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+            GIT_TAG        release-2.30.6
+    )
+    FetchContent_MakeAvailable(SDL2)
+endif()
 
 # ==========================================================
 # vkbootstrap
