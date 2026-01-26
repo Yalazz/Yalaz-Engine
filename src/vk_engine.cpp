@@ -5692,27 +5692,8 @@ void VulkanEngine::draw_viewing(VkCommandBuffer cmd)
     // First, draw geometry to initialize globalDescriptor
     // NOTE: PathTraced compute dispatch must happen OUTSIDE the render pass
     // (done in draw_main before vkCmdBeginRendering)
-    switch (_currentViewMode)
-    {
-    case ViewMode::Shaded:
-        draw_geometry(cmd);
-        break;
-
-    case ViewMode::Rendered:
-        draw_geometry(cmd);
-        break;
-
-    case ViewMode::PathTraced:
-        // Compute dispatch was already done before render pass
-        draw_geometry(cmd);
-        break;
-
-    case ViewMode::Wireframe:
-    case ViewMode::MaterialPreview:
-    default:
-        draw_geometry(cmd);
-        break;
-    }
+    // All view modes use draw_geometry which handles the mode-specific rendering
+    draw_geometry(cmd);
 
     // Grid drawn after geometry so globalDescriptor is initialized
     if (_showGrid && globalDescriptor != VK_NULL_HANDLE)
@@ -9874,29 +9855,6 @@ void VulkanEngine::init_vulkan()
     vmaCreateAllocator(&allocatorInfo, &_allocator);
 }
 
-    PipelineBuilder builder;
-    builder._pipelineLayout = _normalsPipelineLayout;
-    builder.set_shaders(vertShader, fragShader);
-    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
-    builder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
-    builder.set_multisampling_none();
-    builder.disable_blending();
-    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    builder.set_color_attachment_format(_drawImage.imageFormat);
-    builder.set_depth_format(_depthImage.imageFormat);
-
-    builder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    builder._renderInfo.colorAttachmentCount = 1;
-    builder._renderInfo.pColorAttachmentFormats = &builder._colorAttachmentformat;
-    builder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
-
-    _normalsPipeline = builder.build_pipeline(_device);
-
-    vkDestroyShaderModule(_device, vertShader, nullptr);
-    vkDestroyShaderModule(_device, fragShader, nullptr);
-}
-
 // =============================================================================
 // UV CHECKER PIPELINE - Procedural checker pattern for UV debugging
 // =============================================================================
@@ -10008,55 +9966,6 @@ void VulkanEngine::init_swapchain()
     VK_CHECK(vkCreateImageView(_device, &dview_info, nullptr, &_depthImage.imageView));
 
     // Note: Draw and depth images are cleaned up explicitly in cleanup()
-}
-
-void VulkanEngine::init_shaded_pipeline()
-{
-    VkShaderModule vertShader;
-    VkShaderModule fragShader;
-
-    vkutil::load_shader_module("../../shaders/mesh.vert.spv", _device, &vertShader);
-    vkutil::load_shader_module("../../shaders/mesh.frag.spv", _device, &fragShader);
-
-    VkPushConstantRange push_constant{};
-    push_constant.offset = 0;
-    push_constant.size = sizeof(GPUDrawPushConstants);
-    push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-    VkDescriptorSetLayout layouts[] = {
-        _gpuSceneDataDescriptorLayout,
-        _drawImageDescriptorLayout
-    };
-
-    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
-    pipeline_layout_info.setLayoutCount = 2;
-    pipeline_layout_info.pSetLayouts = layouts;
-    pipeline_layout_info.pushConstantRangeCount = 1;
-    pipeline_layout_info.pPushConstantRanges = &push_constant;
-
-    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_shadedPipelineLayout));
-
-    PipelineBuilder builder;
-    builder._pipelineLayout = _shadedPipelineLayout;
-    builder.set_shaders(vertShader, fragShader);
-    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
-    builder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
-    builder.set_multisampling_none();
-    builder.disable_blending();
-    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    builder.set_color_attachment_format(_drawImage.imageFormat);
-    builder.set_depth_format(_depthImage.imageFormat);
-
-    builder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    builder._renderInfo.colorAttachmentCount = 1;
-    builder._renderInfo.pColorAttachmentFormats = &builder._colorAttachmentformat;
-    builder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
-
-    _shadedPipeline = builder.build_pipeline(_device);
-
-    vkDestroyShaderModule(_device, vertShader, nullptr);
-    vkDestroyShaderModule(_device, fragShader, nullptr);
 }
 
 // =============================================================================
@@ -10201,8 +10110,28 @@ void VulkanEngine::init_normals_pipeline() {
 
     VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_normalsPipelineLayout));
 
+    PipelineBuilder builder;
+    builder._pipelineLayout = _normalsPipelineLayout;
+    builder.set_shaders(vertShader, fragShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_drawImage.imageFormat);
+    builder.set_depth_format(_depthImage.imageFormat);
 
+    builder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    builder._renderInfo.colorAttachmentCount = 1;
+    builder._renderInfo.pColorAttachmentFormats = &builder._colorAttachmentformat;
+    builder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
 
+    _normalsPipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+}
 
 
 

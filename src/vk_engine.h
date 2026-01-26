@@ -771,16 +771,12 @@ public:
     VkPipelineLayout _materialPreviewPipelineLayout;
     VkPipeline _materialPreviewPipeline;           
     void init_material_preview_pipeline();
-	void init_shaded_pipeline();
     void draw_wireframe(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor, const std::vector<uint32_t>& opaque_draws);
     void draw_material_preview(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor, const std::vector<uint32_t>& opaque_draws);
     void draw_rendered(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor, const std::vector<uint32_t>& opaque_draws);
-   
+
     void draw_rendered_pathtraced(VkCommandBuffer cmd);
 	void init_pathtrace_pipeline();
-    void draw_shaded(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor);
-    VkPipelineLayout _shadedPipelineLayout;
-    VkPipeline _shadedPipeline;
 
     static VulkanEngine& Get();
     void destroy_buffer(const AllocatedBuffer& buffer);
