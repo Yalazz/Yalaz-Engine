@@ -2598,7 +2598,7 @@ extern "C" __declspec(dllimport) int __stdcall WriteConsoleW(  //
 #endif
 
 namespace detail {
-FMT_FUNC void print(std::FILE* f, string_view text) {
+FMT_FUNC void print(std::FILE* f, string_view text) "{
 #ifdef _WIN32
   auto fd = _fileno(f);
   if (_isatty(fd)) {

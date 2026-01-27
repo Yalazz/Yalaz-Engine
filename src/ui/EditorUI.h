@@ -56,6 +56,7 @@ private:
     EditorUI& operator=(const EditorUI&) = delete;
 
     void CalculateLayout();
+    void RenderMenuBar();
     void RenderPanels();
 
     VulkanEngine* m_Engine = nullptr;

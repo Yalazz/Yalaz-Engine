@@ -799,6 +799,13 @@ public:
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
     std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
+    std::unordered_map<std::string, std::string> sceneFilePaths; // name -> file path
+
+    // Engine state save/load/reset
+    void saveState(const std::string& filepath);
+    void loadState(const std::string& filepath);
+    void resetState();
+
     void destroy_image(const AllocatedImage& img);
     void init();
     void cleanup();

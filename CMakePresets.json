@@ -13,68 +13,170 @@
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
             }
         },
+
         {
-            "name": "ninja-windows-base",
+            "name": "windows-ninja-base",
             "hidden": true,
             "inherits": "base",
             "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
-                "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
-                "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe"
-            },
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Windows"
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++"
             }
         },
         {
+            "name": "windows-msvc-base",
+            "hidden": true,
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            }
+        },
+
+        {
             "name": "debug",
-            "displayName": "Debug (Windows/Ninja)",
-            "description": "Debug build - Validation ON, No optimization",
-            "inherits": "ninja-windows-base",
-            "binaryDir": "${sourceDir}/build/debug",
+            "displayName": "Debug",
+            "description": "Debug build with Ninja - Validation ON",
+            "inherits": "windows-ninja-base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug"
             }
         },
         {
             "name": "release",
-            "displayName": "Release (Windows/Ninja)",
-            "description": "Release build - Optimized, Validation OFF",
-            "inherits": "ninja-windows-base",
-            "binaryDir": "${sourceDir}/build/release",
+            "displayName": "Release",
+            "description": "Release build with Ninja - Optimized",
+            "inherits": "windows-ninja-base",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist"
+                "CMAKE_BUILD_TYPE": "Release"
             }
         },
         {
             "name": "relwithdebinfo",
-            "displayName": "RelWithDebInfo (Windows/Ninja)",
+            "displayName": "RelWithDebInfo",
             "description": "Release with debug symbols",
-            "inherits": "ninja-windows-base",
-            "binaryDir": "${sourceDir}/build/relwithdebinfo",
+            "inherits": "windows-ninja-base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo"
             }
         },
         {
             "name": "minsizerel",
-            "displayName": "MinSizeRel (Windows/Ninja)",
+            "displayName": "MinSizeRel",
             "description": "Minimum size release build",
-            "inherits": "ninja-windows-base",
-            "binaryDir": "${sourceDir}/build/minsizerel",
+            "inherits": "windows-ninja-base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel"
             }
         },
+
+        {
+            "name": "msvc-debug",
+            "displayName": "MSVC Debug",
+            "description": "Debug build with MSVC compiler",
+            "inherits": "windows-msvc-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl"
+            }
+        },
+        {
+            "name": "msvc-release",
+            "displayName": "MSVC Release",
+            "description": "Release build with MSVC compiler",
+            "inherits": "windows-msvc-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl"
+            }
+        },
+
+        {
+            "name": "clang-debug",
+            "displayName": "Clang Debug",
+            "description": "Debug build with Clang compiler",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++"
+            }
+        },
+        {
+            "name": "clang-release",
+            "displayName": "Clang Release",
+            "description": "Release build with Clang compiler",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++"
+            }
+        },
+
+        {
+            "name": "mingw-debug",
+            "displayName": "MinGW Debug",
+            "description": "Debug build with MinGW Makefiles",
+            "inherits": "base",
+            "generator": "MinGW Makefiles",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
+        },
+        {
+            "name": "mingw-release",
+            "displayName": "MinGW Release",
+            "description": "Release build with MinGW Makefiles",
+            "inherits": "base",
+            "generator": "MinGW Makefiles",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
+        },
+
+        {
+            "name": "vs2022",
+            "displayName": "Visual Studio 2022",
+            "description": "VS2022 multi-config project",
+            "inherits": "base",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "toolset": "host=x64",
+            "binaryDir": "${sourceDir}/build/vs2022"
+        },
+        {
+            "name": "vs2022-clang",
+            "displayName": "Visual Studio 2022 (ClangCL)",
+            "description": "VS2022 with Clang/LLVM toolset",
+            "inherits": "base",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "toolset": "ClangCL",
+            "binaryDir": "${sourceDir}/build/vs2022-clang"
+        },
+
         {
             "name": "package",
-            "displayName": "Package Build (Windows)",
-            "description": "Release build configured for packaging",
-            "inherits": "ninja-windows-base",
-            "binaryDir": "${sourceDir}/build/package",
+            "displayName": "Package Build",
+            "description": "Release build for packaging/distribution",
+            "inherits": "windows-ninja-base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
@@ -82,94 +184,14 @@
                 "YALAZ_INCLUDE_ASSETS": "ON"
             }
         },
-        {
-            "name": "mingw-base",
-            "hidden": true,
-            "inherits": "base",
-            "generator": "MinGW Makefiles",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
-                "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe"
-            },
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Windows"
-            }
-        },
-        {
-            "name": "mingw-debug",
-            "displayName": "MinGW Debug",
-            "description": "Debug build with MinGW Makefiles",
-            "inherits": "mingw-base",
-            "binaryDir": "${sourceDir}/build/mingw-debug",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
-            }
-        },
-        {
-            "name": "mingw-release",
-            "displayName": "MinGW Release",
-            "description": "Release build with MinGW Makefiles",
-            "inherits": "mingw-base",
-            "binaryDir": "${sourceDir}/build/mingw-release",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist"
-            }
-        },
-        {
-            "name": "vs2022-base",
-            "hidden": true,
-            "inherits": "base",
-            "generator": "Visual Studio 17 2022",
-            "architecture": "x64",
-            "toolset": "host=x64",
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Windows"
-            }
-        },
-        {
-            "name": "vs2022",
-            "displayName": "Visual Studio 2022",
-            "description": "VS2022 multi-config (Debug/Release)",
-            "inherits": "vs2022-base",
-            "binaryDir": "${sourceDir}/build/vs2022",
-            "cacheVariables": {
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist"
-            }
-        },
-        {
-            "name": "vs2022-static",
-            "displayName": "Visual Studio 2022 (Static Runtime)",
-            "description": "VS2022 with static MSVC runtime for portable builds",
-            "inherits": "vs2022-base",
-            "binaryDir": "${sourceDir}/build/vs2022-static",
-            "cacheVariables": {
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
-                "YALAZ_STATIC_RUNTIME": "ON",
-                "YALAZ_BUILD_STANDALONE": "ON"
-            }
-        },
-        {
-            "name": "linux-base",
-            "hidden": true,
-            "inherits": "base",
-            "generator": "Ninja",
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Linux"
-            }
-        },
+
         {
             "name": "linux-debug",
             "displayName": "Linux Debug",
-            "description": "Debug build for Linux with Ninja",
-            "inherits": "linux-base",
-            "binaryDir": "${sourceDir}/build/debug",
+            "description": "Debug build for Linux",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug"
             }
@@ -177,54 +199,47 @@
         {
             "name": "linux-release",
             "displayName": "Linux Release",
-            "description": "Release build for Linux with Ninja",
-            "inherits": "linux-base",
-            "binaryDir": "${sourceDir}/build/release",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist"
-            }
-        },
-        {
-            "name": "linux-relwithdebinfo",
-            "displayName": "Linux RelWithDebInfo",
-            "description": "Release with Debug Info for Linux",
-            "inherits": "linux-base",
-            "binaryDir": "${sourceDir}/build/relwithdebinfo",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
-            }
-        },
-        {
-            "name": "linux-package",
-            "displayName": "Linux Package Build",
-            "description": "Release build configured for packaging",
-            "inherits": "linux-base",
-            "binaryDir": "${sourceDir}/build/package",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
-                "YALAZ_BUILD_STANDALONE": "ON",
-                "YALAZ_INCLUDE_ASSETS": "ON"
-            }
-        },
-        {
-            "name": "linux-makefiles-base",
-            "hidden": true,
+            "description": "Release build for Linux",
             "inherits": "base",
-            "generator": "Unix Makefiles",
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Linux"
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "linux-clang-debug",
+            "displayName": "Linux Clang Debug",
+            "description": "Debug build for Linux with Clang",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++"
+            }
+        },
+        {
+            "name": "linux-clang-release",
+            "displayName": "Linux Clang Release",
+            "description": "Release build for Linux with Clang",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++"
             }
         },
         {
             "name": "linux-makefiles-debug",
             "displayName": "Linux Makefiles Debug",
-            "description": "Debug build for Linux with Unix Makefiles",
-            "inherits": "linux-makefiles-base",
-            "binaryDir": "${sourceDir}/build/makefiles-debug",
+            "description": "Debug build with Unix Makefiles (no Ninja)",
+            "inherits": "base",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug"
             }
@@ -232,65 +247,21 @@
         {
             "name": "linux-makefiles-release",
             "displayName": "Linux Makefiles Release",
-            "description": "Release build for Linux with Unix Makefiles",
-            "inherits": "linux-makefiles-base",
-            "binaryDir": "${sourceDir}/build/makefiles-release",
+            "description": "Release build with Unix Makefiles (no Ninja)",
+            "inherits": "base",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist"
+                "CMAKE_BUILD_TYPE": "Release"
             }
         },
         {
-            "name": "macos-base",
-            "hidden": true,
+            "name": "linux-package",
+            "displayName": "Linux Package",
+            "description": "Linux release build for packaging",
             "inherits": "base",
             "generator": "Ninja",
-            "cacheVariables": {
-                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
-            },
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Darwin"
-            }
-        },
-        {
-            "name": "macos-debug",
-            "displayName": "macOS Debug",
-            "description": "Debug build for macOS with Ninja (MoltenVK)",
-            "inherits": "macos-base",
-            "binaryDir": "${sourceDir}/build/debug",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
-            }
-        },
-        {
-            "name": "macos-release",
-            "displayName": "macOS Release",
-            "description": "Release build for macOS with Ninja (MoltenVK)",
-            "inherits": "macos-base",
-            "binaryDir": "${sourceDir}/build/release",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist"
-            }
-        },
-        {
-            "name": "macos-relwithdebinfo",
-            "displayName": "macOS RelWithDebInfo",
-            "description": "Release with Debug Info for macOS",
-            "inherits": "macos-base",
-            "binaryDir": "${sourceDir}/build/relwithdebinfo",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
-            }
-        },
-        {
-            "name": "macos-package",
-            "displayName": "macOS Package Build",
-            "description": "Release build configured for DMG packaging",
-            "inherits": "macos-base",
-            "binaryDir": "${sourceDir}/build/package",
+            "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
@@ -298,212 +269,323 @@
                 "YALAZ_INCLUDE_ASSETS": "ON"
             }
         },
+
+        {
+            "name": "macos-debug",
+            "displayName": "macOS Debug",
+            "description": "Debug build for macOS (MoltenVK)",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
+            }
+        },
+        {
+            "name": "macos-release",
+            "displayName": "macOS Release",
+            "description": "Release build for macOS (MoltenVK)",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
+            }
+        },
+        {
+            "name": "macos-arm64",
+            "displayName": "macOS ARM64 (Apple Silicon)",
+            "description": "Release build for Apple Silicon",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+                "CMAKE_OSX_ARCHITECTURES": "arm64"
+            }
+        },
+        {
+            "name": "macos-x64",
+            "displayName": "macOS x64 (Intel)",
+            "description": "Release build for Intel Mac",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+                "CMAKE_OSX_ARCHITECTURES": "x86_64"
+            }
+        },
+        {
+            "name": "macos-universal",
+            "displayName": "macOS Universal Binary",
+            "description": "Fat binary for ARM64 + x86_64",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+                "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64"
+            }
+        },
+        {
+            "name": "macos-package",
+            "displayName": "macOS Package",
+            "description": "macOS release build for DMG packaging",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
+                "YALAZ_BUILD_STANDALONE": "ON",
+                "YALAZ_INCLUDE_ASSETS": "ON"
+            }
+        },
         {
             "name": "xcode",
-            "displayName": "Xcode (Use Xcode.app, NOT CLion)",
-            "description": "Xcode project - Open with Xcode.app only",
-            "hidden": true,
+            "displayName": "Xcode",
+            "description": "Xcode project (use with Xcode.app)",
             "inherits": "base",
             "generator": "Xcode",
             "binaryDir": "${sourceDir}/build/xcode",
             "cacheVariables": {
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
                 "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
-            },
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Darwin"
+            }
+        },
+
+        {
+            "name": "asan",
+            "displayName": "Address Sanitizer",
+            "description": "Debug build with ASAN for memory error detection",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "YALAZ_ENABLE_ASAN": "ON"
+            }
+        },
+        {
+            "name": "tsan",
+            "displayName": "Thread Sanitizer",
+            "description": "Debug build with TSAN for race detection",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "YALAZ_ENABLE_TSAN": "ON"
+            }
+        },
+        {
+            "name": "ubsan",
+            "displayName": "UB Sanitizer",
+            "description": "Debug build with UBSAN for undefined behavior",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "YALAZ_ENABLE_UBSAN": "ON"
+            }
+        },
+
+        {
+            "name": "ci-windows",
+            "displayName": "CI Windows",
+            "description": "GitHub Actions Windows build",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "YALAZ_BUILD_STANDALONE": "ON"
+            }
+        },
+        {
+            "name": "ci-linux",
+            "displayName": "CI Linux",
+            "description": "GitHub Actions Linux build",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "YALAZ_BUILD_STANDALONE": "ON"
+            }
+        },
+        {
+            "name": "ci-macos",
+            "displayName": "CI macOS",
+            "description": "GitHub Actions macOS build",
+            "inherits": "base",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+                "YALAZ_BUILD_STANDALONE": "ON"
             }
         }
     ],
+
     "buildPresets": [
         {
             "name": "debug-build",
-            "displayName": "Debug Build",
+            "displayName": "Build Debug",
             "configurePreset": "debug"
         },
         {
             "name": "release-build",
-            "displayName": "Release Build",
+            "displayName": "Build Release",
             "configurePreset": "release"
         },
         {
-            "name": "relwithdebinfo-build",
-            "displayName": "RelWithDebInfo Build",
-            "configurePreset": "relwithdebinfo"
+            "name": "msvc-debug-build",
+            "displayName": "Build MSVC Debug",
+            "configurePreset": "msvc-debug"
         },
         {
-            "name": "minsizerel-build",
-            "displayName": "MinSizeRel Build",
-            "configurePreset": "minsizerel"
+            "name": "msvc-release-build",
+            "displayName": "Build MSVC Release",
+            "configurePreset": "msvc-release"
         },
         {
-            "name": "package-build",
-            "displayName": "Package Build",
-            "configurePreset": "package"
+            "name": "clang-debug-build",
+            "displayName": "Build Clang Debug",
+            "configurePreset": "clang-debug"
         },
         {
-            "name": "mingw-debug-build",
-            "displayName": "MinGW Debug Build",
-            "configurePreset": "mingw-debug"
-        },
-        {
-            "name": "mingw-release-build",
-            "displayName": "MinGW Release Build",
-            "configurePreset": "mingw-release"
+            "name": "clang-release-build",
+            "displayName": "Build Clang Release",
+            "configurePreset": "clang-release"
         },
         {
             "name": "vs2022-debug",
-            "displayName": "VS2022 Debug",
+            "displayName": "Build VS2022 Debug",
             "configurePreset": "vs2022",
             "configuration": "Debug"
         },
         {
             "name": "vs2022-release",
-            "displayName": "VS2022 Release",
+            "displayName": "Build VS2022 Release",
             "configurePreset": "vs2022",
             "configuration": "Release"
         },
         {
-            "name": "vs2022-static-release",
-            "displayName": "VS2022 Static Release",
-            "configurePreset": "vs2022-static",
-            "configuration": "Release"
+            "name": "package-build",
+            "displayName": "Build Package",
+            "configurePreset": "package"
         },
         {
             "name": "linux-debug-build",
-            "displayName": "Linux Debug Build",
+            "displayName": "Build Linux Debug",
             "configurePreset": "linux-debug"
         },
         {
             "name": "linux-release-build",
-            "displayName": "Linux Release Build",
+            "displayName": "Build Linux Release",
             "configurePreset": "linux-release"
         },
         {
-            "name": "linux-relwithdebinfo-build",
-            "displayName": "Linux RelWithDebInfo Build",
-            "configurePreset": "linux-relwithdebinfo"
-        },
-        {
             "name": "linux-package-build",
-            "displayName": "Linux Package Build",
+            "displayName": "Build Linux Package",
             "configurePreset": "linux-package"
         },
         {
             "name": "macos-debug-build",
-            "displayName": "macOS Debug Build",
+            "displayName": "Build macOS Debug",
             "configurePreset": "macos-debug"
         },
         {
             "name": "macos-release-build",
-            "displayName": "macOS Release Build",
+            "displayName": "Build macOS Release",
             "configurePreset": "macos-release"
         },
         {
-            "name": "macos-relwithdebinfo-build",
-            "displayName": "macOS RelWithDebInfo Build",
-            "configurePreset": "macos-relwithdebinfo"
-        },
-        {
             "name": "macos-package-build",
-            "displayName": "macOS Package Build",
+            "displayName": "Build macOS Package",
             "configurePreset": "macos-package"
         },
         {
             "name": "xcode-debug",
-            "displayName": "Xcode Debug",
+            "displayName": "Build Xcode Debug",
             "configurePreset": "xcode",
             "configuration": "Debug"
         },
         {
             "name": "xcode-release",
-            "displayName": "Xcode Release",
+            "displayName": "Build Xcode Release",
             "configurePreset": "xcode",
             "configuration": "Release"
         }
     ],
+
     "packagePresets": [
         {
-            "name": "windows-package",
-            "displayName": "Windows Package (NSIS + ZIP)",
-            "configurePreset": "package",
-            "generators": ["NSIS", "ZIP"]
-        },
-        {
-            "name": "windows-zip-only",
-            "displayName": "Windows ZIP Only",
+            "name": "windows-zip",
+            "displayName": "Windows ZIP",
             "configurePreset": "package",
             "generators": ["ZIP"]
         },
         {
-            "name": "vs2022-package",
-            "displayName": "VS2022 Package",
-            "configurePreset": "vs2022",
-            "generators": ["NSIS", "ZIP"],
-            "configurations": ["Release"]
+            "name": "windows-nsis",
+            "displayName": "Windows NSIS Installer",
+            "configurePreset": "package",
+            "generators": ["NSIS"]
         },
         {
-            "name": "linux-package",
-            "displayName": "Linux Package (TGZ + DEB)",
-            "configurePreset": "linux-package",
-            "generators": ["TGZ", "DEB"]
-        },
-        {
-            "name": "linux-tgz-only",
-            "displayName": "Linux TGZ Only",
+            "name": "linux-tgz",
+            "displayName": "Linux TGZ",
             "configurePreset": "linux-package",
             "generators": ["TGZ"]
         },
         {
-            "name": "macos-package",
-            "displayName": "macOS Package (DMG + ZIP)",
-            "configurePreset": "macos-package",
-            "generators": ["DragNDrop", "ZIP"]
+            "name": "linux-deb",
+            "displayName": "Linux DEB",
+            "configurePreset": "linux-package",
+            "generators": ["DEB"]
         },
         {
-            "name": "macos-dmg-only",
-            "displayName": "macOS DMG Only",
+            "name": "macos-dmg",
+            "displayName": "macOS DMG",
             "configurePreset": "macos-package",
             "generators": ["DragNDrop"]
         },
         {
-            "name": "xcode-package",
-            "displayName": "Xcode Package (DMG)",
-            "configurePreset": "xcode",
-            "generators": ["DragNDrop"],
-            "configurations": ["Release"]
+            "name": "macos-zip",
+            "displayName": "macOS ZIP",
+            "configurePreset": "macos-package",
+            "generators": ["ZIP"]
         }
     ],
+
     "workflowPresets": [
         {
-            "name": "windows-release-workflow",
-            "displayName": "Windows: Build & Package Release",
+            "name": "dev",
+            "displayName": "Development Build",
+            "steps": [
+                {"type": "configure", "name": "debug"},
+                {"type": "build", "name": "debug-build"}
+            ]
+        },
+        {
+            "name": "release-workflow",
+            "displayName": "Release Build & Package",
             "steps": [
                 {"type": "configure", "name": "package"},
                 {"type": "build", "name": "package-build"},
-                {"type": "package", "name": "windows-package"}
-            ]
-        },
-        {
-            "name": "linux-release-workflow",
-            "displayName": "Linux: Build & Package Release",
-            "steps": [
-                {"type": "configure", "name": "linux-package"},
-                {"type": "build", "name": "linux-package-build"},
-                {"type": "package", "name": "linux-package"}
-            ]
-        },
-        {
-            "name": "macos-release-workflow",
-            "displayName": "macOS: Build & Package Release",
-            "steps": [
-                {"type": "configure", "name": "macos-package"},
-                {"type": "build", "name": "macos-package-build"},
-                {"type": "package", "name": "macos-package"}
+                {"type": "package", "name": "windows-zip"}
             ]
         }
     ],
+
     "testPresets": []
 }

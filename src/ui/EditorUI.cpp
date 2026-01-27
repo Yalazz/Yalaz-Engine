@@ -8,6 +8,7 @@
 #include "panels/ViewportPanel.h"
 #include "panels/LightingPanel.h"
 #include "panels/ConsolePanel.h"
+#include "../vk_engine.h"
 
 namespace Yalaz::UI {
 
@@ -45,8 +46,46 @@ void EditorUI::Render() {
         m_LayoutDirty = false;
     }
 
+    // Render menu bar
+    RenderMenuBar();
+
     // Apply cached positions and render panels directly
     RenderPanels();
+}
+
+void EditorUI::RenderMenuBar() {
+    if (!m_Engine) return;
+
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+                m_Engine->saveState("scene.json");
+            }
+            if (ImGui::MenuItem("Load Scene", "Ctrl+O")) {
+                m_Engine->loadState("scene.json");
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reset Engine", "Ctrl+R")) {
+                m_Engine->resetState();
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+
+    // Keyboard shortcuts
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyCtrl && !io.WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+            m_Engine->saveState("scene.json");
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_O, false)) {
+            m_Engine->loadState("scene.json");
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+            m_Engine->resetState();
+        }
+    }
 }
 
 void EditorUI::CalculateLayout() {

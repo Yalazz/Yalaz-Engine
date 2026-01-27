@@ -12,6 +12,7 @@
 #include "tiny_obj_loader.h"
 
 #include "vk_loader.h"
+#include "engine_state.h"
 
 #include <vk_types.h>
 #include <vk_initializers.h>
@@ -110,11 +111,8 @@ void VulkanEngine::init()
     // everything went fine
     _isInitialized = true;
 
-    mainCamera.velocity = glm::vec3(0.0f);
-
-    // Kamera konumu
-    mainCamera.position = glm::vec3(0, 0, 5); // X=30, Z=-85'te
-    mainCamera.yaw = 0.0f;   // +Z yönüne bakıyor
+    mainCamera.position = glm::vec3(0, 0, 5);
+    mainCamera.yaw = 0.0f;
     mainCamera.pitch = 0.0f;
 }
 
@@ -9029,7 +9027,9 @@ void VulkanEngine::run()
 
 
 void VulkanEngine::update_scene() {
-    mainCamera.update();
+    float dt = stats.frametime / 1000.f; // frametime is in ms, convert to seconds
+    if (dt <= 0.f) dt = 1.f / 60.f;     // fallback for first frame
+    mainCamera.update(dt);
 
     glm::mat4 view = mainCamera.getViewMatrix();
 
@@ -9037,9 +9037,9 @@ void VulkanEngine::update_scene() {
     VkViewport viewport = get_letterbox_viewport();
     float aspect = viewport.width / viewport.height;
 
-    float fov = glm::radians(70.0f);
-    float nearPlane = 0.1f;
-    float farPlane = 10000.0f;
+    float fov = glm::radians(mainCamera.fov);
+    float nearPlane = mainCamera.nearPlane;
+    float farPlane = mainCamera.farPlane;
 
     // Reverse-Z perspective
     glm::mat4 projection = glm::perspectiveRH_ZO(fov, aspect, farPlane, nearPlane);
@@ -10454,6 +10454,7 @@ void VulkanEngine::init_renderables()
         auto gltfScene = loadGltf(this, path);
         if (gltfScene.has_value()) {
             loadedScenes[name] = *gltfScene;
+            sceneFilePaths[name] = path;
             fmt::print("Loaded GLB: {} as {}\n", path, name);
         }
         else {
@@ -10469,9 +10470,10 @@ void VulkanEngine::init_renderables()
 
     for (size_t i = 0; i < objFiles.size(); ++i) {
         const auto& [name, path] = objFiles[i];
-		auto objScene = loadObj(this, path); // load_obj_mesh yerine loadObj kullanmak sanırım daha uygun??! load_obj_mesh bu fonksiyon hala bulunuyor ama gerektiginde statik cisim cagırmak için deneyebilirim-- OBJ CALISMIYOR --
+		auto objScene = loadObj(this, path);
         if (objScene.has_value()) {
             loadedScenes[name] = *objScene;
+            sceneFilePaths[name] = path;
             fmt::print("Loaded OBJ: {} as {}\n", path, name);
         }
         else {
@@ -10480,7 +10482,17 @@ void VulkanEngine::init_renderables()
     }
 }
 
+void VulkanEngine::saveState(const std::string& filepath) {
+    saveEngineState(*this, filepath);
+}
 
+void VulkanEngine::loadState(const std::string& filepath) {
+    loadEngineState(*this, filepath);
+}
+
+void VulkanEngine::resetState() {
+    resetEngineState(*this);
+}
 
 
 

@@ -29,6 +29,8 @@ add_executable(Yalaz_Engine
     vk_loader.cpp
     camera.cpp
     camera.h
+    engine_state.h
+    engine_state.cpp
 
     # UI System - Professional OOP Architecture
     ui/Panel.h
@@ -140,6 +142,7 @@ target_link_libraries(Yalaz_Engine PUBLIC
     stb_image
     tinyobjloader
     Vulkan::Vulkan
+    nlohmann_json::nlohmann_json
 )
 
 # Platform-specific libraries

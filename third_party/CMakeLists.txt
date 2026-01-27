@@ -54,14 +54,31 @@ if (TARGET fastgltf_simdjson AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_
 endif()
 
 # ==========================================================
-# fmt (header-only)
+# fmt (fetch newer version to avoid ambiguous overload issues)
 # ==========================================================
 
-add_library(fmt INTERFACE)
-target_include_directories(fmt INTERFACE
-        ${CMAKE_CURRENT_SOURCE_DIR}/fmt/include
+# The vendored fmt 8.x has known issues with newer compilers
+# Fetch a modern version that works correctly
+FetchContent_Declare(fmt
+    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+    GIT_TAG        11.0.2
 )
-target_compile_definitions(fmt INTERFACE FMT_HEADER_ONLY=1)
+set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
+set(FMT_DOC OFF CACHE BOOL "" FORCE)
+set(FMT_TEST OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(fmt)
+
+# ==========================================================
+# nlohmann/json (header-only JSON library)
+# ==========================================================
+
+FetchContent_Declare(json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(json)
 
 # ==========================================================
 # SDL
