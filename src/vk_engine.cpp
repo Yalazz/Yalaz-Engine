@@ -1426,13 +1426,17 @@ void VulkanEngine::init_default_data() {
 
 void VulkanEngine::draw_main(VkCommandBuffer cmd)
 {
-    ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
-
-    // Compute pipeline bind (arka plan efekti vs.)
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, effect.pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _gradientPipelineLayout, 0, 1, &_drawImageDescriptors, 0, nullptr);
-    vkCmdPushConstants(cmd, _gradientPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &effect.data);
-    vkCmdDispatch(cmd, std::ceil(_drawExtent.width / 16.0), std::ceil(_drawExtent.height / 16.0), 1);
+    // PathTraced mode uses compute shader path tracing
+    if (_currentViewMode == ViewMode::PathTraced) {
+        draw_rendered_pathtraced(cmd);
+    } else {
+        // Normal background effect compute shader
+        ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, effect.pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _gradientPipelineLayout, 0, 1, &_drawImageDescriptors, 0, nullptr);
+        vkCmdPushConstants(cmd, _gradientPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &effect.data);
+        vkCmdDispatch(cmd, std::ceil(_drawExtent.width / 16.0), std::ceil(_drawExtent.height / 16.0), 1);
+    }
 
     // Memory barrier: ensure compute shader writes complete before graphics reads
     // Critical for MoltenVK/macOS which is stricter about synchronization
@@ -1795,69 +1799,40 @@ void VulkanEngine::draw_node_gizmo()
     if (!selectedNode) return;
 
     ImGuizmo::BeginFrame();
-    ImGui::Begin("Gizmo");
 
     static ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
     static ImGuizmo::MODE mode = ImGuizmo::LOCAL;
     static glm::mat4 model = selectedNode->localTransform;
     static MeshNode* lastNode = nullptr;
 
-    // 🎯 Seçim değiştiyse modeli güncelle
+    // Update model when selection changes
     if (lastNode != selectedNode) {
         model = selectedNode->localTransform;
         lastNode = selectedNode;
     }
 
-    // 🔁 Shift + F → sadece gizmo sıfırlama, F → objeye kamera odakla
-    bool shiftDown = ImGui::GetIO().KeyShift;
-    //if (ImGui::IsKeyPressed(ImGuiKey_F)) {
-    //    model = selectedNode->localTransform;
-
-    //    if (!shiftDown) {
-    //        glm::vec3 objPos = glm::vec3(selectedNode->worldTransform[3]);
-    //        glm::vec3 camDir = mainCamera.getLookDirection();
-    //        mainCamera.position = objPos - camDir * 5.0f;
-    //    }
-    //}
-// draw_node_gizmo() veya Scene Graph içinde:
+    // F key: Focus camera on object
     if (ImGui::IsKeyPressed(ImGuiKey_F)) {
         glm::vec3 objPos = glm::vec3(selectedNode->worldTransform[3]);
-        mainCamera.focusOnPoint(objPos, 5.0f);  // FPS bakış yönü korunur, objeyi ortada görürsün
-
+        mainCamera.focusOnPoint(objPos, 5.0f);
     }
 
-
-
-
-    // 🔘 Modlar
-    if (ImGui::RadioButton("Translate", operation == ImGuizmo::TRANSLATE)) operation = ImGuizmo::TRANSLATE;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Rotate", operation == ImGuizmo::ROTATE)) operation = ImGuizmo::ROTATE;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Scale", operation == ImGuizmo::SCALE)) operation = ImGuizmo::SCALE;
-
-    if (operation != ImGuizmo::SCALE) {
-        if (ImGui::RadioButton("Local", mode == ImGuizmo::LOCAL)) mode = ImGuizmo::LOCAL;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("World", mode == ImGuizmo::WORLD)) mode = ImGuizmo::WORLD;
-    }
-
-    // Kamera matrisleri
+    // Camera matrices
     glm::mat4 view = mainCamera.getViewMatrix();
-    glm::mat4 proj = mainCamera.getProjectionMatrix(); // reverse-z uyumlu → düz bırakıyoruz
+    glm::mat4 proj = mainCamera.getProjectionMatrix();
 
-    // Ekrana oturt
+    // Set gizmo rect to full screen
     ImGuizmo::SetRect(0, 0, ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y);
 
-    // Snap (TAB ile aktif)
+    // Snap (TAB to enable)
     float snap[3] = { 0.1f, 0.1f, 0.1f };
     float* snapPtr = ImGui::IsKeyDown(ImGuiKey_Tab) ? ((operation == ImGuizmo::ROTATE) ? &snap[0] : snap) : nullptr;
 
-    // Gizmo'yu uygula
+    // Apply gizmo
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj),
         operation, mode, glm::value_ptr(model), nullptr, snapPtr);
 
-    // Transform güncellemesi
+    // Update transform when using gizmo
     if (ImGuizmo::IsUsing()) {
         selectedNode->localTransform = model;
 
@@ -1865,27 +1840,67 @@ void VulkanEngine::draw_node_gizmo()
         if (auto p = selectedNode->parent.lock()) {
             parentMatrix = p->worldTransform;
         }
-
         selectedNode->refreshTransform(parentMatrix);
     }
 
-    // ✨ Ekranda zemin gölgesi ve isim gösterimi
+    // Compact gizmo toolbar overlay (top-center of viewport)
     {
-        glm::vec3 worldPos = glm::vec3(selectedNode->worldTransform[3]);
-        glm::vec4 clip = proj * view * glm::vec4(worldPos, 1.0f);
-        if (clip.w > 0.0f) {
-            glm::vec3 ndc = glm::vec3(clip) / clip.w;
-            ImVec2 screen;
-            screen.x = (ndc.x * 0.5f + 0.5f) * ImGui::GetIO().DisplaySize.x;
-            screen.y = (1.0f - (ndc.y * 0.5f + 0.5f)) * ImGui::GetIO().DisplaySize.y;
+        float viewportX = 280.0f;  // Left panel width
+        float viewportW = ImGui::GetIO().DisplaySize.x - 280.0f - 320.0f;  // Viewport width
+        float toolbarW = 300.0f;
+        float toolbarX = viewportX + (viewportW - toolbarW) * 0.5f;
 
-            ImDrawList* drawList = ImGui::GetForegroundDrawList();
-            drawList->AddCircleFilled(screen, 16.0f, IM_COL32(0, 0, 0, 48), 32);
-            drawList->AddText(ImVec2(screen.x + 20, screen.y - 10), IM_COL32(255, 255, 0, 255), "🟡 Seçili");
+        ImGui::SetNextWindowPos(ImVec2(toolbarX, 30.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(toolbarW, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.85f);
+
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                                  ImGuiWindowFlags_AlwaysAutoResize;
+
+        ImGui::Begin("##GizmoToolbar", nullptr, flags);
+
+        // Transform mode buttons
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 4));
+
+        bool isTranslate = (operation == ImGuizmo::TRANSLATE);
+        bool isRotate = (operation == ImGuizmo::ROTATE);
+        bool isScale = (operation == ImGuizmo::SCALE);
+
+        if (isTranslate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+        if (ImGui::Button("W Move")) operation = ImGuizmo::TRANSLATE;
+        if (isTranslate) ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        if (isRotate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+        if (ImGui::Button("E Rotate")) operation = ImGuizmo::ROTATE;
+        if (isRotate) ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        if (isScale) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+        if (ImGui::Button("R Scale")) operation = ImGuizmo::SCALE;
+        if (isScale) ImGui::PopStyleColor();
+
+        // Space mode toggle
+        if (operation != ImGuizmo::SCALE) {
+            ImGui::SameLine();
+            ImGui::Separator();
+            ImGui::SameLine();
+            if (ImGui::Button(mode == ImGuizmo::LOCAL ? "Local" : "World")) {
+                mode = (mode == ImGuizmo::LOCAL) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+            }
         }
+
+        ImGui::PopStyleVar();
+        ImGui::End();
     }
 
-    ImGui::End();
+    // Keyboard shortcuts for gizmo modes
+    if (!ImGui::GetIO().WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W)) operation = ImGuizmo::TRANSLATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) operation = ImGuizmo::ROTATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) operation = ImGuizmo::SCALE;
+    }
 }
 
 
@@ -5060,6 +5075,12 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         draw_uvchecker(cmd, globalDescriptor, viewport, scissor, opaque_draws);
         break;
 
+    case ViewMode::PathTraced:
+        // Path tracing uses compute shader, handled separately in draw_main
+        // Fall back to rendered for geometry pass
+        draw_rendered(cmd, globalDescriptor, viewport, scissor, opaque_draws);
+        break;
+
     default:
         draw_rendered(cmd, globalDescriptor, viewport, scissor, opaque_draws);
         break;
@@ -5774,7 +5795,7 @@ void VulkanEngine::draw_pipeline_settings_imgui() {
 
         // === VIEW MODE ===
         if (ImGui::CollapsingHeader("View Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
-            static const char* viewModes[] = { "Solid", "Shaded", "Material Preview", "Rendered", "Wireframe", "Normals", "UV Checker" };
+            static const char* viewModes[] = { "Solid", "Shaded", "Material Preview", "Rendered", "Wireframe", "Normals", "UV Checker", "Path Traced" };
             int currentMode = static_cast<int>(_currentViewMode);
 
             ImGui::SetNextItemWidth(-1);
@@ -8200,58 +8221,7 @@ void VulkanEngine::run()
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::Begin("Stats");
-        ImGui::Text("Frametime: %.2f ms", stats.frametime);
-        ImGui::Text("Scene Update: %.2f ms", stats.scene_update_time);
-        ImGui::Text("Mesh Draw Time: %.2f ms", stats.mesh_draw_time);
-        ImGui::Text("Triangles: %d", stats.triangle_count);
-        ImGui::Text("Draw Calls: %d", stats.drawcall_count);
-        ImGui::Text("Visible Objects: %d", stats.visible_count);
-        ImGui::Text("Shader Pipelines: %d", stats.shader_count);
-
-        if (ImGui::CollapsingHeader("Visible Objects"))
-        {
-            if (!selectedObjectName.empty())
-                ImGui::Text("Seçili: %s", selectedObjectName.c_str());
-            else
-                ImGui::Text("Seçili: (hiçbiri)");
-
-            ImGui::Separator();
-
-            for (const auto& objName : stats.visibleObjects)
-            {
-                bool isSelected = (selectedObjectName == objName);
-
-                if (ImGui::Selectable(objName.c_str(), isSelected))
-                {
-                    selectedObjectName = objName;
-                    selectedNode = findNodeByName(objName);
-                }
-            }
-        }
-
-        if (ImGui::CollapsingHeader("Shaders"))
-        {
-            for (const auto& shaderName : stats.shaderNames)
-            {
-                ImGui::Text("%s", shaderName.c_str());
-            }
-        }
-
-        ImGui::End();
-
-        if (ImGui::Begin("background"))
-        {
-            ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
-            ImGui::Text("Selected effect: %s", selected.name);
-            ImGui::SliderInt("Effect Index", &currentBackgroundEffect, 0, static_cast<int>(backgroundEffects.size()) - 1);
-            ImGui::InputFloat4("data1", (float*)&selected.data.data1);
-            ImGui::InputFloat4("data2", (float*)&selected.data.data2);
-            ImGui::InputFloat4("data3", (float*)&selected.data.data3);
-            ImGui::InputFloat4("data4", (float*)&selected.data.data4);
-        }
-        ImGui::End();
-
+        // All UI is now handled by the professional panel system
         update_imgui();
         ImGui::Render();
 
@@ -13223,21 +13193,4 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
 
 
 
-
-
-
-TextureID TextureCache::AddTexture(const VkImageView& image, VkSampler sampler)
-{
-    for (unsigned int i = 0; i < Cache.size(); i++) {
-        if (Cache[i].imageView == image && Cache[i].sampler == sampler) {
-            //found, return it
-            return TextureID{ i };
-        }
-    }
-
-    uint32_t idx = Cache.size();
-
-    Cache.push_back(VkDescriptorImageInfo{ .sampler = sampler,.imageView = image, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
-
-    return TextureID{ idx };
-}
+// TextureCache::AddTexture is now defined inline in vk_types.h

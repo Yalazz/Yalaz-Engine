@@ -186,17 +186,18 @@ void SceneHierarchyPanel::RenderPrimitivesList() {
         ImGui::SameLine();
 
         // Selection
-        bool isSelected = EditorSelection::Get().IsPrimitiveSelected() &&
-                          EditorSelection::Get().GetIndex() == static_cast<int>(i);
+        bool isSelected = (m_Engine->selectedPrimitiveIndex == static_cast<int>(i));
 
         if (ImGui::Selectable(mesh.name.c_str(), isSelected)) {
-            // Clear previous selection efficiently
-            int prevIndex = EditorSelection::Get().GetIndex();
-            if (EditorSelection::Get().IsPrimitiveSelected() && prevIndex >= 0 &&
-                prevIndex < static_cast<int>(shapes.size())) {
-                shapes[prevIndex].selected = false;
+            // Clear previous selection
+            if (m_Engine->selectedPrimitiveIndex >= 0 &&
+                m_Engine->selectedPrimitiveIndex < static_cast<int>(shapes.size())) {
+                shapes[m_Engine->selectedPrimitiveIndex].selected = false;
             }
 
+            // Set new selection
+            m_Engine->selectedPrimitiveIndex = static_cast<int>(i);
+            m_Engine->selectedNode = nullptr;  // Clear node selection
             EditorSelection::Get().Select(SelectionType::Primitive, static_cast<int>(i), mesh.name);
             mesh.selected = true;
         }
@@ -372,8 +373,13 @@ void SceneHierarchyPanel::DeletePrimitive(int index) {
 
     m_Engine->static_shapes.erase(m_Engine->static_shapes.begin() + index);
 
-    if (EditorSelection::Get().IsPrimitiveSelected() && EditorSelection::Get().GetIndex() == index) {
+    // Update selection
+    if (m_Engine->selectedPrimitiveIndex == index) {
+        m_Engine->selectedPrimitiveIndex = -1;
         EditorSelection::Get().ClearSelection();
+    } else if (m_Engine->selectedPrimitiveIndex > index) {
+        // Adjust index if deleted item was before selected
+        m_Engine->selectedPrimitiveIndex--;
     }
 }
 

@@ -32,6 +32,49 @@ add_executable(Yalaz_Engine
     engine_state.h
     engine_state.cpp
 
+    # Core Subsystem - Engine Foundation
+    core/ISubsystem.h
+    core/SubsystemRegistry.h
+    core/SubsystemRegistry.cpp
+    core/Engine.h
+    core/Engine.cpp
+
+    # Geometry Subsystem - Primitive mesh generation
+    geometry/PrimitiveType.h
+    geometry/PrimitiveGenerator.h
+    geometry/PrimitiveGenerator.cpp
+
+    # Graphics Subsystem - Vulkan core resources
+    graphics/VulkanContext.h
+    graphics/VulkanContext.cpp
+    graphics/ResourceManager.h
+    graphics/ResourceManager.cpp
+
+    # Renderer Subsystem - Rendering pipeline
+    renderer/ViewMode.h
+    renderer/PipelineManager.h
+    renderer/PipelineManager.cpp
+    renderer/RenderSystem.h
+    renderer/RenderSystem.cpp
+
+    # Scene Subsystem - Scene management
+    scene/SceneManager.h
+    scene/SceneManager.cpp
+    scene/Selection.h
+    scene/Selection.cpp
+    scene/Lighting.h
+    scene/Lighting.cpp
+
+    # Platform Subsystem - Window and input
+    platform/Window.h
+    platform/Window.cpp
+    platform/Input.h
+    platform/Input.cpp
+
+    # Assets Subsystem - Asset loading and caching
+    assets/AssetManager.h
+    assets/AssetManager.cpp
+
     # UI System - Professional OOP Architecture
     ui/Panel.h
     ui/EditorTheme.h
@@ -109,6 +152,13 @@ target_precompile_headers(Yalaz_Engine PUBLIC
 # =============================================================
 target_include_directories(Yalaz_Engine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/core"
+    "${CMAKE_CURRENT_SOURCE_DIR}/graphics"
+    "${CMAKE_CURRENT_SOURCE_DIR}/renderer"
+    "${CMAKE_CURRENT_SOURCE_DIR}/scene"
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    "${CMAKE_CURRENT_SOURCE_DIR}/geometry"
+    "${CMAKE_CURRENT_SOURCE_DIR}/platform"
     "${CMAKE_CURRENT_SOURCE_DIR}/ui"
     "${CMAKE_CURRENT_SOURCE_DIR}/ui/panels"
     "${CMAKE_CURRENT_BINARY_DIR}"  # For version_config.h

@@ -20,6 +20,8 @@ void ViewportPanel::OnRender() {
         ImGui::Spacing();
         RenderDisplaySection();
         ImGui::Spacing();
+        RenderBackgroundSection();
+        ImGui::Spacing();
         RenderGridSection();
     }
     EndPanel();
@@ -31,7 +33,7 @@ void ViewportPanel::RenderViewModeSection() {
     if (ImGui::CollapsingHeader("View Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
-        const char* viewModes[] = { "Solid", "Shaded", "Material Preview", "Rendered", "Wireframe", "Normals", "UV Checker" };
+        const char* viewModes[] = { "Solid", "Shaded", "Material Preview", "Rendered", "Wireframe", "Normals", "UV Checker", "Path Traced" };
         int currentMode = static_cast<int>(m_Engine->_currentViewMode);
 
         ImGui::SetNextItemWidth(-1);
@@ -51,6 +53,37 @@ void ViewportPanel::RenderDisplaySection() {
 
         ImGui::Checkbox("Show Grid", &m_Engine->_showGrid);
         ImGui::Checkbox("Show Outlines", &m_Engine->_showOutline);
+
+        ImGui::Unindent(8.0f);
+    }
+}
+
+void ViewportPanel::RenderBackgroundSection() {
+    if (!m_Engine) return;
+
+    if (ImGui::CollapsingHeader("Background")) {
+        ImGui::Indent(8.0f);
+
+        // Background effect selection
+        int effectCount = static_cast<int>(m_Engine->backgroundEffects.size());
+        if (effectCount > 0) {
+            ComputeEffect& selected = m_Engine->backgroundEffects[m_Engine->currentBackgroundEffect];
+
+            ImGui::Text("Effect: %s", selected.name);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::SliderInt("##EffectIndex", &m_Engine->currentBackgroundEffect, 0, effectCount - 1)) {
+                // Effect changed
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Effect parameters (color controls)
+            ImGui::Text("Parameters:");
+            ImGui::ColorEdit4("Color 1", (float*)&selected.data.data1);
+            ImGui::ColorEdit4("Color 2", (float*)&selected.data.data2);
+        }
 
         ImGui::Unindent(8.0f);
     }
