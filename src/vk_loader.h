@@ -10,11 +10,7 @@
 
 class VulkanEngine;
 
-struct Bounds {
-    glm::vec3 origin;
-    float sphereRadius;
-    glm::vec3 extents;
-};
+// Bounds is now defined in vk_types.h
 
 struct GLTFMaterial {
     MaterialInstance data;

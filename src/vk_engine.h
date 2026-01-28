@@ -21,32 +21,8 @@ struct MeshAsset;
 namespace fastgltf {
     struct Mesh;
 }
-struct TextureID {
-    uint32_t Index;
-};
-struct TextureCache {
-    std::vector<VkDescriptorImageInfo> Cache;
-    std::unordered_map<std::string, TextureID> NameMap;
-    TextureID AddTexture(const VkImageView& image, VkSampler sampler);
-};
 
-struct DeletionQueue
-{
-	std::deque<std::function<void()>> deletors;
-
-	void push_function(std::function<void()>&& function) {
-		deletors.push_back(function);
-	}
-
-	void flush() {
-		// reverse iterate the deletion queue to execute all the functions
-		for (auto it = deletors.rbegin(); it != deletors.rend(); it++) {
-			(*it)(); //call functors
-		}
-
-		deletors.clear();
-	}
-};
+// TextureID, TextureCache, DeletionQueue are now defined in vk_types.h
 
 struct PathTracePushConstants {
     glm::mat4 invView;          // 64 bytes
@@ -75,24 +51,7 @@ struct ComputeEffect {
     ComputePushConstants data;    // Push Constants verisi
 };
 
-struct MeshNode;
-struct RenderObject {
-    uint32_t indexCount;
-    uint32_t firstIndex;
-    VkBuffer indexBuffer;
-
-    MaterialInstance* material;
-    Bounds bounds;
-    glm::mat4 transform;
-
-    VkBuffer vertexBuffer;                // ✅ Vulkan handle (pipeline için)
-    VkDeviceAddress vertexBufferAddress;  // (shader fetch için, opsiyonel)
-
-    std::string name;
-
-    MeshNode* nodePointer = nullptr;
-};
-
+// RenderObject is now defined in vk_types.h
 
 //< meshnode
 
@@ -198,12 +157,8 @@ struct MeshPushConstants {
 
 
 
-struct DrawContext {
-    std::vector<RenderObject> OpaqueSurfaces;
-    std::vector<RenderObject> TransparentSurfaces;
+// DrawContext is now defined in vk_types.h
 
-    glm::mat4 viewproj;
-};
 struct EngineStats {
     float frametime;
     int triangle_count;
@@ -470,7 +425,8 @@ public:
         Rendered = 3,          // Full PBR with scene lights
         Wireframe = 4,         // Edge visualization
         Normals = 5,           // World-space normals as RGB
-        UVChecker = 6          // UV checker pattern debug
+        UVChecker = 6,         // UV checker pattern debug
+        PathTraced = 7         // Real-time path tracing (compute shader)
     };
     bool _showGrid = true;
     bool _showOutline = true;
@@ -623,9 +579,8 @@ public:
     void draw_node_gizmo();
     void draw_node_recursive_ui(std::shared_ptr<Node> node);
 
-    MeshNode* selectedNode = nullptr; // sahnede seçili GLTF node'u
-
-
+    MeshNode* selectedNode = nullptr;      // Selected GLTF node
+    int selectedPrimitiveIndex = -1;       // Selected primitive shape index (-1 = none)
 
     VkPipelineLayout gridPipelineLayout;
     VkRenderPass _renderPass;

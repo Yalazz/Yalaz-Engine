@@ -310,10 +310,56 @@ struct GridSettings {
 
 
 
-struct DrawContext;
+// =============================================================================
+// BOUNDS - AABB for culling and picking
+// =============================================================================
+
+struct Bounds {
+    glm::vec3 origin;
+    float sphereRadius;
+    glm::vec3 extents;
+};
+
+// Forward declarations for rendering
+struct MeshNode;
+
+// =============================================================================
+// RENDER OBJECT - Drawable surface with material
+// =============================================================================
+
+struct RenderObject {
+    uint32_t indexCount;
+    uint32_t firstIndex;
+    VkBuffer indexBuffer;
+
+    MaterialInstance* material;
+    Bounds bounds;
+    glm::mat4 transform;
+
+    VkBuffer vertexBuffer;
+    VkDeviceAddress vertexBufferAddress;
+
+    std::string name;
+
+    MeshNode* nodePointer = nullptr;
+};
+
+// =============================================================================
+// DRAW CONTEXT - Rendering command buffer
+// =============================================================================
+
+struct DrawContext {
+    std::vector<RenderObject> OpaqueSurfaces;
+    std::vector<RenderObject> TransparentSurfaces;
+
+    glm::mat4 viewproj;
+};
+
+// =============================================================================
+// RENDERABLE INTERFACE
+// =============================================================================
 
 class IRenderable {
-
     virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) = 0;
 };
 
@@ -387,6 +433,58 @@ struct Node : public IRenderable {
         } \
     } while (0)
 //< node_types
+
+// =============================================================================
+// TEXTURE CACHE - Shared texture management types
+// =============================================================================
+
+struct TextureID {
+    uint32_t Index;
+};
+
+constexpr TextureID INVALID_TEXTURE_ID = { UINT32_MAX };
+
+struct TextureCache {
+    std::vector<VkDescriptorImageInfo> Cache;
+    std::unordered_map<std::string, TextureID> NameMap;
+
+    TextureID AddTexture(const VkDescriptorImageInfo& info, const std::string& name = "") {
+        TextureID id{ static_cast<uint32_t>(Cache.size()) };
+        Cache.push_back(info);
+        if (!name.empty()) {
+            NameMap[name] = id;
+        }
+        return id;
+    }
+
+    TextureID AddTexture(VkImageView view, VkSampler sampler, const std::string& name = "") {
+        VkDescriptorImageInfo info{};
+        info.sampler = sampler;
+        info.imageView = view;
+        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        return AddTexture(info, name);
+    }
+};
+
+// =============================================================================
+// DELETION QUEUE - RAII-style resource cleanup
+// =============================================================================
+
+struct DeletionQueue {
+    std::deque<std::function<void()>> deletors;
+
+    void push_function(std::function<void()>&& function) {
+        deletors.push_back(function);
+    }
+
+    void flush() {
+        for (auto it = deletors.rbegin(); it != deletors.rend(); it++) {
+            (*it)();
+        }
+        deletors.clear();
+    }
+};
+
 //> intro
 //#define VK_CHECK(x)                                                     \
 //    do {                                                                \

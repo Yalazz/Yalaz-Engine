@@ -18,6 +18,7 @@ public:
 private:
     void RenderViewModeSection();
     void RenderDisplaySection();
+    void RenderBackgroundSection();
     void RenderGridSection();
 };
 
