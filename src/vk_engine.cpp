@@ -8161,7 +8161,8 @@ void VulkanEngine::run()
             if (bQuit) break;
 
             // ✅ Sol tıklama ile obje seçme (ray picking)
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT)
+            // Only select objects when clicking outside UI panels
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT && !ImGui::GetIO().WantCaptureMouse)
             {
                 int mouseX, mouseY;
                 SDL_GetMouseState(&mouseX, &mouseY);
@@ -8171,8 +8172,6 @@ void VulkanEngine::run()
 
                 float mouseX_norm = static_cast<float>(mouseX) / static_cast<float>(winW);
                 float mouseY_norm = static_cast<float>(mouseY) / static_cast<float>(winH);
-
-                fmt::print("[INPUT] Sol tıklama tespit edildi! Mouse = ({:.3f}, {:.3f})\n", mouseX_norm, mouseY_norm);
 
                 select_object_under_mouse(mouseX_norm, mouseY_norm);
             }

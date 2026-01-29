@@ -6,10 +6,60 @@
 #include "../EditorSelection.h"
 #include "../EditorTheme.h"
 #include "../../vk_engine.h"
+#include "../../vk_loader.h"
 #include <imgui.h>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
+#include <glm/gtx/euler_angles.hpp>
 
 namespace Yalaz::UI {
+
+// Helper function to decompose a transformation matrix
+static void DecomposeTransform(const glm::mat4& transform, glm::vec3& position, glm::vec3& rotation, glm::vec3& scale) {
+    // Extract position from the last column
+    position = glm::vec3(transform[3]);
+
+    // Extract scale from column magnitudes
+    scale.x = glm::length(glm::vec3(transform[0]));
+    scale.y = glm::length(glm::vec3(transform[1]));
+    scale.z = glm::length(glm::vec3(transform[2]));
+
+    // Avoid division by zero
+    if (scale.x < 0.0001f) scale.x = 0.0001f;
+    if (scale.y < 0.0001f) scale.y = 0.0001f;
+    if (scale.z < 0.0001f) scale.z = 0.0001f;
+
+    // Extract rotation matrix by removing scale
+    glm::mat3 rotMat(
+        glm::vec3(transform[0]) / scale.x,
+        glm::vec3(transform[1]) / scale.y,
+        glm::vec3(transform[2]) / scale.z
+    );
+
+    // Convert rotation matrix to euler angles (YXZ order for intuitive editing)
+    rotation.x = asin(-rotMat[2][1]);
+    if (cos(rotation.x) > 0.0001f) {
+        rotation.y = atan2(rotMat[2][0], rotMat[2][2]);
+        rotation.z = atan2(rotMat[0][1], rotMat[1][1]);
+    } else {
+        rotation.y = atan2(-rotMat[0][2], rotMat[0][0]);
+        rotation.z = 0.0f;
+    }
+}
+
+// Helper function to compose a transformation matrix from components
+static glm::mat4 ComposeTransform(const glm::vec3& position, const glm::vec3& rotation, const glm::vec3& scale) {
+    glm::mat4 transform = glm::mat4(1.0f);
+
+    // Apply transformations in order: Scale -> Rotate -> Translate
+    transform = glm::translate(transform, position);
+    transform = glm::rotate(transform, rotation.y, glm::vec3(0, 1, 0));  // Yaw
+    transform = glm::rotate(transform, rotation.x, glm::vec3(1, 0, 0));  // Pitch
+    transform = glm::rotate(transform, rotation.z, glm::vec3(0, 0, 1));  // Roll
+    transform = glm::scale(transform, scale);
+
+    return transform;
+}
 
 InspectorPanel::InspectorPanel()
     : Panel("Inspector")
@@ -134,6 +184,7 @@ void InspectorPanel::RenderSceneNodeInspector() {
 
     MeshNode* node = m_Engine->selectedNode;
 
+    // Header
     ImGui::PushStyleColor(ImGuiCol_Text, Colors::SelectionBlue);
     ImGui::Text("Scene Node");
     ImGui::PopStyleColor();
@@ -141,18 +192,139 @@ void InspectorPanel::RenderSceneNodeInspector() {
     ImGui::Separator();
     ImGui::Spacing();
 
+    // Mesh info
     if (node->mesh) {
         ImGui::Text("Mesh: %s", node->mesh->name.c_str());
+        ImGui::TextDisabled("Surfaces: %zu", node->mesh->surfaces.size());
+    } else {
+        ImGui::TextDisabled("(No mesh attached)");
     }
 
     ImGui::Spacing();
 
-    // Transform display (read-only for now)
+    // Transform section - EDITABLE
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-        glm::mat4& transform = node->localTransform;
+        ImGui::Indent(8.0f);
 
-        glm::vec3 position = glm::vec3(transform[3]);
-        ImGui::Text("Position: %.2f, %.2f, %.2f", position.x, position.y, position.z);
+        // Decompose the current transform
+        glm::vec3 position, rotation, scale;
+        DecomposeTransform(node->localTransform, position, rotation, scale);
+
+        // Convert rotation to degrees for display
+        glm::vec3 rotationDeg = glm::degrees(rotation);
+
+        bool changed = false;
+
+        // Position
+        if (RenderVec3Control("Position", position, 0.0f, 0.1f)) {
+            changed = true;
+        }
+
+        // Rotation (in degrees)
+        if (RenderVec3Control("Rotation", rotationDeg, 0.0f, 1.0f)) {
+            rotation = glm::radians(rotationDeg);
+            changed = true;
+        }
+
+        // Scale
+        if (RenderVec3Control("Scale", scale, 1.0f, 0.05f)) {
+            changed = true;
+        }
+
+        // Apply changes
+        if (changed) {
+            node->localTransform = ComposeTransform(position, rotation, scale);
+            // Refresh world transform - get parent matrix
+            if (auto parent = node->parent.lock()) {
+                node->refreshTransform(parent->worldTransform);
+            } else {
+                node->refreshTransform(glm::mat4(1.0f));
+            }
+        }
+
+        ImGui::Spacing();
+
+        // Reset transform button
+        if (ImGui::Button("Reset Transform", ImVec2(-1, 0))) {
+            node->localTransform = glm::mat4(1.0f);
+            if (auto parent = node->parent.lock()) {
+                node->refreshTransform(parent->worldTransform);
+            } else {
+                node->refreshTransform(glm::mat4(1.0f));
+            }
+        }
+
+        ImGui::Unindent(8.0f);
+    }
+
+    // Material info (read-only for now)
+    if (node->mesh && ImGui::CollapsingHeader("Materials")) {
+        ImGui::Indent(8.0f);
+
+        for (size_t i = 0; i < node->mesh->surfaces.size(); ++i) {
+            const auto& surface = node->mesh->surfaces[i];
+            ImGui::PushID(static_cast<int>(i));
+
+            ImGui::Text("Surface %zu", i);
+            if (surface.material) {
+                ImGui::TextDisabled("  Material bound");
+            } else {
+                ImGui::TextDisabled("  No material");
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::Unindent(8.0f);
+    }
+
+    // Statistics
+    if (ImGui::CollapsingHeader("Statistics")) {
+        ImGui::Indent(8.0f);
+
+        if (node->mesh) {
+            size_t totalIndices = 0;
+            for (const auto& surface : node->mesh->surfaces) {
+                totalIndices += surface.count;
+            }
+            ImGui::Text("Triangles: %zu", totalIndices / 3);
+            ImGui::Text("Surfaces: %zu", node->mesh->surfaces.size());
+        }
+
+        ImGui::Text("Children: %zu", node->children.size());
+
+        ImGui::Unindent(8.0f);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Actions
+    ImGui::Text("Actions");
+    ImGui::Spacing();
+
+    // Focus camera on object
+    if (ImGui::Button("Focus Camera", ImVec2(-1, 0))) {
+        glm::vec3 position = glm::vec3(node->worldTransform[3]);
+        m_Engine->mainCamera.focusOnPoint(position, 5.0f);
+    }
+
+    ImGui::Spacing();
+
+    // Duplicate (create copy)
+    if (ImGui::Button("Duplicate", ImVec2(-1, 0))) {
+        // TODO: Implement node duplication
+        ImGui::TextDisabled("(Not yet implemented)");
+    }
+
+    ImGui::Spacing();
+
+    // Deselect button
+    if (ImGui::Button("Deselect", ImVec2(-1, 0))) {
+        m_Engine->selectedNode = nullptr;
+        m_Engine->selectedObjectName.clear();
+        EditorSelection::Get().ClearSelection();
     }
 }
 
@@ -171,10 +343,97 @@ void InspectorPanel::RenderLightInspector(int index) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::DragFloat3("Position", &light.position.x, 0.1f);
-    ImGui::ColorEdit3("Color", &light.color.x);
-    ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 100.0f);
-    ImGui::DragFloat("Radius", &light.radius, 0.1f, 0.1f, 100.0f);
+    // Transform
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Indent(8.0f);
+        ImGui::DragFloat3("Position", &light.position.x, 0.1f);
+        ImGui::Unindent(8.0f);
+    }
+
+    // Light properties
+    if (ImGui::CollapsingHeader("Light Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Indent(8.0f);
+
+        ImGui::ColorEdit3("Color", &light.color.x);
+
+        ImGui::Spacing();
+
+        ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 1000.0f);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Light brightness");
+        }
+
+        ImGui::DragFloat("Radius", &light.radius, 0.1f, 0.1f, 100.0f);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Light falloff distance");
+        }
+
+        ImGui::Unindent(8.0f);
+    }
+
+    // Presets
+    if (ImGui::CollapsingHeader("Light Presets")) {
+        ImGui::Indent(8.0f);
+
+        if (ImGui::Button("Warm", ImVec2(70, 0))) {
+            light.color = glm::vec3(1.0f, 0.8f, 0.6f);
+            light.intensity = 10.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cool", ImVec2(70, 0))) {
+            light.color = glm::vec3(0.6f, 0.8f, 1.0f);
+            light.intensity = 10.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Sun", ImVec2(70, 0))) {
+            light.color = glm::vec3(1.0f, 0.95f, 0.9f);
+            light.intensity = 50.0f;
+        }
+
+        if (ImGui::Button("Candle", ImVec2(70, 0))) {
+            light.color = glm::vec3(1.0f, 0.6f, 0.2f);
+            light.intensity = 5.0f;
+            light.radius = 3.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Neon", ImVec2(70, 0))) {
+            light.color = glm::vec3(0.2f, 1.0f, 0.8f);
+            light.intensity = 15.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Fire", ImVec2(70, 0))) {
+            light.color = glm::vec3(1.0f, 0.4f, 0.1f);
+            light.intensity = 20.0f;
+            light.radius = 8.0f;
+        }
+
+        ImGui::Unindent(8.0f);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Actions
+    ImGui::Text("Actions");
+    ImGui::Spacing();
+
+    if (ImGui::Button("Focus Camera", ImVec2(-1, 0))) {
+        m_Engine->mainCamera.focusOnPoint(light.position, 5.0f);
+    }
+
+    ImGui::Spacing();
+
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.9f, 0.4f, 0.4f, 1.0f));
+
+    if (ImGui::Button("Delete Light", ImVec2(-1, 0))) {
+        m_Engine->scenePointLights.erase(m_Engine->scenePointLights.begin() + index);
+        EditorSelection::Get().ClearSelection();
+    }
+
+    ImGui::PopStyleColor(3);
 }
 
 void InspectorPanel::RenderTransformSection(glm::vec3& position, glm::vec3& rotation, glm::vec3& scale) {

@@ -39,6 +39,14 @@ struct LayoutRect {
     ImVec2 size;
 };
 
+// Panel snap data for magnetic docking
+struct PanelSnapData {
+    ImVec2 pos;
+    ImVec2 size;
+    bool isBeingDragged = false;
+    bool needsSnap = false;
+};
+
 // Panel state for presets
 struct PanelState {
     bool isOpen = true;
@@ -105,6 +113,16 @@ private:
     void RenderPanels();
     void RenderLayoutPresetWindow();
 
+    // Snapping system
+    ImVec2 SnapPosition(const ImVec2& pos, const ImVec2& size, int panelIndex);
+    void CollectSnapEdges(int excludePanelIndex);
+    bool m_SnapEnabled = true;
+    float m_SnapDistance = 20.0f;  // Pixels to trigger snap
+    std::vector<float> m_SnapEdgesX;  // Vertical edges to snap to
+    std::vector<float> m_SnapEdgesY;  // Horizontal edges to snap to
+    bool m_PanelNeedsSnap[5] = {false, false, false, false, false};
+    ImVec2 m_PanelSnapTarget[5];
+
     // Preset helpers
     void InitBuiltInPresets();
     void LoadPresetsFromFile();
@@ -143,6 +161,8 @@ private:
     std::string m_CurrentPresetName = "Default";
     bool m_ShowPresetWindow = false;
     bool m_ShowSavePresetPopup = false;
+    bool m_ShowWindowSettings = false;
+    bool m_WindowSettingsJustOpened = false;
     char m_NewPresetName[64] = "";
     char m_NewPresetDescription[256] = "";
     int m_SelectedPresetIndex = -1;
