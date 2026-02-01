@@ -18,16 +18,58 @@
 #include <filesystem>
 #include <algorithm>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace Yalaz::UI {
 
 void AssetBrowserView::OnInit(VulkanEngine* engine) {
     EditorView::OnInit(engine);
-    m_CurrentPath = "assets";
-    if (!fs::exists(m_CurrentPath)) {
-        m_CurrentPath = ".";
+
+    // Try to find the assets folder by checking multiple possible locations
+    std::vector<std::string> possiblePaths = {
+        "assets",                           // Direct (if running from project root)
+        "../assets",                        // One level up
+        "../../assets",                     // Two levels up (from bin/Debug or bin/Release)
+        "../../../assets",                  // Three levels up
+        "../../../../assets",               // Four levels up (from build/bin/Release etc.)
+    };
+
+    // Also try absolute paths based on executable location
+    #ifdef _WIN32
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
+        fs::path exeDir = fs::path(exePath).parent_path();
+        // Try going up from executable directory
+        for (int i = 0; i < 5; i++) {
+            fs::path assetsPath = exeDir / "assets";
+            if (fs::exists(assetsPath) && fs::is_directory(assetsPath)) {
+                m_CurrentPath = assetsPath.string();
+                m_RootPath = m_CurrentPath;
+                RefreshDirectory();
+                return;
+            }
+            exeDir = exeDir.parent_path();
+        }
     }
+    #endif
+
+    // Try relative paths
+    for (const auto& path : possiblePaths) {
+        if (fs::exists(path) && fs::is_directory(path)) {
+            m_CurrentPath = fs::absolute(path).string();
+            m_RootPath = m_CurrentPath;
+            RefreshDirectory();
+            return;
+        }
+    }
+
+    // Fallback to current directory
+    m_CurrentPath = fs::current_path().string();
+    m_RootPath = m_CurrentPath;
     RefreshDirectory();
 }
 
@@ -208,11 +250,12 @@ void AssetBrowserView::RenderPathBar() {
     }
     ImGui::SameLine();
 
-    // Home button
+    // Home button - go to root assets folder
     if (ImGui::Button("Home")) {
-        m_CurrentPath = "assets";
-        if (!fs::exists(m_CurrentPath)) {
-            m_CurrentPath = ".";
+        if (!m_RootPath.empty() && fs::exists(m_RootPath)) {
+            m_CurrentPath = m_RootPath;
+        } else {
+            m_CurrentPath = fs::current_path().string();
         }
         RefreshDirectory();
     }
@@ -270,8 +313,20 @@ void AssetBrowserView::RenderAssetGrid() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
             ImVec4(buttonColor.x + 0.1f, buttonColor.y + 0.1f, buttonColor.z + 0.1f, 1.0f));
 
+        // Single click to select, double click to open/load
         if (ImGui::Button(GetAssetIcon(asset.type), ImVec2((float)m_ThumbnailSize, (float)m_ThumbnailSize))) {
-            HandleAssetClick(asset);
+            // Single click - for folders, navigate; for files, just select
+            if (asset.isDirectory) {
+                m_CurrentPath = asset.path;
+                RefreshDirectory();
+            }
+        }
+
+        // Double-click to load models/scenes
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            if (!asset.isDirectory) {
+                HandleAssetClick(asset);  // Load the asset
+            }
         }
 
         // Drag source for textures
@@ -309,10 +364,9 @@ void AssetBrowserView::RenderAssetGrid() {
 }
 
 void AssetBrowserView::HandleAssetClick(const AssetEntry& asset) {
+    // This is called on double-click for loading files
     if (asset.isDirectory) {
-        m_CurrentPath = asset.path;
-        RefreshDirectory();
-        return;
+        return;  // Folders are handled by single-click in RenderAssetGrid
     }
 
     if (!m_Engine) return;

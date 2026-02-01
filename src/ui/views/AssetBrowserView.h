@@ -60,6 +60,7 @@ private:
     const char* GetAssetTypeName(AssetType type);
 
     std::string m_CurrentPath;
+    std::string m_RootPath;      // Root assets folder path
     std::vector<AssetEntry> m_Assets;
     char m_SearchBuffer[256] = "";
 

@@ -9,6 +9,7 @@
 #include "../EditorTheme.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace Yalaz::UI {
 
@@ -293,48 +294,173 @@ void SceneView::RenderSettingsPopup() {
             ImGui::Checkbox("Show Origin Axes", &showOrigin);
         }
 
-        // Grid Section
+        // Grid Section - Connected to engine's _gridSettings
         if (ImGui::CollapsingHeader("Grid Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            // Grid toggle (synced with toolbar)
+            // Grid toggle (synced with toolbar and engine)
             if (ImGui::Checkbox("Show Grid", &m_ShowGrid)) {
                 if (m_Engine) m_Engine->_showGrid = m_ShowGrid;
             }
 
-            ImGui::Spacing();
-
-            ImGui::DragFloat("Grid Size", &m_GridSize, 1.0f, 1.0f, 100.0f, "%.0f units");
-            ImGui::DragInt("Subdivisions", &m_GridSubdivisions, 1, 1, 100);
-            ImGui::SliderFloat("Opacity", &m_GridOpacity, 0.1f, 1.0f, "%.1f");
+            if (!m_ShowGrid) {
+                ImGui::BeginDisabled();
+            }
 
             ImGui::Spacing();
-            ImGui::TextDisabled("Presets:");
-            if (ImGui::Button("Default", ImVec2(80, 0))) {
-                m_GridSize = 10.0f;
-                m_GridSubdivisions = 10;
-                m_GridOpacity = 0.5f;
+
+            // === PRESETS ===
+            if (m_Engine) {
+                static const char* presets[] = { "Default", "Blender", "Unity", "Unreal", "CAD", "Architectural" };
+                ImGui::Text("Preset:");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::Combo("##GridPreset", &m_Engine->_gridSettings.currentPreset, presets, IM_ARRAYSIZE(presets))) {
+                    // Apply preset
+                    switch (m_Engine->_gridSettings.currentPreset) {
+                        case 0: // Default
+                            m_Engine->_gridSettings.baseGridSize = 1.0f;
+                            m_Engine->_gridSettings.majorGridMultiplier = 10.0f;
+                            m_Engine->_gridSettings.lineWidth = 1.5f;
+                            m_Engine->_gridSettings.gridOpacity = 0.7f;
+                            m_Engine->_gridSettings.dynamicLOD = true;
+                            break;
+                        case 1: // Blender
+                            m_Engine->_gridSettings.baseGridSize = 1.0f;
+                            m_Engine->_gridSettings.majorGridMultiplier = 10.0f;
+                            m_Engine->_gridSettings.lineWidth = 1.0f;
+                            m_Engine->_gridSettings.gridOpacity = 0.5f;
+                            m_Engine->_gridSettings.dynamicLOD = true;
+                            m_Engine->_gridSettings.xAxisColor = glm::vec3(0.929f, 0.227f, 0.298f);
+                            m_Engine->_gridSettings.zAxisColor = glm::vec3(0.227f, 0.404f, 0.937f);
+                            break;
+                        case 2: // Unity
+                            m_Engine->_gridSettings.baseGridSize = 1.0f;
+                            m_Engine->_gridSettings.majorGridMultiplier = 10.0f;
+                            m_Engine->_gridSettings.lineWidth = 1.2f;
+                            m_Engine->_gridSettings.gridOpacity = 0.6f;
+                            m_Engine->_gridSettings.dynamicLOD = true;
+                            m_Engine->_gridSettings.xAxisColor = glm::vec3(0.858f, 0.243f, 0.113f);
+                            m_Engine->_gridSettings.zAxisColor = glm::vec3(0.203f, 0.458f, 0.858f);
+                            break;
+                        case 3: // Unreal
+                            m_Engine->_gridSettings.baseGridSize = 10.0f;
+                            m_Engine->_gridSettings.majorGridMultiplier = 10.0f;
+                            m_Engine->_gridSettings.lineWidth = 1.0f;
+                            m_Engine->_gridSettings.gridOpacity = 0.4f;
+                            m_Engine->_gridSettings.dynamicLOD = true;
+                            m_Engine->_gridSettings.xAxisColor = glm::vec3(1.0f, 0.0f, 0.0f);
+                            m_Engine->_gridSettings.zAxisColor = glm::vec3(0.0f, 0.0f, 1.0f);
+                            break;
+                        case 4: // CAD
+                            m_Engine->_gridSettings.baseGridSize = 0.1f;
+                            m_Engine->_gridSettings.majorGridMultiplier = 10.0f;
+                            m_Engine->_gridSettings.lineWidth = 0.8f;
+                            m_Engine->_gridSettings.gridOpacity = 0.8f;
+                            m_Engine->_gridSettings.dynamicLOD = true;
+                            break;
+                        case 5: // Architectural
+                            m_Engine->_gridSettings.baseGridSize = 1.0f;
+                            m_Engine->_gridSettings.majorGridMultiplier = 5.0f;
+                            m_Engine->_gridSettings.lineWidth = 1.0f;
+                            m_Engine->_gridSettings.gridOpacity = 0.5f;
+                            m_Engine->_gridSettings.dynamicLOD = true;
+                            break;
+                    }
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // === CORE SETTINGS ===
+                ImGui::Text("Cell Size:");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("##CellSize", &m_Engine->_gridSettings.baseGridSize, 0.01f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+
+                ImGui::Text("Major Every:");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("##MajorMult", &m_Engine->_gridSettings.majorGridMultiplier, 2.0f, 20.0f, "%.0f cells");
+
+                ImGui::Checkbox("Dynamic LOD", &m_Engine->_gridSettings.dynamicLOD);
+
+                if (m_Engine->_gridSettings.dynamicLOD) {
+                    ImGui::Text("LOD Bias:");
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("##LODBias", &m_Engine->_gridSettings.lodBias, -2.0f, 2.0f, "%.1f");
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // === APPEARANCE ===
+                ImGui::Text("Opacity:");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("##GridOpacity", &m_Engine->_gridSettings.gridOpacity, 0.0f, 1.0f);
+
+                ImGui::Text("Line Width:");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("##LineWidth", &m_Engine->_gridSettings.lineWidth, 0.1f, 5.0f, "%.1f");
+
+                ImGui::Text("Fade Distance:");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("##FadeDist", &m_Engine->_gridSettings.fadeDistance, 10.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+
+                ImGui::Checkbox("Show Subdivisions", &m_Engine->_gridSettings.showSubdivisions);
+                ImGui::Checkbox("Anti-Aliasing", &m_Engine->_gridSettings.antiAliasing);
+                ImGui::Checkbox("Infinite Grid", &m_Engine->_gridSettings.infiniteGrid);
+
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // === AXIS COLORS ===
+                ImGui::Checkbox("Show Axis Colors", &m_Engine->_gridSettings.showAxisColors);
+                if (m_Engine->_gridSettings.showAxisColors) {
+                    ImGui::Text("Axis Width:");
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("##AxisWidth", &m_Engine->_gridSettings.axisLineWidth, 1.0f, 10.0f);
+
+                    ImGui::ColorEdit3("X Axis", (float*)&m_Engine->_gridSettings.xAxisColor, ImGuiColorEditFlags_NoInputs);
+                    ImGui::SameLine();
+                    ImGui::ColorEdit3("Z Axis", (float*)&m_Engine->_gridSettings.zAxisColor, ImGuiColorEditFlags_NoInputs);
+                }
+
+                ImGui::Spacing();
+
+                // === RESET ===
+                if (ImGui::Button("Reset Grid", ImVec2(-1, 0))) {
+                    m_Engine->_gridSettings = GridSettings();
+                }
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Fine", ImVec2(80, 0))) {
-                m_GridSize = 5.0f;
-                m_GridSubdivisions = 20;
-                m_GridOpacity = 0.3f;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Coarse", ImVec2(80, 0))) {
-                m_GridSize = 20.0f;
-                m_GridSubdivisions = 5;
-                m_GridOpacity = 0.7f;
+
+            if (!m_ShowGrid) {
+                ImGui::EndDisabled();
             }
         }
 
-        // Background Section
-        if (ImGui::CollapsingHeader("Background")) {
-            ImGui::RadioButton("Gradient", &m_BackgroundType, 0);
-            ImGui::RadioButton("Solid Color", &m_BackgroundType, 1);
-            ImGui::RadioButton("Environment Map", &m_BackgroundType, 2);
+        // Background Section - Connected to engine's background effects
+        if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Get available background effects from engine
+            if (m_Engine && !m_Engine->backgroundEffects.empty()) {
+                ImGui::Text("Effect:");
+                for (int i = 0; i < static_cast<int>(m_Engine->backgroundEffects.size()); i++) {
+                    bool isSelected = (m_Engine->currentBackgroundEffect == i);
+                    if (ImGui::RadioButton(m_Engine->backgroundEffects[i].name, isSelected)) {
+                        m_Engine->currentBackgroundEffect = i;
+                    }
+                }
 
-            if (m_BackgroundType == 1) {
-                ImGui::ColorEdit3("Color", &m_BackgroundColor.x);
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // Push constants for the current effect
+                auto& effect = m_Engine->backgroundEffects[m_Engine->currentBackgroundEffect];
+                ImGui::Text("Effect Parameters:");
+
+                if (strcmp(effect.name, "gradient") == 0) {
+                    ImGui::ColorEdit4("Top Color", &effect.data.data1.x);
+                    ImGui::ColorEdit4("Bottom Color", &effect.data.data2.x);
+                } else if (strcmp(effect.name, "sky") == 0) {
+                    ImGui::ColorEdit4("Sky Color", &effect.data.data1.x);
+                }
+            } else {
+                ImGui::TextDisabled("No background effects available");
             }
         }
 
