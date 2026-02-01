@@ -1,24 +1,33 @@
 // =============================================================================
-// YALAZ ENGINE - Editor UI Implementation (Optimized)
+// YALAZ ENGINE - Editor UI Implementation
 // =============================================================================
-// Includes layout preset system with save/load functionality
+// Professional editor UI with dynamic layout that resizes with window
 // =============================================================================
 
 #include "EditorUI.h"
-#include "panels/SceneHierarchyPanel.h"
-#include "panels/InspectorPanel.h"
-#include "panels/ViewportPanel.h"
-#include "panels/LightingPanel.h"
-#include "panels/ConsolePanel.h"
 #include "../vk_engine.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
+#include <fmt/core.h>
 
 using json = nlohmann::json;
 
 namespace Yalaz::UI {
+
+// =============================================================================
+// LAYOUT CONFIGURATION
+// =============================================================================
+struct LayoutConfig {
+    float leftPanelWidth = 250.0f;
+    float rightPanelWidth = 320.0f;
+    float bottomPanelHeight = 200.0f;
+    float menuBarHeight = 25.0f;
+    float toolbarHeight = 35.0f;
+};
+
+static LayoutConfig s_Layout;
 
 // =============================================================================
 // INITIALIZATION & SHUTDOWN
@@ -30,444 +39,250 @@ void EditorUI::Init(VulkanEngine* engine) {
     // Apply professional theme
     EditorTheme::Get().Apply();
 
-    // Register all panels and cache pointers
-    m_SceneHierarchy = PanelManager::Get().AddPanel<SceneHierarchyPanel>();
-    m_Inspector = PanelManager::Get().AddPanel<InspectorPanel>();
-    m_Viewport = PanelManager::Get().AddPanel<ViewportPanel>();
-    m_Lighting = PanelManager::Get().AddPanel<LightingPanel>();
-    m_Console = PanelManager::Get().AddPanel<ConsolePanel>();
+    // Register all view types
+    RegisterAllViewTypes();
 
-    // Initialize panels
-    PanelManager::Get().Init(engine);
+    // Initialize view manager
+    ViewManager::Get().Init(m_Engine);
 
-    // Initialize preset system
-    InitBuiltInPresets();
-    LoadPresetsFromFile();
+    // Initialize workspace system
+    InitBuiltInWorkspaces();
+    LoadWorkspacesFromFile();
+
+    fmt::print("[Editor] View System initialized with {} views\n",
+               ViewManager::Get().GetViews().size());
 }
 
 void EditorUI::Shutdown() {
-    SavePresetsToFile();
-    PanelManager::Get().Shutdown();
+    SaveWorkspacesToFile();
+    ViewManager::Get().Shutdown();
+}
+
+void EditorUI::Update(float deltaTime) {
+    ViewManager::Get().Update(deltaTime);
 }
 
 // =============================================================================
-// PRESET SYSTEM - BUILT-IN PRESETS
+// LAYOUT CALCULATION - Dynamic based on viewport size
 // =============================================================================
 
-void EditorUI::InitBuiltInPresets() {
-    m_Presets.clear();
-
-    // Default Layout
-    LayoutPreset defaultPreset;
-    defaultPreset.name = "Default";
-    defaultPreset.icon = "|||";
-    defaultPreset.description = "Standard editor layout with all panels visible";
-    defaultPreset.isBuiltIn = true;
-    defaultPreset.leftPanelWidth = 280.0f;
-    defaultPreset.rightPanelWidth = 320.0f;
-    defaultPreset.bottomPanelHeight = 200.0f;
-    defaultPreset.inspectorHeightRatio = 0.5f;
-    defaultPreset.viewportHeightRatio = 0.25f;
-    defaultPreset.lightingHeightRatio = 0.25f;
-    m_Presets.push_back(defaultPreset);
-
-    // Wide Viewport
-    LayoutPreset widePreset;
-    widePreset.name = "Wide Viewport";
-    widePreset.icon = "[=]";
-    widePreset.description = "Maximized 3D viewport with minimal panels";
-    widePreset.isBuiltIn = true;
-    widePreset.leftPanelWidth = 220.0f;
-    widePreset.rightPanelWidth = 260.0f;
-    widePreset.bottomPanelHeight = 150.0f;
-    widePreset.inspectorHeightRatio = 0.6f;
-    widePreset.viewportHeightRatio = 0.2f;
-    widePreset.lightingHeightRatio = 0.2f;
-    m_Presets.push_back(widePreset);
-
-    // Compact
-    LayoutPreset compactPreset;
-    compactPreset.name = "Compact";
-    compactPreset.icon = "[ ]";
-    compactPreset.description = "Smaller panels for high-DPI displays";
-    compactPreset.isBuiltIn = true;
-    compactPreset.leftPanelWidth = 240.0f;
-    compactPreset.rightPanelWidth = 280.0f;
-    compactPreset.bottomPanelHeight = 160.0f;
-    compactPreset.inspectorHeightRatio = 0.45f;
-    compactPreset.viewportHeightRatio = 0.275f;
-    compactPreset.lightingHeightRatio = 0.275f;
-    m_Presets.push_back(compactPreset);
-
-    // Focus Mode
-    LayoutPreset focusPreset;
-    focusPreset.name = "Focus Mode";
-    focusPreset.icon = "<>";
-    focusPreset.description = "Scene hierarchy and inspector only";
-    focusPreset.isBuiltIn = true;
-    focusPreset.leftPanelWidth = 300.0f;
-    focusPreset.rightPanelWidth = 350.0f;
-    focusPreset.bottomPanelHeight = 0.0f;
-    focusPreset.sceneHierarchyOpen = true;
-    focusPreset.inspectorOpen = true;
-    focusPreset.viewportOpen = false;
-    focusPreset.lightingOpen = false;
-    focusPreset.consoleOpen = false;
-    focusPreset.inspectorHeightRatio = 1.0f;
-    focusPreset.viewportHeightRatio = 0.0f;
-    focusPreset.lightingHeightRatio = 0.0f;
-    m_Presets.push_back(focusPreset);
-
-    // Lighting Artist
-    LayoutPreset lightingPreset;
-    lightingPreset.name = "Lighting Artist";
-    lightingPreset.icon = "*";
-    lightingPreset.description = "Expanded lighting panel for light setup";
-    lightingPreset.isBuiltIn = true;
-    lightingPreset.leftPanelWidth = 260.0f;
-    lightingPreset.rightPanelWidth = 380.0f;
-    lightingPreset.bottomPanelHeight = 180.0f;
-    lightingPreset.inspectorHeightRatio = 0.35f;
-    lightingPreset.viewportHeightRatio = 0.25f;
-    lightingPreset.lightingHeightRatio = 0.4f;
-    m_Presets.push_back(lightingPreset);
-
-    // Debug Mode
-    LayoutPreset debugPreset;
-    debugPreset.name = "Debug Mode";
-    debugPreset.icon = ">#";
-    debugPreset.description = "Large console for debugging output";
-    debugPreset.isBuiltIn = true;
-    debugPreset.leftPanelWidth = 280.0f;
-    debugPreset.rightPanelWidth = 300.0f;
-    debugPreset.bottomPanelHeight = 300.0f;
-    debugPreset.inspectorHeightRatio = 0.5f;
-    debugPreset.viewportHeightRatio = 0.25f;
-    debugPreset.lightingHeightRatio = 0.25f;
-    m_Presets.push_back(debugPreset);
-}
-
-// =============================================================================
-// PRESET SYSTEM - FILE I/O
-// =============================================================================
-
-void EditorUI::LoadPresetsFromFile() {
-    try {
-        std::ifstream file("layout_presets.json");
-        if (!file.is_open()) return;
-
-        json j;
-        file >> j;
-
-        for (const auto& item : j["presets"]) {
-            LayoutPreset preset;
-            preset.name = item.value("name", "Unnamed");
-            preset.icon = item.value("icon", "?");
-            preset.description = item.value("description", "");
-            preset.isBuiltIn = false;  // Loaded presets are never built-in
-            preset.leftPanelWidth = item.value("leftPanelWidth", Layout::LeftPanelWidth);
-            preset.rightPanelWidth = item.value("rightPanelWidth", Layout::RightPanelWidth);
-            preset.bottomPanelHeight = item.value("bottomPanelHeight", Layout::BottomPanelHeight);
-            preset.sceneHierarchyOpen = item.value("sceneHierarchyOpen", true);
-            preset.inspectorOpen = item.value("inspectorOpen", true);
-            preset.viewportOpen = item.value("viewportOpen", true);
-            preset.lightingOpen = item.value("lightingOpen", true);
-            preset.consoleOpen = item.value("consoleOpen", true);
-            preset.inspectorHeightRatio = item.value("inspectorHeightRatio", 0.5f);
-            preset.viewportHeightRatio = item.value("viewportHeightRatio", 0.25f);
-            preset.lightingHeightRatio = item.value("lightingHeightRatio", 0.25f);
-
-            m_Presets.push_back(preset);
+void EditorUI::CalculateLayout() {
+    // If layout is unlocked, let users move panels freely
+    if (!m_LayoutLocked) {
+        // Clear dynamic layout on all views so they can be moved
+        auto& views = ViewManager::Get().GetViews();
+        for (auto& view : views) {
+            view->ClearDynamicLayout();
         }
+        return;
+    }
 
-        // Load last used preset
-        if (j.contains("currentPreset")) {
-            std::string lastPreset = j["currentPreset"];
-            for (const auto& p : m_Presets) {
-                if (p.name == lastPreset) {
-                    LoadPreset(lastPreset);
-                    break;
-                }
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    float vw = viewport->WorkSize.x;
+    float vh = viewport->WorkSize.y;
+
+    // Use minimum viable size if viewport not ready yet
+    if (vw < 100) vw = 1280;
+    if (vh < 100) vh = 720;
+
+    float menuH = s_Layout.menuBarHeight;
+
+    auto& views = ViewManager::Get().GetViews();
+
+    // Count open views (excluding Scene which is handled separately)
+    int openCount = 0;
+    for (auto& view : views) {
+        if (view->IsOpen() && view->GetName() != "Scene") {
+            openCount++;
+        }
+    }
+
+    // Dynamic layout - positions update every frame based on viewport size
+    // This ensures panels resize/reposition when window is resized or fullscreen
+
+    if (openCount >= 6) {
+        // === TILE LAYOUT - Grid arrangement to avoid overlap ===
+        int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(openCount))));
+        int rows = static_cast<int>(std::ceil(static_cast<float>(openCount) / cols));
+
+        float cellW = vw / cols;
+        float cellH = (vh - menuH) / rows;
+        float padding = 2.0f;
+
+        int idx = 0;
+        for (auto& view : views) {
+            if (view->GetName() == "Scene") continue;
+
+            if (view->IsOpen()) {
+                int col = idx % cols;
+                int row = idx / cols;
+
+                float x = col * cellW + padding;
+                float y = menuH + row * cellH + padding;
+                float w = cellW - padding * 2;
+                float h = cellH - padding * 2;
+
+                view->SetDynamicLayout(ImVec2(x, y), ImVec2(w, h));
+                idx++;
+            } else {
+                view->ClearDynamicLayout();
             }
         }
-    } catch (...) {
-        // Silently fail - just use built-in presets
     }
-}
+    else {
+        // === STANDARD LAYOUT - Professional editor arrangement ===
+        // All positions are dynamic and scale with viewport
 
-void EditorUI::SavePresetsToFile() {
-    try {
-        json j;
-        j["currentPreset"] = m_CurrentPresetName;
+        // Proportional sizing based on viewport
+        float leftW = std::max(200.0f, vw * 0.18f);   // ~18% of width, min 200
+        float rightW = std::max(280.0f, vw * 0.22f);  // ~22% of width, min 280
+        float bottomH = std::max(150.0f, vh * 0.25f); // ~25% of height, min 150
+        float centerW = vw - leftW - rightW;
+        float topH = vh - menuH - bottomH;
 
-        json presets = json::array();
-        for (const auto& p : m_Presets) {
-            if (p.isBuiltIn) continue;  // Don't save built-in presets
+        // Track cascade offset for secondary views
+        int cascadeIdx = 0;
+        float cascadeStep = 30.0f;
 
-            json preset;
-            preset["name"] = p.name;
-            preset["icon"] = p.icon;
-            preset["description"] = p.description;
-            preset["leftPanelWidth"] = p.leftPanelWidth;
-            preset["rightPanelWidth"] = p.rightPanelWidth;
-            preset["bottomPanelHeight"] = p.bottomPanelHeight;
-            preset["sceneHierarchyOpen"] = p.sceneHierarchyOpen;
-            preset["inspectorOpen"] = p.inspectorOpen;
-            preset["viewportOpen"] = p.viewportOpen;
-            preset["lightingOpen"] = p.lightingOpen;
-            preset["consoleOpen"] = p.consoleOpen;
-            preset["inspectorHeightRatio"] = p.inspectorHeightRatio;
-            preset["viewportHeightRatio"] = p.viewportHeightRatio;
-            preset["lightingHeightRatio"] = p.lightingHeightRatio;
+        for (auto& view : views) {
+            const std::string& name = view->GetName();
 
-            presets.push_back(preset);
+            if (!view->IsOpen()) {
+                view->ClearDynamicLayout();
+                continue;
+            }
+
+            // === CORE VIEWS - Dynamic positions that scale with window ===
+            if (name == "Hierarchy") {
+                view->SetDynamicLayout(
+                    ImVec2(0, menuH),
+                    ImVec2(leftW, topH)
+                );
+            }
+            else if (name == "Inspector") {
+                view->SetDynamicLayout(
+                    ImVec2(vw - rightW, menuH),
+                    ImVec2(rightW, topH)
+                );
+            }
+            else if (name == "Console") {
+                view->SetDynamicLayout(
+                    ImVec2(0, vh - bottomH),
+                    ImVec2(vw * 0.5f, bottomH)
+                );
+            }
+            else if (name == "Asset Browser") {
+                view->SetDynamicLayout(
+                    ImVec2(vw * 0.5f, vh - bottomH),
+                    ImVec2(vw * 0.5f, bottomH)
+                );
+            }
+            else if (name == "Scene") {
+                // Scene toolbar is handled in SceneView::OnRender
+                view->ClearDynamicLayout();
+            }
+            // === SECONDARY VIEWS - Cascade in center area ===
+            else {
+                float cascadeX = leftW + 10 + (cascadeIdx * cascadeStep);
+                float cascadeY = menuH + 10 + (cascadeIdx * cascadeStep);
+
+                // Wrap cascade if it goes too far
+                float maxCascadeX = vw - rightW - 350;
+                float maxCascadeY = vh - bottomH - 250;
+
+                if (cascadeX > maxCascadeX) {
+                    cascadeX = leftW + 10 + ((cascadeIdx % 3) * cascadeStep);
+                }
+                if (cascadeY > maxCascadeY) {
+                    cascadeY = menuH + 10 + ((cascadeIdx % 4) * cascadeStep);
+                }
+
+                // Size based on available center space
+                float viewW = std::min(450.0f, centerW * 0.7f);
+                float viewH = std::min(350.0f, topH * 0.8f);
+
+                view->SetDynamicLayout(
+                    ImVec2(cascadeX, cascadeY),
+                    ImVec2(viewW, viewH)
+                );
+                cascadeIdx++;
+            }
         }
-        j["presets"] = presets;
-
-        std::ofstream file("layout_presets.json");
-        file << j.dump(2);
-    } catch (...) {
-        // Silently fail
     }
 }
 
 // =============================================================================
-// PRESET SYSTEM - MANAGEMENT
-// =============================================================================
-
-void EditorUI::SavePreset(const std::string& name) {
-    LayoutPreset preset = CaptureCurrentLayout(name);
-
-    // Check if preset exists
-    for (auto& p : m_Presets) {
-        if (p.name == name && !p.isBuiltIn) {
-            p = preset;
-            SavePresetsToFile();
-            return;
-        }
-    }
-
-    // Add new preset
-    m_Presets.push_back(preset);
-    m_CurrentPresetName = name;
-    SavePresetsToFile();
-}
-
-void EditorUI::LoadPreset(const std::string& name) {
-    for (const auto& p : m_Presets) {
-        if (p.name == name) {
-            ApplyPreset(p);
-            m_CurrentPresetName = name;
-            return;
-        }
-    }
-}
-
-void EditorUI::DeletePreset(const std::string& name) {
-    auto it = std::remove_if(m_Presets.begin(), m_Presets.end(),
-        [&name](const LayoutPreset& p) { return p.name == name && !p.isBuiltIn; });
-    m_Presets.erase(it, m_Presets.end());
-    SavePresetsToFile();
-}
-
-void EditorUI::ApplyPreset(const LayoutPreset& preset) {
-    m_LeftPanelWidth = preset.leftPanelWidth;
-    m_RightPanelWidth = preset.rightPanelWidth;
-    m_BottomPanelHeight = preset.bottomPanelHeight;
-    m_InspectorHeightRatio = preset.inspectorHeightRatio;
-    m_ViewportHeightRatio = preset.viewportHeightRatio;
-    m_LightingHeightRatio = preset.lightingHeightRatio;
-
-    if (m_SceneHierarchy) m_SceneHierarchy->SetOpen(preset.sceneHierarchyOpen);
-    if (m_Inspector) m_Inspector->SetOpen(preset.inspectorOpen);
-    if (m_Viewport) m_Viewport->SetOpen(preset.viewportOpen);
-    if (m_Lighting) m_Lighting->SetOpen(preset.lightingOpen);
-    if (m_Console) m_Console->SetOpen(preset.consoleOpen);
-
-    m_LayoutDirty = true;
-}
-
-LayoutPreset EditorUI::CaptureCurrentLayout(const std::string& name) {
-    LayoutPreset preset;
-    preset.name = name;
-    preset.icon = "+";
-    preset.description = "Custom layout";
-    preset.isBuiltIn = false;
-    preset.leftPanelWidth = m_LeftPanelWidth;
-    preset.rightPanelWidth = m_RightPanelWidth;
-    preset.bottomPanelHeight = m_BottomPanelHeight;
-    preset.sceneHierarchyOpen = m_SceneHierarchy ? m_SceneHierarchy->IsOpen() : true;
-    preset.inspectorOpen = m_Inspector ? m_Inspector->IsOpen() : true;
-    preset.viewportOpen = m_Viewport ? m_Viewport->IsOpen() : true;
-    preset.lightingOpen = m_Lighting ? m_Lighting->IsOpen() : true;
-    preset.consoleOpen = m_Console ? m_Console->IsOpen() : true;
-    preset.inspectorHeightRatio = m_InspectorHeightRatio;
-    preset.viewportHeightRatio = m_ViewportHeightRatio;
-    preset.lightingHeightRatio = m_LightingHeightRatio;
-
-    return preset;
-}
-
-// =============================================================================
-// RENDER - MAIN
+// MAIN RENDER
 // =============================================================================
 
 void EditorUI::Render() {
-    // Setup layout only when viewport changes
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    if (viewport->Size.x != m_LastViewportSize.x || viewport->Size.y != m_LastViewportSize.y) {
-        m_LastViewportSize = viewport->Size;
-        m_LayoutDirty = true;
-    }
-
-    // Always recalculate layout when dirty (before rendering panels)
-    if (m_LayoutDirty) {
-        CalculateLayout();
-    }
+    // Calculate dynamic layout based on current viewport
+    CalculateLayout();
 
     // Render menu bar
     RenderMenuBar();
 
-    // Apply cached positions and render panels directly
-    RenderPanels();
+    // Render all views
+    ViewManager::Get().Render();
 
-    // Clear dirty flag AFTER panels are rendered with the new layout
-    // This ensures panels get the forced positions when layout changes
-    // Note: Settings window may set this back to true for next frame
-    m_LayoutDirty = false;
-
-    // Render preset management window
-    if (m_ShowPresetWindow) {
-        RenderLayoutPresetWindow();
+    // Render workspace management window
+    if (m_ShowWorkspaceWindow) {
+        RenderWorkspaceWindow();
     }
 
-    // Render window settings (may set m_LayoutDirty for next frame)
-    if (m_ShowWindowSettings) {
-        ImGui::SetNextWindowSize(ImVec2(350, 450), ImGuiCond_FirstUseEver);
-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    // Save workspace popup
+    if (m_ShowSaveWorkspacePopup) {
+        ImGui::OpenPopup("Save Workspace");
+        m_ShowSaveWorkspacePopup = false;
+    }
 
-        // Focus only when just opened
-        if (m_WindowSettingsJustOpened) {
-            ImGui::SetNextWindowFocus();
-            m_WindowSettingsJustOpened = false;
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Save Workspace", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Save the current workspace configuration");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Name:");
+        ImGui::SetNextItemWidth(300);
+        ImGui::InputText("##WorkspaceName", m_NewWorkspaceName, sizeof(m_NewWorkspaceName));
+
+        ImGui::Spacing();
+        ImGui::Text("Description:");
+        ImGui::SetNextItemWidth(300);
+        ImGui::InputTextMultiline("##WorkspaceDesc", m_NewWorkspaceDescription,
+                                  sizeof(m_NewWorkspaceDescription), ImVec2(0, 60));
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool canSave = strlen(m_NewWorkspaceName) > 0;
+
+        if (!canSave) ImGui::BeginDisabled();
+
+        if (ImGui::Button("Save", ImVec2(120, 0))) {
+            SaveWorkspace(m_NewWorkspaceName, m_NewWorkspaceDescription);
+            ImGui::CloseCurrentPopup();
         }
 
-        if (ImGui::Begin("Panel Settings", &m_ShowWindowSettings, ImGuiWindowFlags_NoCollapse)) {
-            // Show what to expect
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.5f, 1.0f), "Drag sliders to resize panels!");
-            ImGui::Spacing();
+        if (!canSave) ImGui::EndDisabled();
 
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Panel Sizes");
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::Text("Left Panel (Scene Hierarchy): %.0f px", m_LeftPanelWidth);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderFloat("##LeftWidth", &m_LeftPanelWidth, 180.0f, 500.0f, "%.0f px")) {
-                m_LayoutDirty = true;
-            }
-
-            ImGui::Spacing();
-
-            ImGui::Text("Right Panel (Inspector etc): %.0f px", m_RightPanelWidth);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderFloat("##RightWidth", &m_RightPanelWidth, 200.0f, 600.0f, "%.0f px")) {
-                m_LayoutDirty = true;
-            }
-
-            ImGui::Spacing();
-
-            ImGui::Text("Bottom Panel (Console): %.0f px", m_BottomPanelHeight);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderFloat("##BottomHeight", &m_BottomPanelHeight, 50.0f, 400.0f, "%.0f px")) {
-                m_LayoutDirty = true;
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Right Panel Distribution");
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            // Convert to percentages for display (0-100 scale)
-            float inspectorPct = m_InspectorHeightRatio * 100.0f;
-            float viewportPct = m_ViewportHeightRatio * 100.0f;
-            float lightingPct = m_LightingHeightRatio * 100.0f;
-
-            ImGui::Text("Inspector: %.0f%%", inspectorPct);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderFloat("##InspectorRatio", &inspectorPct, 20.0f, 80.0f, "%.0f%%")) {
-                m_InspectorHeightRatio = inspectorPct / 100.0f;
-                float remaining = 1.0f - m_InspectorHeightRatio;
-                float oldTotal = m_ViewportHeightRatio + m_LightingHeightRatio;
-                if (oldTotal > 0.001f) {
-                    float ratio = m_ViewportHeightRatio / oldTotal;
-                    m_ViewportHeightRatio = remaining * ratio;
-                    m_LightingHeightRatio = remaining * (1.0f - ratio);
-                } else {
-                    m_ViewportHeightRatio = remaining * 0.5f;
-                    m_LightingHeightRatio = remaining * 0.5f;
-                }
-                m_LayoutDirty = true;
-            }
-
-            ImGui::Text("Viewport: %.0f%%", viewportPct);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderFloat("##ViewportRatio", &viewportPct, 10.0f, 50.0f, "%.0f%%")) {
-                m_ViewportHeightRatio = viewportPct / 100.0f;
-                m_LightingHeightRatio = 1.0f - m_InspectorHeightRatio - m_ViewportHeightRatio;
-                if (m_LightingHeightRatio < 0.1f) {
-                    m_LightingHeightRatio = 0.1f;
-                    m_ViewportHeightRatio = 1.0f - m_InspectorHeightRatio - m_LightingHeightRatio;
-                }
-                m_LayoutDirty = true;
-            }
-
-            ImGui::Text("Lighting: %.0f%%", lightingPct);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderFloat("##LightingRatio", &lightingPct, 10.0f, 50.0f, "%.0f%%")) {
-                m_LightingHeightRatio = lightingPct / 100.0f;
-                m_ViewportHeightRatio = 1.0f - m_InspectorHeightRatio - m_LightingHeightRatio;
-                if (m_ViewportHeightRatio < 0.1f) {
-                    m_ViewportHeightRatio = 0.1f;
-                    m_LightingHeightRatio = 1.0f - m_InspectorHeightRatio - m_ViewportHeightRatio;
-                }
-                m_LayoutDirty = true;
-            }
-
-            ImGui::Spacing();
-            ImGui::Text("Total: %.0f%%", (m_InspectorHeightRatio + m_ViewportHeightRatio + m_LightingHeightRatio) * 100.0f);
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            // Reset button
-            if (ImGui::Button("Reset to Default", ImVec2(-1, 0))) {
-                m_LeftPanelWidth = Layout::LeftPanelWidth;
-                m_RightPanelWidth = Layout::RightPanelWidth;
-                m_BottomPanelHeight = Layout::BottomPanelHeight;
-                m_InspectorHeightRatio = 0.5f;
-                m_ViewportHeightRatio = 0.25f;
-                m_LightingHeightRatio = 0.25f;
-                m_LayoutDirty = true;
-            }
-
-            ImGui::Spacing();
-
-            if (ImGui::Button("Apply Layout", ImVec2(-1, 0))) {
-                m_LayoutDirty = true;
-            }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
         }
-        ImGui::End();
+
+        ImGui::EndPopup();
     }
 }
 
+// Keep SetupDockspace for compatibility but it does nothing now
+void EditorUI::SetupDockspace() {}
+
 // =============================================================================
-// RENDER - MENU BAR
+// MENU BAR
 // =============================================================================
 
 void EditorUI::RenderMenuBar() {
@@ -515,10 +330,6 @@ void EditorUI::RenderMenuBar() {
                 m_Engine->mainCamera.position = glm::vec3(0.f, 5.f, 10.f);
                 m_Engine->mainCamera.pitch = -0.3f;
                 m_Engine->mainCamera.yaw = 0.f;
-                m_Engine->mainCamera.targetPosition = m_Engine->mainCamera.position;
-                m_Engine->mainCamera.targetPitch = m_Engine->mainCamera.pitch;
-                m_Engine->mainCamera.targetYaw = m_Engine->mainCamera.yaw;
-                m_Engine->mainCamera.focusActive = false;
                 m_Engine->mainCamera.updateProjectionMatrix();
             }
             ImGui::EndMenu();
@@ -526,76 +337,13 @@ void EditorUI::RenderMenuBar() {
 
         // === VIEW MENU ===
         if (ImGui::BeginMenu("View")) {
-            // Panel toggles
-            ImGui::TextDisabled("Panels");
-            if (m_SceneHierarchy) {
-                bool open = m_SceneHierarchy->IsOpen();
-                if (ImGui::MenuItem("Scene Hierarchy", nullptr, &open)) {
-                    m_SceneHierarchy->SetOpen(open);
-                }
-            }
-            if (m_Inspector) {
-                bool open = m_Inspector->IsOpen();
-                if (ImGui::MenuItem("Inspector", nullptr, &open)) {
-                    m_Inspector->SetOpen(open);
-                }
-            }
-            if (m_Viewport) {
-                bool open = m_Viewport->IsOpen();
-                if (ImGui::MenuItem("Viewport Settings", nullptr, &open)) {
-                    m_Viewport->SetOpen(open);
-                }
-            }
-            if (m_Lighting) {
-                bool open = m_Lighting->IsOpen();
-                if (ImGui::MenuItem("Lighting", nullptr, &open)) {
-                    m_Lighting->SetOpen(open);
-                }
-            }
-            if (m_Console) {
-                bool open = m_Console->IsOpen();
-                if (ImGui::MenuItem("Console", nullptr, &open)) {
-                    m_Console->SetOpen(open);
-                }
-            }
-
-            ImGui::Separator();
-            ImGui::TextDisabled("Layout Presets");
-
-            // Quick preset buttons
-            for (const auto& preset : m_Presets) {
-                bool isActive = (preset.name == m_CurrentPresetName);
-                std::string label = preset.icon + "  " + preset.name;
-                if (ImGui::MenuItem(label.c_str(), nullptr, isActive)) {
-                    LoadPreset(preset.name);
-                }
-            }
-
-            ImGui::Separator();
-            if (ImGui::MenuItem("Manage Presets...")) {
-                m_ShowPresetWindow = true;
-            }
-            if (ImGui::MenuItem("Save Current Layout...")) {
-                m_ShowSavePresetPopup = true;
-                memset(m_NewPresetName, 0, sizeof(m_NewPresetName));
-                memset(m_NewPresetDescription, 0, sizeof(m_NewPresetDescription));
-            }
-
+            RenderViewMenu();
             ImGui::EndMenu();
         }
 
-        // === WINDOW MENU ===
-        if (ImGui::BeginMenu("Window")) {
-            if (ImGui::MenuItem("Panel Settings...")) {
-                m_ShowWindowSettings = true;
-                m_WindowSettingsJustOpened = true;
-            }
-            ImGui::Separator();
-            ImGui::Checkbox("Magnetic Snap", &m_SnapEnabled);
-            if (m_SnapEnabled) {
-                ImGui::SetNextItemWidth(100);
-                ImGui::SliderFloat("Snap Distance", &m_SnapDistance, 5.0f, 50.0f, "%.0f px");
-            }
+        // === WORKSPACE MENU ===
+        if (ImGui::BeginMenu("Workspace")) {
+            RenderWorkspaceMenu();
             ImGui::EndMenu();
         }
 
@@ -603,67 +351,12 @@ void EditorUI::RenderMenuBar() {
         float rightOffset = ImGui::GetWindowWidth() - 280.0f;
         ImGui::SetCursorPosX(rightOffset);
 
-        // Current preset indicator
-        ImGui::TextDisabled("[%s]", m_CurrentPresetName.c_str());
+        // Current workspace indicator
+        ImGui::TextDisabled("[%s]", m_CurrentWorkspaceName.c_str());
         ImGui::SameLine();
         ImGui::Text("FPS: %.0f | %.2f ms", 1000.0f / m_Engine->stats.frametime, m_Engine->stats.frametime);
 
         ImGui::EndMainMenuBar();
-    }
-
-    // Save preset popup
-    if (m_ShowSavePresetPopup) {
-        ImGui::OpenPopup("Save Layout Preset");
-        m_ShowSavePresetPopup = false;
-    }
-
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-
-    if (ImGui::BeginPopupModal("Save Layout Preset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Save the current layout as a preset");
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Name:");
-        ImGui::SetNextItemWidth(300);
-        ImGui::InputText("##PresetName", m_NewPresetName, sizeof(m_NewPresetName));
-
-        ImGui::Spacing();
-        ImGui::Text("Description:");
-        ImGui::SetNextItemWidth(300);
-        ImGui::InputTextMultiline("##PresetDesc", m_NewPresetDescription, sizeof(m_NewPresetDescription),
-            ImVec2(0, 60));
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        bool canSave = strlen(m_NewPresetName) > 0;
-
-        if (!canSave) {
-            ImGui::BeginDisabled();
-        }
-
-        if (ImGui::Button("Save", ImVec2(120, 0))) {
-            LayoutPreset preset = CaptureCurrentLayout(m_NewPresetName);
-            preset.description = m_NewPresetDescription;
-            m_Presets.push_back(preset);
-            m_CurrentPresetName = preset.name;
-            SavePresetsToFile();
-            ImGui::CloseCurrentPopup();
-        }
-
-        if (!canSave) {
-            ImGui::EndDisabled();
-        }
-
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
     }
 
     // Keyboard shortcuts
@@ -687,52 +380,90 @@ void EditorUI::RenderMenuBar() {
                 m_Engine->static_shapes.erase(m_Engine->static_shapes.begin() + m_Engine->selectedPrimitiveIndex);
                 m_Engine->selectedPrimitiveIndex = -1;
             }
-            if (m_Engine->selectedNode != nullptr) {
-                m_Engine->selectedNode = nullptr;
-                m_Engine->selectedObjectName.clear();
-            }
         }
 
         if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
             m_Engine->mainCamera.position = glm::vec3(0.f, 5.f, 10.f);
             m_Engine->mainCamera.pitch = -0.3f;
             m_Engine->mainCamera.yaw = 0.f;
-            m_Engine->mainCamera.targetPosition = m_Engine->mainCamera.position;
-            m_Engine->mainCamera.targetPitch = m_Engine->mainCamera.pitch;
-            m_Engine->mainCamera.targetYaw = m_Engine->mainCamera.yaw;
-            m_Engine->mainCamera.focusActive = false;
             m_Engine->mainCamera.updateProjectionMatrix();
         }
     }
 }
 
 // =============================================================================
-// RENDER - LAYOUT PRESET WINDOW
+// VIEW MENU
 // =============================================================================
 
-void EditorUI::RenderLayoutPresetWindow() {
+void EditorUI::RenderViewMenu() {
+    ViewManager::Get().RenderViewMenu();
+}
+
+// =============================================================================
+// WORKSPACE MENU
+// =============================================================================
+
+void EditorUI::RenderWorkspaceMenu() {
+    // Built-in and custom workspaces
+    ImGui::TextDisabled("Workspaces");
+    ImGui::Separator();
+
+    for (const auto& workspace : m_Workspaces) {
+        bool isActive = (workspace.name == m_CurrentWorkspaceName);
+        std::string label = workspace.icon + "  " + workspace.name;
+
+        if (workspace.isBuiltIn) {
+            label += " (Built-in)";
+        }
+
+        if (ImGui::MenuItem(label.c_str(), nullptr, isActive)) {
+            LoadWorkspace(workspace.name);
+        }
+
+        if (ImGui::IsItemHovered() && !workspace.description.empty()) {
+            ImGui::SetTooltip("%s", workspace.description.c_str());
+        }
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::MenuItem("Save Current Workspace...")) {
+        m_ShowSaveWorkspacePopup = true;
+        memset(m_NewWorkspaceName, 0, sizeof(m_NewWorkspaceName));
+        memset(m_NewWorkspaceDescription, 0, sizeof(m_NewWorkspaceDescription));
+    }
+
+    if (ImGui::MenuItem("Manage Workspaces...")) {
+        m_ShowWorkspaceWindow = true;
+    }
+}
+
+// =============================================================================
+// WORKSPACE WINDOW
+// =============================================================================
+
+void EditorUI::RenderWorkspaceWindow() {
     ImGui::SetNextWindowSize(ImVec2(500, 450), ImGuiCond_FirstUseEver);
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::Begin("Layout Presets", &m_ShowPresetWindow, ImGuiWindowFlags_NoCollapse)) {
-        // Header with current preset
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Current Layout:");
+    if (ImGui::Begin("Workspace Manager", &m_ShowWorkspaceWindow, ImGuiWindowFlags_NoCollapse)) {
+        // Header
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Current Workspace:");
         ImGui::SameLine();
-        ImGui::Text("%s", m_CurrentPresetName.c_str());
+        ImGui::Text("%s", m_CurrentWorkspaceName.c_str());
 
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Preset list with cards
-        ImGui::BeginChild("PresetList", ImVec2(0, -60), true);
+        // Workspace list
+        ImGui::BeginChild("WorkspaceList", ImVec2(0, -60), true);
 
-        for (size_t i = 0; i < m_Presets.size(); ++i) {
-            const auto& preset = m_Presets[i];
-            bool isSelected = (m_SelectedPresetIndex == static_cast<int>(i));
-            bool isActive = (preset.name == m_CurrentPresetName);
+        for (size_t i = 0; i < m_Workspaces.size(); ++i) {
+            const auto& workspace = m_Workspaces[i];
+            bool isSelected = (m_SelectedWorkspaceIndex == static_cast<int>(i));
+            bool isActive = (workspace.name == m_CurrentWorkspaceName);
 
-            // Card style
             ImGui::PushID(static_cast<int>(i));
 
             ImVec4 cardColor = isActive ?
@@ -750,32 +481,27 @@ void EditorUI::RenderLayoutPresetWindow() {
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
 
                 // Icon and name
-                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s", preset.icon.c_str());
+                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s", workspace.icon.c_str());
                 ImGui::SameLine();
 
-                if (preset.isBuiltIn) {
-                    ImGui::Text("%s", preset.name.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(Built-in)");
-                } else {
-                    ImGui::Text("%s", preset.name.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(Custom)");
-                }
+                ImGui::Text("%s", workspace.name.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled(workspace.isBuiltIn ? "(Built-in)" : "(Custom)");
 
                 // Description
-                ImGui::TextDisabled("%s", preset.description.c_str());
+                if (!workspace.description.empty()) {
+                    ImGui::TextDisabled("%s", workspace.description.c_str());
+                }
 
-                // Panel info
-                ImGui::TextDisabled("Left: %.0f | Right: %.0f | Bottom: %.0f",
-                    preset.leftPanelWidth, preset.rightPanelWidth, preset.bottomPanelHeight);
+                // View count
+                ImGui::TextDisabled("%zu views configured", workspace.viewStates.size());
 
                 // Click handling
                 if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
-                    m_SelectedPresetIndex = static_cast<int>(i);
+                    m_SelectedWorkspaceIndex = static_cast<int>(i);
                 }
                 if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(0)) {
-                    LoadPreset(preset.name);
+                    LoadWorkspace(workspace.name);
                 }
             }
             ImGui::EndChild();
@@ -793,12 +519,13 @@ void EditorUI::RenderLayoutPresetWindow() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        bool hasSelection = m_SelectedPresetIndex >= 0 && m_SelectedPresetIndex < static_cast<int>(m_Presets.size());
-        bool canDelete = hasSelection && !m_Presets[m_SelectedPresetIndex].isBuiltIn;
+        bool hasSelection = m_SelectedWorkspaceIndex >= 0 &&
+                           m_SelectedWorkspaceIndex < static_cast<int>(m_Workspaces.size());
+        bool canDelete = hasSelection && !m_Workspaces[m_SelectedWorkspaceIndex].isBuiltIn;
 
         if (ImGui::Button("Apply", ImVec2(80, 0))) {
             if (hasSelection) {
-                LoadPreset(m_Presets[m_SelectedPresetIndex].name);
+                LoadWorkspace(m_Workspaces[m_SelectedWorkspaceIndex].name);
             }
         }
         ImGui::SameLine();
@@ -806,192 +533,293 @@ void EditorUI::RenderLayoutPresetWindow() {
         if (!canDelete) ImGui::BeginDisabled();
         if (ImGui::Button("Delete", ImVec2(80, 0))) {
             if (canDelete) {
-                DeletePreset(m_Presets[m_SelectedPresetIndex].name);
-                m_SelectedPresetIndex = -1;
+                DeleteWorkspace(m_Workspaces[m_SelectedWorkspaceIndex].name);
+                m_SelectedWorkspaceIndex = -1;
             }
         }
         if (!canDelete) ImGui::EndDisabled();
 
         ImGui::SameLine();
         if (ImGui::Button("Save Current...", ImVec2(120, 0))) {
-            m_ShowSavePresetPopup = true;
-            memset(m_NewPresetName, 0, sizeof(m_NewPresetName));
-            memset(m_NewPresetDescription, 0, sizeof(m_NewPresetDescription));
+            m_ShowSaveWorkspacePopup = true;
+            memset(m_NewWorkspaceName, 0, sizeof(m_NewWorkspaceName));
+            memset(m_NewWorkspaceDescription, 0, sizeof(m_NewWorkspaceDescription));
         }
 
         ImGui::SameLine();
         float closeButtonX = ImGui::GetWindowWidth() - 90;
         ImGui::SetCursorPosX(closeButtonX);
         if (ImGui::Button("Close", ImVec2(80, 0))) {
-            m_ShowPresetWindow = false;
+            m_ShowWorkspaceWindow = false;
         }
     }
     ImGui::End();
 }
 
 // =============================================================================
-// RENDER - LAYOUT CALCULATION
+// WORKSPACE MANAGEMENT - BUILT-IN WORKSPACES
 // =============================================================================
 
-void EditorUI::CalculateLayout() {
-    float w = m_LastViewportSize.x;
-    float h = m_LastViewportSize.y;
-    float top = Layout::MenuBarHeight;
-    float mainH = h - top - m_BottomPanelHeight;
+void EditorUI::InitBuiltInWorkspaces() {
+    m_Workspaces.clear();
 
-    // Calculate right panel heights based on ratios
-    float inspectorH = mainH * m_InspectorHeightRatio;
-    float viewportH = mainH * m_ViewportHeightRatio;
-    float lightingH = mainH * m_LightingHeightRatio;
+    // Default Workspace - Core editor views
+    WorkspaceLayout defaultWs;
+    defaultWs.name = "Default";
+    defaultWs.icon = "|||";
+    defaultWs.description = "Standard editor layout with core views";
+    defaultWs.isBuiltIn = true;
+    defaultWs.viewStates = {
+        {"Scene", true, {0, 0}, {0, 0}},
+        {"Hierarchy", true, {0, 0}, {0, 0}},
+        {"Inspector", true, {0, 0}, {0, 0}},
+        {"Console", true, {0, 0}, {0, 0}},
+        {"Asset Browser", true, {0, 0}, {0, 0}}
+    };
+    m_Workspaces.push_back(defaultWs);
 
-    // Cache all positions and sizes
-    m_LayoutCache[0] = {ImVec2(0, top), ImVec2(m_LeftPanelWidth, mainH)};  // SceneHierarchy
-    m_LayoutCache[1] = {ImVec2(w - m_RightPanelWidth, top), ImVec2(m_RightPanelWidth, inspectorH)};  // Inspector
-    m_LayoutCache[2] = {ImVec2(w - m_RightPanelWidth, top + inspectorH), ImVec2(m_RightPanelWidth, viewportH)};  // Viewport
-    m_LayoutCache[3] = {ImVec2(w - m_RightPanelWidth, top + inspectorH + viewportH), ImVec2(m_RightPanelWidth, lightingH)};  // Lighting
-    m_LayoutCache[4] = {ImVec2(0, h - m_BottomPanelHeight), ImVec2(w, m_BottomPanelHeight)};  // Console
+    // Modeling Workspace - Focus on 3D editing
+    WorkspaceLayout modelingWs;
+    modelingWs.name = "Modeling";
+    modelingWs.icon = "[M]";
+    modelingWs.description = "3D modeling with hierarchy, inspector, UV editor";
+    modelingWs.isBuiltIn = true;
+    modelingWs.viewStates = {
+        {"Scene", true, {0, 0}, {0, 0}},
+        {"Hierarchy", true, {0, 0}, {0, 0}},
+        {"Inspector", true, {0, 0}, {0, 0}},
+        {"UV Editor", true, {0, 0}, {0, 0}}
+    };
+    m_Workspaces.push_back(modelingWs);
 
-    m_ViewportPos = ImVec2(m_LeftPanelWidth, top);
-    m_ViewportSize = ImVec2(w - m_LeftPanelWidth - m_RightPanelWidth, mainH);
+    // Debug Workspace - Performance analysis
+    WorkspaceLayout debugWs;
+    debugWs.name = "Debug";
+    debugWs.icon = "[D]";
+    debugWs.description = "Debugging and profiling tools";
+    debugWs.isBuiltIn = true;
+    debugWs.viewStates = {
+        {"Scene", true, {0, 0}, {0, 0}},
+        {"Console", true, {0, 0}, {0, 0}},
+        {"Profiler", true, {0, 0}, {0, 0}},
+        {"GPU Debug", true, {0, 0}, {0, 0}}
+    };
+    m_Workspaces.push_back(debugWs);
+
+    // Graphics Workspace - Material and texture editing
+    WorkspaceLayout graphicsWs;
+    graphicsWs.name = "Graphics";
+    graphicsWs.icon = "[G]";
+    graphicsWs.description = "Material and texture editing tools";
+    graphicsWs.isBuiltIn = true;
+    graphicsWs.viewStates = {
+        {"Scene", true, {0, 0}, {0, 0}},
+        {"Hierarchy", true, {0, 0}, {0, 0}},
+        {"Inspector", true, {0, 0}, {0, 0}},
+        {"Material", true, {0, 0}, {0, 0}},
+        {"Texture", true, {0, 0}, {0, 0}}
+    };
+    m_Workspaces.push_back(graphicsWs);
+
+    // Minimal Workspace - Just scene view
+    WorkspaceLayout minimalWs;
+    minimalWs.name = "Minimal";
+    minimalWs.icon = "[_]";
+    minimalWs.description = "Scene view only - maximum viewport space";
+    minimalWs.isBuiltIn = true;
+    minimalWs.viewStates = {
+        {"Scene", true, {0, 0}, {0, 0}}
+    };
+    m_Workspaces.push_back(minimalWs);
 }
 
 // =============================================================================
-// RENDER - PANELS WITH MAGNETIC SNAPPING
+// WORKSPACE FILE I/O
 // =============================================================================
 
-void EditorUI::CollectSnapEdges(int excludePanelIndex) {
-    m_SnapEdgesX.clear();
-    m_SnapEdgesY.clear();
+void EditorUI::LoadWorkspacesFromFile() {
+    try {
+        std::ifstream file("workspaces.json");
+        if (!file.is_open()) return;
 
-    // Screen edges
-    m_SnapEdgesX.push_back(0.0f);                          // Left edge
-    m_SnapEdgesX.push_back(m_LastViewportSize.x);          // Right edge
-    m_SnapEdgesY.push_back(Layout::MenuBarHeight);         // Top (below menu)
-    m_SnapEdgesY.push_back(m_LastViewportSize.y);          // Bottom edge
+        json j;
+        file >> j;
 
-    // Add edges from other panels
-    Panel* panels[] = { m_SceneHierarchy, m_Inspector, m_Viewport, m_Lighting, m_Console };
-    for (int i = 0; i < 5; ++i) {
-        if (i == excludePanelIndex) continue;
-        if (!panels[i] || !panels[i]->IsOpen()) continue;
+        for (const auto& item : j["workspaces"]) {
+            WorkspaceLayout ws;
+            ws.name = item.value("name", "Unnamed");
+            ws.icon = item.value("icon", "[?]");
+            ws.description = item.value("description", "");
+            ws.isBuiltIn = false;
 
-        ImVec2 pos = m_LayoutCache[i].pos;
-        ImVec2 size = m_LayoutCache[i].size;
+            if (item.contains("views")) {
+                for (const auto& view : item["views"]) {
+                    ViewLayoutState state;
+                    state.viewName = view.value("name", "");
+                    state.isOpen = view.value("open", true);
+                    state.position.x = view.value("x", 0.0f);
+                    state.position.y = view.value("y", 0.0f);
+                    state.size.x = view.value("width", 400.0f);
+                    state.size.y = view.value("height", 300.0f);
+                    ws.viewStates.push_back(state);
+                }
+            }
 
-        // Vertical edges (X positions)
-        m_SnapEdgesX.push_back(pos.x);              // Left edge
-        m_SnapEdgesX.push_back(pos.x + size.x);    // Right edge
-
-        // Horizontal edges (Y positions)
-        m_SnapEdgesY.push_back(pos.y);              // Top edge
-        m_SnapEdgesY.push_back(pos.y + size.y);    // Bottom edge
-    }
-}
-
-ImVec2 EditorUI::SnapPosition(const ImVec2& pos, const ImVec2& size, int panelIndex) {
-    if (!m_SnapEnabled) return pos;
-
-    CollectSnapEdges(panelIndex);
-
-    ImVec2 snappedPos = pos;
-    float snapDist = m_SnapDistance;
-    float bestSnapX = snapDist + 1.0f;  // Track best snap distance
-    float bestSnapY = snapDist + 1.0f;
-
-    // Snap left edge of window
-    for (float edge : m_SnapEdgesX) {
-        float dist = std::abs(pos.x - edge);
-        if (dist < snapDist && dist < bestSnapX) {
-            snappedPos.x = edge;
-            bestSnapX = dist;
-        }
-    }
-
-    // Snap right edge of window
-    float rightEdge = pos.x + size.x;
-    for (float edge : m_SnapEdgesX) {
-        float dist = std::abs(rightEdge - edge);
-        if (dist < snapDist && dist < bestSnapX) {
-            snappedPos.x = edge - size.x;
-            bestSnapX = dist;
-        }
-    }
-
-    // Snap top edge of window
-    for (float edge : m_SnapEdgesY) {
-        float dist = std::abs(pos.y - edge);
-        if (dist < snapDist && dist < bestSnapY) {
-            snappedPos.y = edge;
-            bestSnapY = dist;
-        }
-    }
-
-    // Snap bottom edge of window
-    float bottomEdge = pos.y + size.y;
-    for (float edge : m_SnapEdgesY) {
-        float dist = std::abs(bottomEdge - edge);
-        if (dist < snapDist && dist < bestSnapY) {
-            snappedPos.y = edge - size.y;
-            bestSnapY = dist;
-        }
-    }
-
-    return snappedPos;
-}
-
-void EditorUI::RenderPanels() {
-    Panel* panels[] = { m_SceneHierarchy, m_Inspector, m_Viewport, m_Lighting, m_Console };
-
-    // Collect snap edges at start of frame
-    if (m_SnapEnabled) {
-        CollectSnapEdges(-1);  // Collect all edges
-    }
-
-    for (int i = 0; i < 5; ++i) {
-        Panel* panel = panels[i];
-        if (!panel || !panel->IsOpen()) continue;
-
-        // Apply snap from previous frame
-        if (m_PanelNeedsSnap[i]) {
-            ImGui::SetNextWindowPos(m_PanelSnapTarget[i], ImGuiCond_Always);
-            m_LayoutCache[i].pos = m_PanelSnapTarget[i];
-            m_PanelNeedsSnap[i] = false;
-        }
-        // Apply layout reset/preset
-        else if (m_LayoutDirty) {
-            ImGui::SetNextWindowPos(m_LayoutCache[i].pos, ImGuiCond_Always);
-            ImGui::SetNextWindowSize(m_LayoutCache[i].size, ImGuiCond_Always);
+            m_Workspaces.push_back(ws);
         }
 
-        // Render the panel
-        panel->OnRender();
-
-        // Get current position after render
-        ImVec2 currentPos = panel->GetLastPos();
-        ImVec2 currentSize = panel->GetLastSize();
-
-        // Magnetic snapping - only when NOT being dragged
-        bool isBeingDragged = panel->IsBeingDragged();
-
-        if (m_SnapEnabled && !m_LayoutDirty && !isBeingDragged) {
-            // Recollect edges excluding this panel
-            CollectSnapEdges(i);
-            ImVec2 snappedPos = SnapPosition(currentPos, currentSize, i);
-
-            float dx = std::abs(snappedPos.x - currentPos.x);
-            float dy = std::abs(snappedPos.y - currentPos.y);
-
-            // Snap if position would change significantly
-            if (dx > 1.0f || dy > 1.0f) {
-                m_PanelNeedsSnap[i] = true;
-                m_PanelSnapTarget[i] = snappedPos;
+        // Load last used workspace
+        if (j.contains("currentWorkspace")) {
+            std::string lastWorkspace = j["currentWorkspace"];
+            for (const auto& ws : m_Workspaces) {
+                if (ws.name == lastWorkspace) {
+                    LoadWorkspace(lastWorkspace);
+                    break;
+                }
             }
         }
-
-        // Update cache
-        m_LayoutCache[i].pos = currentPos;
-        m_LayoutCache[i].size = currentSize;
+    } catch (...) {
+        // Silently fail - use built-in workspaces
     }
+}
+
+void EditorUI::SaveWorkspacesToFile() {
+    try {
+        json j;
+        j["currentWorkspace"] = m_CurrentWorkspaceName;
+
+        json workspaces = json::array();
+        for (const auto& ws : m_Workspaces) {
+            if (ws.isBuiltIn) continue;
+
+            json workspace;
+            workspace["name"] = ws.name;
+            workspace["icon"] = ws.icon;
+            workspace["description"] = ws.description;
+
+            json views = json::array();
+            for (const auto& state : ws.viewStates) {
+                json view;
+                view["name"] = state.viewName;
+                view["open"] = state.isOpen;
+                view["x"] = state.position.x;
+                view["y"] = state.position.y;
+                view["width"] = state.size.x;
+                view["height"] = state.size.y;
+                views.push_back(view);
+            }
+            workspace["views"] = views;
+
+            workspaces.push_back(workspace);
+        }
+        j["workspaces"] = workspaces;
+
+        std::ofstream file("workspaces.json");
+        file << j.dump(2);
+    } catch (...) {
+        // Silently fail
+    }
+}
+
+// =============================================================================
+// WORKSPACE OPERATIONS
+// =============================================================================
+
+void EditorUI::SaveWorkspace(const std::string& name, const std::string& description) {
+    WorkspaceLayout ws = CaptureCurrentWorkspace(name);
+    ws.description = description;
+    ws.icon = "[+]";
+
+    // Check if workspace exists
+    for (auto& existing : m_Workspaces) {
+        if (existing.name == name && !existing.isBuiltIn) {
+            existing = ws;
+            SaveWorkspacesToFile();
+            m_CurrentWorkspaceName = name;
+            return;
+        }
+    }
+
+    // Add new workspace
+    m_Workspaces.push_back(ws);
+    m_CurrentWorkspaceName = name;
+    SaveWorkspacesToFile();
+}
+
+void EditorUI::LoadWorkspace(const std::string& name) {
+    for (const auto& ws : m_Workspaces) {
+        if (ws.name == name) {
+            ApplyWorkspace(ws);
+            m_CurrentWorkspaceName = name;
+            return;
+        }
+    }
+}
+
+void EditorUI::DeleteWorkspace(const std::string& name) {
+    auto it = std::remove_if(m_Workspaces.begin(), m_Workspaces.end(),
+        [&name](const WorkspaceLayout& ws) { return ws.name == name && !ws.isBuiltIn; });
+    m_Workspaces.erase(it, m_Workspaces.end());
+    SaveWorkspacesToFile();
+}
+
+void EditorUI::ApplyWorkspace(const WorkspaceLayout& layout) {
+    auto& views = ViewManager::Get().GetViews();
+
+    // First, close all views and clear layouts
+    for (auto& view : views) {
+        view->SetOpen(false);
+        view->ClearDynamicLayout();
+        view->ResetLayout();
+    }
+
+    // Open views specified in workspace
+    for (const auto& state : layout.viewStates) {
+        for (auto& view : views) {
+            if (view->GetName() == state.viewName) {
+                view->SetOpen(state.isOpen);
+                break;
+            }
+        }
+    }
+
+    // Enable locked layout so CalculateLayout positions views without overlap
+    m_LayoutLocked = true;
+    m_ForceLayoutRecalc = true;
+}
+
+WorkspaceLayout EditorUI::CaptureCurrentWorkspace(const std::string& name) {
+    WorkspaceLayout ws;
+    ws.name = name;
+    ws.isBuiltIn = false;
+
+    const auto& views = ViewManager::Get().GetViews();
+    for (const auto& view : views) {
+        ViewLayoutState state;
+        state.viewName = view->GetName();
+        state.isOpen = view->IsOpen();
+        state.position = view->GetLastPos();
+        state.size = view->GetLastSize();
+        ws.viewStates.push_back(state);
+    }
+
+    return ws;
+}
+
+// =============================================================================
+// VIEW SHORTCUTS
+// =============================================================================
+
+void EditorUI::ShowView(const std::string& viewName) {
+    ViewManager::Get().ShowView(viewName);
+}
+
+void EditorUI::HideView(const std::string& viewName) {
+    ViewManager::Get().HideView(viewName);
+}
+
+void EditorUI::ToggleView(const std::string& viewName) {
+    ViewManager::Get().ToggleView(viewName);
 }
 
 } // namespace Yalaz::UI

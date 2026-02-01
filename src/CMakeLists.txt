@@ -75,23 +75,61 @@ add_executable(Yalaz_Engine
     assets/AssetManager.h
     assets/AssetManager.cpp
 
-    # UI System - Professional OOP Architecture
-    ui/Panel.h
+    # UI System - Professional View-Based Architecture
     ui/EditorTheme.h
     ui/EditorSelection.h
-    ui/PanelManager.h
     ui/EditorUI.h
     ui/EditorUI.cpp
-    ui/panels/SceneHierarchyPanel.h
-    ui/panels/SceneHierarchyPanel.cpp
-    ui/panels/InspectorPanel.h
-    ui/panels/InspectorPanel.cpp
-    ui/panels/ViewportPanel.h
-    ui/panels/ViewportPanel.cpp
-    ui/panels/LightingPanel.h
-    ui/panels/LightingPanel.cpp
-    ui/panels/ConsolePanel.h
-    ui/panels/ConsolePanel.cpp
+
+    # View System - Professional AAA-Style Architecture
+    ui/views/EditorView.h
+    ui/views/EditorView.cpp
+    ui/views/ViewManager.h
+    ui/views/ViewManager.cpp
+    ui/views/Views.h
+    ui/views/ViewSystemIntegration.h
+
+    # Phase 1 Views - Core Editor
+    ui/views/SceneView.h
+    ui/views/SceneView.cpp
+    ui/views/GameView.h
+    ui/views/GameView.cpp
+    ui/views/HierarchyView.h
+    ui/views/HierarchyView.cpp
+    ui/views/ObjectInspectorView.h
+    ui/views/ObjectInspectorView.cpp
+    ui/views/AssetBrowserView.h
+    ui/views/AssetBrowserView.cpp
+    ui/views/ConsoleView.h
+    ui/views/ConsoleView.cpp
+
+    # Phase 2 Views - Graphics Tools
+    ui/views/ProfilerView.h
+    ui/views/ProfilerView.cpp
+    ui/views/MaterialView.h
+    ui/views/MaterialView.cpp
+    ui/views/TextureView.h
+    ui/views/TextureView.cpp
+    ui/views/UVView.h
+    ui/views/UVView.cpp
+    ui/views/ShaderDebugView.h
+    ui/views/ShaderDebugView.cpp
+
+    # Phase 3 Views - Advanced Debug & Production
+    ui/views/GPUDebugView.h
+    ui/views/GPUDebugView.cpp
+    ui/views/LightingDebugView.h
+    ui/views/LightingDebugView.cpp
+    ui/views/AnimationView.h
+    ui/views/AnimationView.cpp
+    ui/views/SettingsView.h
+    ui/views/SettingsView.cpp
+    ui/views/PluginManagerView.h
+    ui/views/PluginManagerView.cpp
+    ui/views/PhysicsDebugView.h
+    ui/views/PhysicsDebugView.cpp
+    ui/views/CameraSequencerView.h
+    ui/views/CameraSequencerView.cpp
 )
 
 # =============================================================
@@ -160,7 +198,7 @@ target_include_directories(Yalaz_Engine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/geometry"
     "${CMAKE_CURRENT_SOURCE_DIR}/platform"
     "${CMAKE_CURRENT_SOURCE_DIR}/ui"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ui/panels"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ui/views"
     "${CMAKE_CURRENT_BINARY_DIR}"  # For version_config.h
     "${CMAKE_SOURCE_DIR}/third_party/fastgltf/include"
     "${CMAKE_SOURCE_DIR}/third_party/tinyobjloader"

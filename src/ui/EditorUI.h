@@ -1,9 +1,12 @@
 #pragma once
 // =============================================================================
-// YALAZ ENGINE - Editor UI Controller (Optimized)
+// YALAZ ENGINE - Editor UI Controller
 // =============================================================================
-// Main editor UI system - handles layout, menu bar, and panel coordination
-// Includes layout preset system for saving/loading UI configurations
+// Main editor UI system using the new professional view architecture
+// Features:
+// - Workspace layout presets (multiple design types)
+// - Save/Load workspace configurations
+// - Professional view management
 // =============================================================================
 
 #include <imgui.h>
@@ -11,76 +14,36 @@
 #include <vector>
 #include <unordered_map>
 #include "EditorTheme.h"
-#include "PanelManager.h"
-#include "EditorSelection.h"
+
+// New View System
+#include "views/Views.h"
+#include "views/ViewSystemIntegration.h"
 
 class VulkanEngine;
 
 namespace Yalaz::UI {
 
-// Forward declarations
-class SceneHierarchyPanel;
-class InspectorPanel;
-class ViewportPanel;
-class LightingPanel;
-class ConsolePanel;
-
-// Layout constants (defaults)
-namespace Layout {
-    constexpr float LeftPanelWidth = 280.0f;
-    constexpr float RightPanelWidth = 320.0f;
-    constexpr float BottomPanelHeight = 200.0f;
-    constexpr float MenuBarHeight = 22.0f;
-}
-
-// Cached layout data
-struct LayoutRect {
-    ImVec2 pos;
-    ImVec2 size;
-};
-
-// Panel snap data for magnetic docking
-struct PanelSnapData {
-    ImVec2 pos;
-    ImVec2 size;
-    bool isBeingDragged = false;
-    bool needsSnap = false;
-};
-
-// Panel state for presets
-struct PanelState {
+// =============================================================================
+// Workspace Layout - Save/Load view configurations
+// =============================================================================
+struct ViewLayoutState {
+    std::string viewName;
     bool isOpen = true;
-    float widthRatio = 1.0f;   // Ratio of screen width
-    float heightRatio = 1.0f;  // Ratio of screen height
-    float xRatio = 0.0f;       // Position as ratio
-    float yRatio = 0.0f;
+    ImVec2 position = {0, 0};
+    ImVec2 size = {400, 300};
 };
 
-// Layout preset structure
-struct LayoutPreset {
+struct WorkspaceLayout {
     std::string name;
-    std::string icon;  // Unicode icon for display
     std::string description;
+    std::string icon;
     bool isBuiltIn = false;
-
-    // Panel states (using ratios for resolution independence)
-    float leftPanelWidth = Layout::LeftPanelWidth;
-    float rightPanelWidth = Layout::RightPanelWidth;
-    float bottomPanelHeight = Layout::BottomPanelHeight;
-
-    // Panel visibility
-    bool sceneHierarchyOpen = true;
-    bool inspectorOpen = true;
-    bool viewportOpen = true;
-    bool lightingOpen = true;
-    bool consoleOpen = true;
-
-    // Inspector/Viewport/Lighting height ratios (of main area)
-    float inspectorHeightRatio = 0.5f;
-    float viewportHeightRatio = 0.25f;
-    float lightingHeightRatio = 0.25f;
+    std::vector<ViewLayoutState> viewStates;
 };
 
+// =============================================================================
+// Editor UI Controller
+// =============================================================================
 class EditorUI {
 public:
     static EditorUI& Get() {
@@ -91,16 +54,24 @@ public:
     void Init(VulkanEngine* engine);
     void Shutdown();
     void Render();
+    void Update(float deltaTime);
 
-    ImVec2 GetViewportPos() const { return m_ViewportPos; }
-    ImVec2 GetViewportSize() const { return m_ViewportSize; }
+    // Workspace Management
+    void SaveWorkspace(const std::string& name, const std::string& description = "");
+    void LoadWorkspace(const std::string& name);
+    void DeleteWorkspace(const std::string& name);
+    const std::vector<WorkspaceLayout>& GetWorkspaces() const { return m_Workspaces; }
+    const std::string& GetCurrentWorkspaceName() const { return m_CurrentWorkspaceName; }
 
-    // Preset management
-    void SavePreset(const std::string& name);
-    void LoadPreset(const std::string& name);
-    void DeletePreset(const std::string& name);
-    const std::vector<LayoutPreset>& GetPresets() const { return m_Presets; }
-    const std::string& GetCurrentPresetName() const { return m_CurrentPresetName; }
+    // View shortcuts
+    void ShowView(const std::string& viewName);
+    void HideView(const std::string& viewName);
+    void ToggleView(const std::string& viewName);
+
+    // Layout control
+    void ForceLayoutRecalc() { m_ForceLayoutRecalc = true; }
+    bool IsLayoutLocked() const { return m_LayoutLocked; }
+    void SetLayoutLocked(bool locked) { m_LayoutLocked = locked; if (locked) m_ForceLayoutRecalc = true; }
 
 private:
     EditorUI() = default;
@@ -108,64 +79,39 @@ private:
     EditorUI(const EditorUI&) = delete;
     EditorUI& operator=(const EditorUI&) = delete;
 
+    void SetupDockspace();
     void CalculateLayout();
     void RenderMenuBar();
-    void RenderPanels();
-    void RenderLayoutPresetWindow();
+    void RenderViewMenu();
+    void RenderWorkspaceMenu();
+    void RenderWorkspaceWindow();
 
-    // Snapping system
-    ImVec2 SnapPosition(const ImVec2& pos, const ImVec2& size, int panelIndex);
-    void CollectSnapEdges(int excludePanelIndex);
-    bool m_SnapEnabled = true;
-    float m_SnapDistance = 20.0f;  // Pixels to trigger snap
-    std::vector<float> m_SnapEdgesX;  // Vertical edges to snap to
-    std::vector<float> m_SnapEdgesY;  // Horizontal edges to snap to
-    bool m_PanelNeedsSnap[5] = {false, false, false, false, false};
-    ImVec2 m_PanelSnapTarget[5];
-
-    // Preset helpers
-    void InitBuiltInPresets();
-    void LoadPresetsFromFile();
-    void SavePresetsToFile();
-    void ApplyPreset(const LayoutPreset& preset);
-    LayoutPreset CaptureCurrentLayout(const std::string& name);
+    // Workspace management
+    void InitBuiltInWorkspaces();
+    void LoadWorkspacesFromFile();
+    void SaveWorkspacesToFile();
+    void ApplyWorkspace(const WorkspaceLayout& layout);
+    WorkspaceLayout CaptureCurrentWorkspace(const std::string& name);
 
     VulkanEngine* m_Engine = nullptr;
 
-    // Cached panel pointers (no string lookups!)
-    SceneHierarchyPanel* m_SceneHierarchy = nullptr;
-    InspectorPanel* m_Inspector = nullptr;
-    ViewportPanel* m_Viewport = nullptr;
-    LightingPanel* m_Lighting = nullptr;
-    ConsolePanel* m_Console = nullptr;
+    // Workspace system
+    std::vector<WorkspaceLayout> m_Workspaces;
+    std::string m_CurrentWorkspaceName = "Default";
+    bool m_ShowWorkspaceWindow = false;
+    bool m_ShowSaveWorkspacePopup = false;
+    int m_SelectedWorkspaceIndex = -1;
+    char m_NewWorkspaceName[64] = "";
+    char m_NewWorkspaceDescription[256] = "";
 
-    // Layout caching
-    ImVec2 m_LastViewportSize = {0, 0};
-    bool m_LayoutDirty = true;
-    LayoutRect m_LayoutCache[5];
+    // Docking
+    bool m_DockspaceInitialized = false;
 
-    // Viewport state
-    ImVec2 m_ViewportPos = {0, 0};
-    ImVec2 m_ViewportSize = {0, 0};
-
-    // Current layout settings (can be modified by presets)
-    float m_LeftPanelWidth = Layout::LeftPanelWidth;
-    float m_RightPanelWidth = Layout::RightPanelWidth;
-    float m_BottomPanelHeight = Layout::BottomPanelHeight;
-    float m_InspectorHeightRatio = 0.5f;
-    float m_ViewportHeightRatio = 0.25f;
-    float m_LightingHeightRatio = 0.25f;
-
-    // Preset system
-    std::vector<LayoutPreset> m_Presets;
-    std::string m_CurrentPresetName = "Default";
-    bool m_ShowPresetWindow = false;
-    bool m_ShowSavePresetPopup = false;
-    bool m_ShowWindowSettings = false;
-    bool m_WindowSettingsJustOpened = false;
-    char m_NewPresetName[64] = "";
-    char m_NewPresetDescription[256] = "";
-    int m_SelectedPresetIndex = -1;
+    // Dynamic layout tracking
+    float m_LastViewportWidth = 0.0f;
+    float m_LastViewportHeight = 0.0f;
+    bool m_ForceLayoutRecalc = true;  // Force recalc on startup
+    bool m_LayoutLocked = true;       // When true, panels auto-position; when false, panels are freely movable
 };
 
 } // namespace Yalaz::UI

@@ -362,6 +362,123 @@ struct StaticMeshData {
 
 
 
+// =============================================================================
+// ENGINE SUBSYSTEMS - Animation, Physics, Plugin, Shader Systems
+// =============================================================================
+
+// Animation System Structures
+struct AnimationKeyframeData {
+    float time = 0.0f;
+    glm::vec4 value = glm::vec4(0.0f);
+    int interpolation = 1;  // 0=Step, 1=Linear, 2=Cubic
+};
+
+struct AnimationTrackData {
+    std::string targetNode;
+    std::string property;  // "translation", "rotation", "scale"
+    std::vector<AnimationKeyframeData> keyframes;
+};
+
+struct AnimationClipData {
+    std::string name;
+    float duration = 0.0f;
+    float currentTime = 0.0f;
+    bool isPlaying = false;
+    bool loop = true;
+    float speed = 1.0f;
+    std::vector<AnimationTrackData> tracks;
+};
+
+struct SkeletonBoneData {
+    std::string name;
+    int parentIndex = -1;
+    glm::vec3 localPosition = glm::vec3(0.0f);
+    glm::quat localRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3 localScale = glm::vec3(1.0f);
+    glm::mat4 inverseBindMatrix = glm::mat4(1.0f);
+};
+
+struct SkeletonData {
+    std::string name;
+    std::vector<SkeletonBoneData> bones;
+};
+
+// Physics System Structures
+struct PhysicsBodyData {
+    std::string name;
+    int type = 0;  // 0=Static, 1=Dynamic, 2=Kinematic
+    glm::vec3 position = glm::vec3(0.0f);
+    glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3 velocity = glm::vec3(0.0f);
+    glm::vec3 angularVelocity = glm::vec3(0.0f);
+    float mass = 1.0f;
+    float friction = 0.5f;
+    float restitution = 0.3f;
+    bool isAwake = true;
+    int colliderType = 0;  // 0=Box, 1=Sphere, 2=Capsule, 3=Mesh
+    glm::vec3 colliderSize = glm::vec3(1.0f);
+};
+
+struct PhysicsConstraintData {
+    std::string name;
+    int bodyA = -1;
+    int bodyB = -1;
+    int type = 0;  // 0=Point, 1=Hinge, 2=Slider, 3=6DOF
+    glm::vec3 pivotA = glm::vec3(0.0f);
+    glm::vec3 pivotB = glm::vec3(0.0f);
+};
+
+struct PhysicsWorldSettings {
+    glm::vec3 gravity = glm::vec3(0.0f, -9.81f, 0.0f);
+    float timeStep = 1.0f / 60.0f;
+    int maxSubSteps = 4;
+    bool debugDraw = false;
+    bool paused = false;
+};
+
+// Plugin/Subsystem Structures
+enum class SubsystemState {
+    Unloaded,
+    Loading,
+    Loaded,
+    Active,
+    Error
+};
+
+struct SubsystemInfo {
+    std::string id;
+    std::string name;
+    std::string version;
+    SubsystemState state = SubsystemState::Loaded;
+    float loadTimeMs = 0.0f;
+    size_t memoryUsage = 0;
+    bool isCore = false;
+};
+
+// Shader System Structures
+struct ShaderPipelineInfo {
+    std::string name;
+    std::string vertPath;
+    std::string fragPath;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    bool isValid = true;
+    float compileTimeMs = 0.0f;
+    std::string errorLog;
+    int uniformCount = 0;
+    int textureCount = 0;
+};
+
+struct ShaderUniformInfo {
+    std::string name;
+    std::string type;
+    int set = 0;
+    int binding = 0;
+    size_t size = 0;
+};
+
+// =============================================================================
+
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
@@ -415,8 +532,56 @@ struct GLTFMetallic_Roughness {
 
 class VulkanEngine {
 public:
+    // =========================================================================
+    // ANIMATION SYSTEM
+    // =========================================================================
+    std::vector<AnimationClipData> animationClips;
+    std::vector<SkeletonData> skeletons;
+    int activeAnimationIndex = -1;
+    int activeSkeletonIndex = -1;
+
+    void updateAnimations(float deltaTime);
+    void playAnimation(int index);
+    void stopAnimation(int index);
+    void addAnimationClip(const AnimationClipData& clip);
+
+    // =========================================================================
+    // PHYSICS SYSTEM
+    // =========================================================================
+    std::vector<PhysicsBodyData> physicsBodies;
+    std::vector<PhysicsConstraintData> physicsConstraints;
+    PhysicsWorldSettings physicsSettings;
+    bool physicsEnabled = false;
+
+    void updatePhysics(float deltaTime);
+    void addPhysicsBody(const PhysicsBodyData& body);
+    void removePhysicsBody(int index);
+    void setPhysicsPaused(bool paused);
+
+    // =========================================================================
+    // PLUGIN/SUBSYSTEM SYSTEM
+    // =========================================================================
+    std::vector<SubsystemInfo> subsystems;
+
+    void initSubsystems();
+    void registerSubsystem(const SubsystemInfo& info);
+    SubsystemInfo* getSubsystem(const std::string& id);
+
+    // =========================================================================
+    // SHADER SYSTEM
+    // =========================================================================
+    std::vector<ShaderPipelineInfo> shaderPipelines;
+    std::vector<ShaderUniformInfo> shaderUniforms;
+
+    void registerShaderPipeline(const ShaderPipelineInfo& info);
+    void recompileShader(int index);
+    void recompileAllShaders();
+
+    // =========================================================================
+    // EXISTING SYSTEMS
+    // =========================================================================
     std::vector<PointLight> scenePointLights;         // Sahneye konan ışık objeleri
-    AllocatedBuffer pointLightBuffer;                // GPU’ya gönderilecek buffer
+    AllocatedBuffer pointLightBuffer;                // GPU'ya gönderilecek buffer
     void sync_point_light_spheres();
     enum class ViewMode {
         Solid = 0,             // Flat color, no lighting - fastest
@@ -581,6 +746,7 @@ public:
 
     MeshNode* selectedNode = nullptr;      // Selected GLTF node
     int selectedPrimitiveIndex = -1;       // Selected primitive shape index (-1 = none)
+    int selectedLightIndex = -1;           // Selected light index (-1 = none)
 
     VkPipelineLayout gridPipelineLayout;
     VkRenderPass _renderPass;
