@@ -578,6 +578,16 @@ public:
     void recompileAllShaders();
 
     // =========================================================================
+    // SNAP SETTINGS (shared across all views)
+    // =========================================================================
+    bool snapEnabled = false;
+    float snapPositionValue = 1.0f;
+    bool snapRotationEnabled = false;
+    float snapRotationAngle = 15.0f;
+    bool snapScaleEnabled = false;
+    float snapScaleValue = 0.1f;
+
+    // =========================================================================
     // EXISTING SYSTEMS
     // =========================================================================
     std::vector<PointLight> scenePointLights;         // Sahneye konan ışık objeleri

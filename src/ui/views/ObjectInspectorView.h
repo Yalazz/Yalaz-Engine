@@ -41,6 +41,9 @@ private:
     // Statistics helper
     void RenderPrimitiveStatistics(int primitiveType);
 
+    // Camera helper
+    void FocusCameraOnPosition(const glm::vec3& targetPos);
+
     // Name editing buffer
     char m_NameBuffer[256] = "";
     int m_LastEditedIndex = -1;

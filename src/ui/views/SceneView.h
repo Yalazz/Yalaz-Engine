@@ -36,14 +36,6 @@ private:
     void RenderOverlay();
     void RenderSettingsPopup();
 
-    // Settings sections
-    void RenderViewModeSection();
-    void RenderDisplaySection();
-    void RenderBackgroundSection();
-    void RenderGridSection();
-    void RenderSnapSection();
-    void RenderCameraSection();
-
     // View settings
     int m_ViewMode = 1;  // 0=Solid, 1=Shaded, 2=Material, 3=Rendered, 4=Wireframe, 5=Normals, 6=UV
     bool m_ShowGrid = true;
@@ -65,6 +57,15 @@ private:
 
     // Quick snap presets
     float m_SnapPresets[5] = {0.1f, 0.5f, 1.0f, 2.0f, 5.0f};
+
+    // Grid settings
+    float m_GridSize = 10.0f;
+    int m_GridSubdivisions = 10;
+    float m_GridOpacity = 0.5f;
+
+    // Background settings
+    int m_BackgroundType = 0;
+    glm::vec3 m_BackgroundColor = glm::vec3(0.1f, 0.1f, 0.15f);
 
     // Stats
     float m_Fps = 0.0f;

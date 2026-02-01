@@ -146,7 +146,7 @@ void SceneView::RenderToolbar() {
     ImGui::SameLine();
 
     // === MAGNET SNAP ===
-    if (m_SnapEnabled) {
+    if (m_Engine->snapEnabled) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.5f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
     } else {
@@ -155,7 +155,7 @@ void SceneView::RenderToolbar() {
     }
 
     if (ImGui::Button("[M]", ImVec2(30, 0))) {
-        m_SnapEnabled = !m_SnapEnabled;
+        m_Engine->snapEnabled = !m_Engine->snapEnabled;
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Magnet Snap (M)");
@@ -166,7 +166,7 @@ void SceneView::RenderToolbar() {
 
     // Snap value input
     ImGui::SetNextItemWidth(50);
-    if (ImGui::DragFloat("##SnapValue", &m_SnapValue, 0.1f, 0.01f, 100.0f, "%.2f")) {
+    if (ImGui::DragFloat("##SnapValue", &m_Engine->snapPositionValue, 0.1f, 0.01f, 100.0f, "%.2f")) {
         // Value updated
     }
 
@@ -178,7 +178,7 @@ void SceneView::RenderToolbar() {
             char label[32];
             snprintf(label, sizeof(label), "%.1f", m_SnapPresets[i]);
             if (ImGui::Selectable(label)) {
-                m_SnapValue = m_SnapPresets[i];
+                m_Engine->snapPositionValue = m_SnapPresets[i];
             }
         }
         ImGui::EndCombo();
@@ -251,9 +251,9 @@ void SceneView::RenderOverlay() {
         ImGui::Text("Tris: %d", m_Engine->stats.triangle_count);
 
         // Snap indicator
-        if (m_SnapEnabled) {
+        if (m_Engine->snapEnabled) {
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "[M] Snap: %.2f", m_SnapValue);
+            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "[M] Snap: %.2f", m_Engine->snapPositionValue);
         }
     }
     ImGui::End();
@@ -263,176 +263,147 @@ void SceneView::RenderSettingsPopup() {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     float leftW, rightW;
     GetDynamicLayout(viewport->WorkSize.x, leftW, rightW);
-    ImVec2 popupPos = ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - rightW - 310,
+    ImVec2 popupPos = ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - rightW - 280,
                              viewport->WorkPos.y + MENU_BAR_HEIGHT + TOOLBAR_HEIGHT + 10);
 
     ImGui::SetNextWindowPos(popupPos, ImGuiCond_Appearing);
-    ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(270, 350), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("Viewport Settings", &m_ShowSettingsPopup, ImGuiWindowFlags_NoCollapse)) {
-        if (ImGui::BeginTabBar("SettingsTabs")) {
-            if (ImGui::BeginTabItem("Display")) {
-                ImGui::Spacing();
-                RenderViewModeSection();
-                ImGui::Spacing();
-                RenderDisplaySection();
-                ImGui::EndTabItem();
-            }
+    if (ImGui::Begin("Advanced Settings", &m_ShowSettingsPopup, ImGuiWindowFlags_NoCollapse)) {
+        // Display Section
+        if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Current state indicators
+            ImGui::TextDisabled("Current State:");
+            ImGui::BulletText("Grid: %s", m_ShowGrid ? "ON" : "OFF");
+            ImGui::BulletText("Outline: %s", m_ShowOutlines ? "ON" : "OFF");
+            ImGui::BulletText("Gizmo: %s", m_ShowGizmos ? "ON" : "OFF");
+            ImGui::BulletText("Stats: %s", m_ShowStats ? "ON" : "OFF");
 
-            if (ImGui::BeginTabItem("Grid")) {
-                ImGui::Spacing();
-                RenderGridSection();
-                ImGui::EndTabItem();
-            }
+            ImGui::Spacing();
+            ImGui::Separator();
 
-            if (ImGui::BeginTabItem("Snap")) {
-                ImGui::Spacing();
-                RenderSnapSection();
-                ImGui::EndTabItem();
-            }
+            // Extra display options
+            static float outlineThickness = 2.0f;
+            ImGui::DragFloat("Outline Thickness", &outlineThickness, 0.1f, 0.5f, 5.0f, "%.1f px");
 
-            if (ImGui::BeginTabItem("Background")) {
-                ImGui::Spacing();
-                RenderBackgroundSection();
-                ImGui::EndTabItem();
-            }
+            static float gizmoSize = 1.0f;
+            ImGui::DragFloat("Gizmo Size", &gizmoSize, 0.1f, 0.5f, 3.0f, "%.1f");
 
-            if (ImGui::BeginTabItem("Camera")) {
-                ImGui::Spacing();
-                RenderCameraSection();
-                ImGui::EndTabItem();
-            }
-
-            ImGui::EndTabBar();
+            static bool showOrigin = true;
+            ImGui::Checkbox("Show Origin Axes", &showOrigin);
         }
+
+        // Grid Section
+        if (ImGui::CollapsingHeader("Grid Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Grid toggle (synced with toolbar)
+            if (ImGui::Checkbox("Show Grid", &m_ShowGrid)) {
+                if (m_Engine) m_Engine->_showGrid = m_ShowGrid;
+            }
+
+            ImGui::Spacing();
+
+            ImGui::DragFloat("Grid Size", &m_GridSize, 1.0f, 1.0f, 100.0f, "%.0f units");
+            ImGui::DragInt("Subdivisions", &m_GridSubdivisions, 1, 1, 100);
+            ImGui::SliderFloat("Opacity", &m_GridOpacity, 0.1f, 1.0f, "%.1f");
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Presets:");
+            if (ImGui::Button("Default", ImVec2(80, 0))) {
+                m_GridSize = 10.0f;
+                m_GridSubdivisions = 10;
+                m_GridOpacity = 0.5f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Fine", ImVec2(80, 0))) {
+                m_GridSize = 5.0f;
+                m_GridSubdivisions = 20;
+                m_GridOpacity = 0.3f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Coarse", ImVec2(80, 0))) {
+                m_GridSize = 20.0f;
+                m_GridSubdivisions = 5;
+                m_GridOpacity = 0.7f;
+            }
+        }
+
+        // Background Section
+        if (ImGui::CollapsingHeader("Background")) {
+            ImGui::RadioButton("Gradient", &m_BackgroundType, 0);
+            ImGui::RadioButton("Solid Color", &m_BackgroundType, 1);
+            ImGui::RadioButton("Environment Map", &m_BackgroundType, 2);
+
+            if (m_BackgroundType == 1) {
+                ImGui::ColorEdit3("Color", &m_BackgroundColor.x);
+            }
+        }
+
+        // Snap Section - uses engine settings so all views can access
+        if (ImGui::CollapsingHeader("Snap Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enable Position Snap", &m_Engine->snapEnabled);
+
+            ImGui::Text("Position Snap:");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat("##PosSnap", &m_Engine->snapPositionValue, 0.1f, 0.01f, 100.0f, "%.2f units");
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Presets:");
+            for (int i = 0; i < 5; i++) {
+                if (i > 0) ImGui::SameLine();
+                char label[16];
+                snprintf(label, sizeof(label), "%.1f", m_SnapPresets[i]);
+                if (ImGui::Button(label, ImVec2(42, 0))) {
+                    m_Engine->snapPositionValue = m_SnapPresets[i];
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+
+            ImGui::Checkbox("Rotation Snap", &m_Engine->snapRotationEnabled);
+            if (m_Engine->snapRotationEnabled) {
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##RotSnap", &m_Engine->snapRotationAngle, 1.0f, 1.0f, 90.0f, "%.0f degrees");
+            }
+
+            ImGui::Checkbox("Scale Snap", &m_Engine->snapScaleEnabled);
+            if (m_Engine->snapScaleEnabled) {
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##ScaleSnap", &m_Engine->snapScaleValue, 0.01f, 0.01f, 1.0f, "%.2f");
+            }
+        }
+
+        // Camera Section
+        if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (m_Engine) {
+                ImGui::DragFloat3("Position", &m_Engine->mainCamera.position.x, 0.1f);
+
+                float pitch = m_Engine->mainCamera.pitch;
+                float yaw = m_Engine->mainCamera.yaw;
+                bool changed = false;
+                if (ImGui::DragFloat("Pitch", &pitch, 0.5f, -89.0f, 89.0f, "%.1f")) {
+                    m_Engine->mainCamera.pitch = pitch;
+                    changed = true;
+                }
+                if (ImGui::DragFloat("Yaw", &yaw, 0.5f, -180.0f, 180.0f, "%.1f")) {
+                    m_Engine->mainCamera.yaw = yaw;
+                    changed = true;
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Button("Reset Camera", ImVec2(-1, 0))) {
+                    m_Engine->mainCamera.position = glm::vec3(0.f, 5.f, 10.f);
+                    m_Engine->mainCamera.pitch = -0.3f;
+                    m_Engine->mainCamera.yaw = 0.f;
+                }
+
+                ImGui::Spacing();
+                ImGui::DragFloat("Move Speed", &m_Engine->mainCamera.moveSpeed, 0.1f, 0.1f, 50.0f);
+            }
+        }
+
     }
     ImGui::End();
-}
-
-void SceneView::RenderViewModeSection() {
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "View Mode");
-    ImGui::Separator();
-
-    const char* modes[] = {"Solid", "Shaded", "Material Preview", "Rendered", "Wireframe", "Normals", "UV Checker"};
-    for (int i = 0; i < 7; i++) {
-        if (ImGui::RadioButton(modes[i], m_ViewMode == i)) {
-            m_ViewMode = i;
-            if (m_Engine) {
-                m_Engine->_currentViewMode = static_cast<VulkanEngine::ViewMode>(m_ViewMode);
-            }
-        }
-    }
-}
-
-void SceneView::RenderDisplaySection() {
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Display Options");
-    ImGui::Separator();
-
-    if (ImGui::Checkbox("Show Grid", &m_ShowGrid)) {
-        if (m_Engine) m_Engine->_showGrid = m_ShowGrid;
-    }
-    if (ImGui::Checkbox("Show Outlines", &m_ShowOutlines)) {
-        if (m_Engine) m_Engine->_showOutline = m_ShowOutlines;
-    }
-    ImGui::Checkbox("Show Gizmos", &m_ShowGizmos);
-    ImGui::Checkbox("Show Stats Overlay", &m_ShowStats);
-}
-
-void SceneView::RenderGridSection() {
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Grid Settings");
-    ImGui::Separator();
-
-    if (ImGui::Checkbox("Enable Grid", &m_ShowGrid)) {
-        if (m_Engine) m_Engine->_showGrid = m_ShowGrid;
-    }
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("Grid Presets:");
-
-    if (ImGui::Button("Default", ImVec2(-1, 0))) {
-        // Apply default grid settings
-    }
-    if (ImGui::Button("Blender Style", ImVec2(-1, 0))) {
-        // Apply Blender-style grid
-    }
-    if (ImGui::Button("Unity Style", ImVec2(-1, 0))) {
-        // Apply Unity-style grid
-    }
-}
-
-void SceneView::RenderSnapSection() {
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Snap Settings");
-    ImGui::Separator();
-
-    ImGui::Checkbox("Enable Snap", &m_SnapEnabled);
-
-    ImGui::Spacing();
-    ImGui::Text("Position Snap:");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::DragFloat("##PosSnap", &m_SnapValue, 0.1f, 0.01f, 100.0f, "%.2f units");
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("Quick Presets:");
-    ImGui::BeginGroup();
-    for (int i = 0; i < 5; i++) {
-        if (i > 0) ImGui::SameLine();
-        char label[16];
-        snprintf(label, sizeof(label), "%.1f", m_SnapPresets[i]);
-        if (ImGui::Button(label, ImVec2(45, 0))) {
-            m_SnapValue = m_SnapPresets[i];
-        }
-    }
-    ImGui::EndGroup();
-
-    ImGui::Spacing();
-    ImGui::Separator();
-
-    ImGui::Checkbox("Rotation Snap", &m_SnapRotationEnabled);
-    ImGui::SetNextItemWidth(-1);
-    ImGui::DragFloat("##RotSnap", &m_SnapRotationAngle, 1.0f, 1.0f, 90.0f, "%.0f deg");
-
-    ImGui::Spacing();
-
-    ImGui::Checkbox("Scale Snap", &m_SnapScaleEnabled);
-    ImGui::SetNextItemWidth(-1);
-    ImGui::DragFloat("##ScaleSnap", &m_SnapScaleValue, 0.01f, 0.01f, 1.0f, "%.2f");
-}
-
-void SceneView::RenderBackgroundSection() {
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Background");
-    ImGui::Separator();
-
-    static int bgType = 0;
-    ImGui::RadioButton("Gradient", &bgType, 0);
-    ImGui::RadioButton("Solid Color", &bgType, 1);
-    ImGui::RadioButton("Environment Map", &bgType, 2);
-}
-
-void SceneView::RenderCameraSection() {
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Camera Settings");
-    ImGui::Separator();
-
-    if (m_Engine) {
-        ImGui::Text("Position:");
-        ImGui::DragFloat3("##CamPos", &m_Engine->mainCamera.position.x, 0.1f);
-
-        ImGui::Text("Rotation:");
-        float pitch = glm::degrees(m_Engine->mainCamera.pitch);
-        float yaw = glm::degrees(m_Engine->mainCamera.yaw);
-        if (ImGui::DragFloat("Pitch", &pitch, 0.5f, -89.0f, 89.0f)) {
-            m_Engine->mainCamera.pitch = glm::radians(pitch);
-        }
-        if (ImGui::DragFloat("Yaw", &yaw, 0.5f)) {
-            m_Engine->mainCamera.yaw = glm::radians(yaw);
-        }
-
-        ImGui::Spacing();
-        if (ImGui::Button("Reset Camera", ImVec2(-1, 0))) {
-            m_Engine->mainCamera.position = glm::vec3(0.f, 5.f, 10.f);
-            m_Engine->mainCamera.pitch = -0.3f;
-            m_Engine->mainCamera.yaw = 0.f;
-        }
-    }
 }
 
 } // namespace Yalaz::UI

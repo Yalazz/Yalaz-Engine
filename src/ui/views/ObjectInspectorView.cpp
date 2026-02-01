@@ -149,7 +149,7 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
 
     // Focus Camera button (in header area)
     if (ImGui::Button("Focus Camera", ImVec2(100, 0))) {
-        m_Engine->mainCamera.position = shape.position + glm::vec3(0, 2, 5);
+        FocusCameraOnPosition(shape.position);
     }
 
     ImGui::Spacing();
@@ -285,8 +285,8 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
         ImGui::Indent();
 
         // Focus camera
-        if (ImGui::Button("Focus Camera", ImVec2(-1, 0))) {
-            m_Engine->mainCamera.position = shape.position + glm::vec3(0, 2, 5);
+        if (ImGui::Button("Focus Camera##actions", ImVec2(-1, 0))) {
+            FocusCameraOnPosition(shape.position);
         }
 
         // Duplicate
@@ -484,8 +484,8 @@ void ObjectInspectorView::RenderLightInspector(int index) {
 
     // Focus button in header
     ImGui::SameLine(ImGui::GetWindowWidth() - 110);
-    if (ImGui::Button("Focus Camera", ImVec2(100, 0))) {
-        m_Engine->mainCamera.position = light.position + glm::vec3(0, 2, 5);
+    if (ImGui::Button("Focus Camera##lightHeader", ImVec2(100, 0))) {
+        FocusCameraOnPosition(light.position);
     }
 
     ImGui::Spacing();
@@ -640,8 +640,8 @@ void ObjectInspectorView::RenderLightInspector(int index) {
     if (ImGui::CollapsingHeader("Actions")) {
         ImGui::Indent();
 
-        if (ImGui::Button("Focus Camera", ImVec2(-1, 0))) {
-            m_Engine->mainCamera.position = light.position + glm::vec3(0, 2, 5);
+        if (ImGui::Button("Focus Camera##lightActions", ImVec2(-1, 0))) {
+            FocusCameraOnPosition(light.position);
         }
 
         if (ImGui::Button("Duplicate Light", ImVec2(-1, 0))) {
@@ -683,15 +683,15 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
 
     // Focus button
     ImGui::SameLine(ImGui::GetWindowWidth() - 110);
-    if (ImGui::Button("Focus Camera", ImVec2(100, 0))) {
+    if (ImGui::Button("Focus Camera##nodeHeader", ImVec2(100, 0))) {
         glm::vec3 pos = glm::vec3(node->worldTransform[3]);
-        m_Engine->mainCamera.position = pos + glm::vec3(0, 2, 5);
+        FocusCameraOnPosition(pos);
     }
 
     ImGui::Spacing();
     ImGui::Separator();
 
-    // Transform
+    // Transform - NOW EDITABLE
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent();
 
@@ -703,10 +703,82 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         if (glm::decompose(node->worldTransform, scale, rotation, translation, skew, perspective)) {
             glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
 
+            // Store original values to detect changes
+            glm::vec3 origTranslation = translation;
+            glm::vec3 origRotation = eulerRot;
+            glm::vec3 origScale = scale;
+
             RenderTransformEditor(translation, eulerRot, scale);
 
-            // Note: Display only - would need matrix reconstruction for editing
-            ImGui::TextDisabled("(Read-only - node transforms are hierarchical)");
+            // Apply changes back to worldTransform if any value changed
+            bool changed = (translation != origTranslation ||
+                           eulerRot != origRotation ||
+                           scale != origScale);
+
+            if (changed) {
+                // Reconstruct transform matrix from edited components
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
+
+                // Update the node's world transform
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+
+                // Also update local transform for proper hierarchy
+                node->localTransform = node->worldTransform;
+            }
+
+            // Quick transform buttons
+            ImGui::Spacing();
+            if (ImGui::Button("Reset Position")) {
+                translation = glm::vec3(0.0f);
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+                node->localTransform = node->worldTransform;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Rotation")) {
+                eulerRot = glm::vec3(0.0f);
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+                glm::mat4 rotationMat = glm::mat4(1.0f);
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+                node->localTransform = node->worldTransform;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Scale")) {
+                scale = glm::vec3(1.0f);
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f));
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+                node->localTransform = node->worldTransform;
+            }
+
+            // Snap buttons
+            ImGui::Spacing();
+            ImGui::TextDisabled("Snap:");
+            ImGui::SameLine();
+            if (ImGui::Button("Grid 1##node")) {
+                translation = glm::round(translation);
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+                node->localTransform = node->worldTransform;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Grid 0.5##node")) {
+                translation = glm::round(translation * 2.0f) / 2.0f;
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+                node->localTransform = node->worldTransform;
+            }
+
         } else {
             ImGui::TextDisabled("Unable to decompose transform matrix");
         }
@@ -759,6 +831,77 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         ImGui::Unindent();
     }
 
+    // Actions section for GLTF nodes
+    if (ImGui::CollapsingHeader("Actions")) {
+        ImGui::Indent();
+
+        // Focus camera
+        if (ImGui::Button("Focus Camera##nodeActions", ImVec2(-1, 0))) {
+            glm::vec3 pos = glm::vec3(node->worldTransform[3]);
+            FocusCameraOnPosition(pos);
+        }
+
+        // Move to origin
+        if (ImGui::Button("Move to Origin", ImVec2(-1, 0))) {
+            // Extract current scale and rotation, reset translation
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            if (glm::decompose(node->worldTransform, scale, rotation, translation, skew, perspective)) {
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f));
+                glm::mat4 rotationMat = glm::mat4(rotation);
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+                node->localTransform = node->worldTransform;
+            }
+        }
+
+        // Reset all transforms
+        if (ImGui::Button("Reset Transform", ImVec2(-1, 0))) {
+            node->worldTransform = glm::mat4(1.0f);
+            node->localTransform = glm::mat4(1.0f);
+        }
+
+        // Scale to unit size
+        if (ImGui::Button("Reset Scale to 1", ImVec2(-1, 0))) {
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            if (glm::decompose(node->worldTransform, scale, rotation, translation, skew, perspective)) {
+                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+                glm::mat4 rotationMat = glm::mat4(rotation);
+                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f));
+                node->worldTransform = translationMat * rotationMat * scaleMat;
+                node->localTransform = node->worldTransform;
+            }
+        }
+
+        // Uniform scale
+        ImGui::Spacing();
+        ImGui::TextDisabled("Uniform Scale:");
+        if (ImGui::Button("0.5x", ImVec2(50, 0))) {
+            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(0.5f));
+            node->localTransform = node->worldTransform;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("2x", ImVec2(50, 0))) {
+            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(2.0f));
+            node->localTransform = node->worldTransform;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("0.1x", ImVec2(50, 0))) {
+            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(0.1f));
+            node->localTransform = node->worldTransform;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("10x", ImVec2(50, 0))) {
+            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(10.0f));
+            node->localTransform = node->worldTransform;
+        }
+
+        ImGui::Unindent();
+    }
+
     // Debug info
     if (ImGui::CollapsingHeader("Debug Info")) {
         ImGui::Indent();
@@ -781,56 +924,104 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
 // =============================================================================
 
 void ObjectInspectorView::RenderTransformEditor(glm::vec3& position, glm::vec3& rotation, glm::vec3& scale) {
+    // Get snap settings
+    bool posSnap = m_Engine && m_Engine->snapEnabled;
+    bool rotSnap = m_Engine && m_Engine->snapRotationEnabled;
+    bool sclSnap = m_Engine && m_Engine->snapScaleEnabled;
+    float posSnapVal = m_Engine ? m_Engine->snapPositionValue : 1.0f;
+    float rotSnapVal = m_Engine ? m_Engine->snapRotationAngle : 15.0f;
+    float sclSnapVal = m_Engine ? m_Engine->snapScaleValue : 0.1f;
+
     // Position with colored XYZ indicators
     ImGui::Text("Position");
+    if (posSnap) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "[%.2f]", posSnapVal);
+    }
+
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.5f, 0.15f, 0.15f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##PosX", &position.x, 0.1f, 0, 0, "X: %.2f");
+    ImGui::DragFloat("##PosX", &position.x, posSnap ? posSnapVal : 0.1f, 0, 0, "X: %.2f");
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##PosY", &position.y, 0.1f, 0, 0, "Y: %.2f");
+    ImGui::DragFloat("##PosY", &position.y, posSnap ? posSnapVal : 0.1f, 0, 0, "Y: %.2f");
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.15f, 0.5f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##PosZ", &position.z, 0.1f, 0, 0, "Z: %.2f");
+    ImGui::DragFloat("##PosZ", &position.z, posSnap ? posSnapVal : 0.1f, 0, 0, "Z: %.2f");
     ImGui::PopStyleColor();
+
+    // Apply position snap
+    if (posSnap) {
+        position.x = glm::round(position.x / posSnapVal) * posSnapVal;
+        position.y = glm::round(position.y / posSnapVal) * posSnapVal;
+        position.z = glm::round(position.z / posSnapVal) * posSnapVal;
+    }
 
     // Rotation
     ImGui::Text("Rotation");
+    if (rotSnap) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "[%.0f°]", rotSnapVal);
+    }
+
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.5f, 0.15f, 0.15f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##RotX", &rotation.x, 1.0f, 0, 0, "X: %.1f");
+    ImGui::DragFloat("##RotX", &rotation.x, rotSnap ? rotSnapVal : 1.0f, 0, 0, "X: %.1f");
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##RotY", &rotation.y, 1.0f, 0, 0, "Y: %.1f");
+    ImGui::DragFloat("##RotY", &rotation.y, rotSnap ? rotSnapVal : 1.0f, 0, 0, "Y: %.1f");
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.15f, 0.5f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##RotZ", &rotation.z, 1.0f, 0, 0, "Z: %.1f");
+    ImGui::DragFloat("##RotZ", &rotation.z, rotSnap ? rotSnapVal : 1.0f, 0, 0, "Z: %.1f");
     ImGui::PopStyleColor();
+
+    // Apply rotation snap
+    if (rotSnap) {
+        rotation.x = glm::round(rotation.x / rotSnapVal) * rotSnapVal;
+        rotation.y = glm::round(rotation.y / rotSnapVal) * rotSnapVal;
+        rotation.z = glm::round(rotation.z / rotSnapVal) * rotSnapVal;
+    }
 
     // Scale
     ImGui::Text("Scale");
+    if (sclSnap) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "[%.2f]", sclSnapVal);
+    }
+
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.5f, 0.15f, 0.15f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##SclX", &scale.x, 0.01f, 0.01f, 100.0f, "X: %.2f");
+    ImGui::DragFloat("##SclX", &scale.x, sclSnap ? sclSnapVal : 0.01f, 0.01f, 100.0f, "X: %.2f");
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.5f, 0.15f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##SclY", &scale.y, 0.01f, 0.01f, 100.0f, "Y: %.2f");
+    ImGui::DragFloat("##SclY", &scale.y, sclSnap ? sclSnapVal : 0.01f, 0.01f, 100.0f, "Y: %.2f");
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.15f, 0.5f, 1.0f));
     ImGui::SetNextItemWidth(70);
-    ImGui::DragFloat("##SclZ", &scale.z, 0.01f, 0.01f, 100.0f, "Z: %.2f");
+    ImGui::DragFloat("##SclZ", &scale.z, sclSnap ? sclSnapVal : 0.01f, 0.01f, 100.0f, "Z: %.2f");
     ImGui::PopStyleColor();
+
+    // Apply scale snap
+    if (sclSnap) {
+        scale.x = glm::round(scale.x / sclSnapVal) * sclSnapVal;
+        scale.y = glm::round(scale.y / sclSnapVal) * sclSnapVal;
+        scale.z = glm::round(scale.z / sclSnapVal) * sclSnapVal;
+        // Ensure scale doesn't go below minimum
+        scale.x = glm::max(scale.x, sclSnapVal);
+        scale.y = glm::max(scale.y, sclSnapVal);
+        scale.z = glm::max(scale.z, sclSnapVal);
+    }
 }
 
 // =============================================================================
@@ -849,6 +1040,29 @@ void ObjectInspectorView::RenderColorEditor4(const char* label, glm::vec4& color
     if (ImGui::ColorEdit4(label, col, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_AlphaBar)) {
         color = glm::vec4(col[0], col[1], col[2], col[3]);
     }
+}
+
+// =============================================================================
+// HELPER: Focus Camera on Target Position
+// =============================================================================
+void ObjectInspectorView::FocusCameraOnPosition(const glm::vec3& targetPos) {
+    if (!m_Engine) return;
+
+    // Position camera behind and above the target
+    glm::vec3 offset(0.0f, 2.0f, 5.0f);
+    m_Engine->mainCamera.position = targetPos + offset;
+
+    // Calculate direction from camera to target
+    glm::vec3 direction = glm::normalize(targetPos - m_Engine->mainCamera.position);
+
+    // Calculate yaw (horizontal angle) - atan2 gives angle in XZ plane
+    m_Engine->mainCamera.yaw = glm::degrees(atan2(direction.x, direction.z));
+
+    // Calculate pitch (vertical angle) - asin gives angle from horizontal
+    m_Engine->mainCamera.pitch = glm::degrees(asin(-direction.y));
+
+    // Clamp pitch to avoid gimbal lock
+    m_Engine->mainCamera.pitch = glm::clamp(m_Engine->mainCamera.pitch, -89.0f, 89.0f);
 }
 
 } // namespace Yalaz::UI

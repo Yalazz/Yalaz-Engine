@@ -119,9 +119,17 @@ This document describes all UI features, their expected behavior, and how they w
 |---------|-------------|--------|
 | Node Name | Display name from scene | WORKS |
 | Focus Camera | Move camera to node position | WORKS |
-| Transform Display | Position/Rotation/Scale from matrix (READ-ONLY) | WORKS |
+| **Transform Editing** | Position/Rotation/Scale - FULLY EDITABLE | **WORKS** |
+| Reset Position | Reset node position to origin | WORKS |
+| Reset Rotation | Reset node rotation | WORKS |
+| Reset Scale | Reset node scale to 1 | WORKS |
+| Snap to Grid | Grid 1, Grid 0.5 snap buttons | WORKS |
 | Mesh Info | Has mesh, surface count, triangle count | WORKS |
 | Children Info | Number of child nodes | WORKS |
+| **Actions Section** | | |
+| Move to Origin | Move node to world origin | WORKS |
+| Reset Transform | Reset all transforms to identity | WORKS |
+| Uniform Scale | 0.5x, 2x, 0.1x, 10x quick scale buttons | WORKS |
 | World Transform Matrix | Full 4x4 matrix display | WORKS |
 
 ### 2.3 Light Inspector
@@ -394,7 +402,7 @@ This document describes all UI features, their expected behavior, and how they w
 | Feature | Static Primitives | GLTF/GLB Nodes | Point Lights |
 |---------|-------------------|----------------|--------------|
 | Selection | YES | YES | YES |
-| Transform Edit | YES | READ-ONLY | YES |
+| Transform Edit | YES | **YES** | YES |
 | Material Edit | YES | NO | N/A |
 | Face Colors | YES | NO | N/A |
 | Visibility | YES | NO | N/A |
@@ -402,6 +410,9 @@ This document describes all UI features, their expected behavior, and how they w
 | Duplicate | YES | NO | YES |
 | Delete | YES | NO | YES |
 | Color/Intensity | YES (mainColor) | NO | YES |
+| Reset Transform | YES | YES | YES |
+| Snap to Grid | YES | YES | NO |
+| Uniform Scale | NO | YES | NO |
 
 ---
 
