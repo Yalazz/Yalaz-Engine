@@ -195,11 +195,13 @@ void AssetBrowserView::RenderLoadedScenes() {
 
             // Actions
             if (ImGui::Button("Focus", ImVec2(50, 0))) {
-                // Focus camera on scene
-                if (scene && !scene->nodes.empty()) {
-                    auto& firstNode = scene->nodes.begin()->second;
-                    glm::vec3 pos = glm::vec3(firstNode->worldTransform[3]);
-                    m_Engine->mainCamera.focusOnPoint(pos, 10.0f);
+                // Focus camera on scene - use topNodes for safer access
+                if (scene && !scene->topNodes.empty()) {
+                    auto& firstNode = scene->topNodes[0];
+                    if (firstNode) {
+                        glm::vec3 pos = glm::vec3(firstNode->worldTransform[3]);
+                        m_Engine->mainCamera.focusOnPoint(pos, 10.0f);
+                    }
                 }
             }
             ImGui::SameLine();
@@ -221,8 +223,28 @@ void AssetBrowserView::RenderLoadedScenes() {
         ImGui::Spacing();
     }
 
-    // Remove scene outside the loop
+    // Remove scene outside the loop - must wait for GPU before destroying resources
     if (!sceneToRemove.empty()) {
+        // Wait for GPU to finish using the scene's resources
+        if (m_Engine->_device != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(m_Engine->_device);
+        }
+
+        // Clear selected node if it belonged to this scene
+        if (m_Engine->selectedNode != nullptr) {
+            // Check if selected node is from this scene
+            auto it = m_Engine->loadedScenes.find(sceneToRemove);
+            if (it != m_Engine->loadedScenes.end() && it->second) {
+                for (const auto& [name, node] : it->second->nodes) {
+                    if (node.get() == m_Engine->selectedNode) {
+                        m_Engine->selectedNode = nullptr;
+                        m_Engine->selectedObjectName.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
         m_Engine->loadedScenes.erase(sceneToRemove);
         if (m_SelectedScene == sceneToRemove) {
             m_SelectedScene.clear();

@@ -1573,7 +1573,7 @@ void VulkanEngine::draw_main(VkCommandBuffer cmd)
     draw_viewing(cmd);
 
     vkCmdEndRendering(cmd);
-}ssss
+}
 
 
 
