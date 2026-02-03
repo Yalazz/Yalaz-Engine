@@ -507,6 +507,7 @@
 #include <fastgltf/util.hpp>
 
 #include "tiny_obj_loader.h"
+#include "ui/views/ConsoleView.h"
 //> loadimg
 //std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& asset, fastgltf::Image& image)
 std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& asset, fastgltf::Image& image, const std::filesystem::path& basePath)
@@ -653,23 +654,40 @@ VkSamplerMipmapMode extract_mipmap_mode(fastgltf::Filter filter)
 std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::string_view filePath)
 {
     //> load_1
-    fmt::print("Loading GLTF: {}", filePath);
+    fmt::print("Loading GLTF: {}\n", filePath);
 
-    std::shared_ptr<LoadedGLTF> scene = std::make_shared<LoadedGLTF>();
-    scene->creator = engine;
-    LoadedGLTF& file = *scene.get();
-
-    fastgltf::Parser parser{};
-
-    constexpr auto gltfOptions = fastgltf::Options::DontRequireValidAssetMember | fastgltf::Options::AllowDouble | fastgltf::Options::LoadGLBBuffers | fastgltf::Options::LoadExternalBuffers;
-    // fastgltf::Options::LoadExternalImages;
-
-    fastgltf::GltfDataBuffer data;
-    data.loadFromFile(filePath);
-
-    fastgltf::Asset gltf;
-
+    // Check file exists and get size
     std::filesystem::path path = filePath;
+    if (!std::filesystem::exists(path)) {
+        fmt::print("ERROR: GLTF file does not exist: {}\n", filePath);
+        return {};
+    }
+
+    auto fileSize = std::filesystem::file_size(path);
+    fmt::print("  File size: {:.2f} MB\n", fileSize / (1024.0 * 1024.0));
+
+    // Warn for very large files
+    if (fileSize > 500 * 1024 * 1024) {  // 500 MB
+        fmt::print("WARNING: Very large file (>500MB). Loading may take time or fail.\n");
+    }
+
+    try {
+        std::shared_ptr<LoadedGLTF> scene = std::make_shared<LoadedGLTF>();
+        scene->creator = engine;
+        LoadedGLTF& file = *scene.get();
+
+        fastgltf::Parser parser{};
+
+        constexpr auto gltfOptions = fastgltf::Options::DontRequireValidAssetMember | fastgltf::Options::AllowDouble | fastgltf::Options::LoadGLBBuffers | fastgltf::Options::LoadExternalBuffers;
+        // fastgltf::Options::LoadExternalImages;
+
+        fastgltf::GltfDataBuffer data;
+        if (!data.loadFromFile(filePath)) {
+            fmt::print("ERROR: Failed to load GLTF data from file\n");
+            return {};
+        }
+
+        fastgltf::Asset gltf;
 
     auto type = fastgltf::determineGltfFileType(&data);
     if (type == fastgltf::GltfType::glTF) {
@@ -697,13 +715,38 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         return {};
     }
     //< load_1
+
+    // Print scene statistics
+    fmt::print("  GLTF Scene Statistics:\n");
+    fmt::print("    Meshes: {}\n", gltf.meshes.size());
+    fmt::print("    Materials: {}\n", gltf.materials.size());
+    fmt::print("    Textures: {}\n", gltf.images.size());
+    fmt::print("    Nodes: {}\n", gltf.nodes.size());
+    fmt::print("    Samplers: {}\n", gltf.samplers.size());
+
+    // Limit checks
+    const size_t MAX_MATERIALS = 512;
+    const size_t MAX_MESHES = 1000;
+
+    if (gltf.materials.size() > MAX_MATERIALS) {
+        fmt::print("ERROR: Too many materials ({} > {}). Scene may not load correctly.\n",
+            gltf.materials.size(), MAX_MATERIALS);
+    }
+
+    if (gltf.meshes.size() > MAX_MESHES) {
+        fmt::print("WARNING: Large number of meshes ({}). Loading may take time.\n",
+            gltf.meshes.size());
+    }
+
     //> load_2
         // we can stimate the descriptors we will need accurately
     std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> sizes = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 } };
 
-    file.descriptorPool.init(engine->_device, gltf.materials.size(), sizes);
+    // Limit descriptor pool size
+    size_t materialCount = std::min(gltf.materials.size(), MAX_MATERIALS);
+    file.descriptorPool.init(engine->_device, materialCount, sizes);
     //< load_2
     //> load_samplers
 
@@ -754,22 +797,54 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
 
     std::filesystem::path basePath = path.parent_path();
-    for (fastgltf::Image& image : gltf.images) {
-        fmt::print("Attempting to load texture: {}\n", image.name);
+
+    // Limit textures to prevent resource exhaustion
+    const size_t MAX_TEXTURES = 256;
+    size_t textureCount = gltf.images.size();
+
+    if (textureCount > MAX_TEXTURES) {
+        fmt::print("WARNING: GLTF has {} textures, limiting to {} to prevent crashes\n",
+            textureCount, MAX_TEXTURES);
+        textureCount = MAX_TEXTURES;
+    }
+
+    fmt::print("  Loading {} textures...\n", textureCount);
+
+    size_t loadedTextures = 0;
+    for (size_t i = 0; i < textureCount && i < gltf.images.size(); i++) {
+        fastgltf::Image& image = gltf.images[i];
+
+        // Progress every 10 textures
+        if (textureCount > 10 && i % 10 == 0) {
+            fmt::print("    Texture {}/{}: {}\n", i + 1, textureCount, image.name);
+        }
+
         std::optional<AllocatedImage> img = load_image(engine, gltf, image, basePath);
 
         if (img.has_value()) {
             images.push_back(*img);
             file.images[image.name.c_str()] = *img;
-            fmt::print("Successfully loaded texture: {}\n", image.name);
+            loadedTextures++;
         }
         else {
             // we failed to load, so lets give the slot a default white texture to not
             // completely break loading
             images.push_back(engine->_errorCheckerboardImage);
-            fmt::print("gltf failed to load texture {}\n", image.name);
+            fmt::print("    Failed to load texture: {}\n", image.name);
+        }
+
+        // Flush GPU every 50 textures to prevent resource exhaustion
+        if (i > 0 && i % 50 == 0) {
+            vkDeviceWaitIdle(engine->_device);
         }
     }
+
+    // Fill remaining slots with default texture if we limited
+    for (size_t i = textureCount; i < gltf.images.size(); i++) {
+        images.push_back(engine->_whiteImage);
+    }
+
+    fmt::print("  Loaded {}/{} textures successfully\n", loadedTextures, gltf.images.size());
 
 
 
@@ -824,6 +899,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
         // build material
         newMat->data = engine->metalRoughMaterial.write_material(engine->_device, passType, materialResources, file.descriptorPool);
+        newMat->bufferOffset = materialResources.dataBufferOffset;  // Store for runtime updates
 
         data_index++;
     }
@@ -834,11 +910,21 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
     std::vector<uint32_t> indices;
     std::vector<Vertex> vertices;
 
+    fmt::print("  Loading {} meshes...\n", gltf.meshes.size());
+    size_t meshIndex = 0;
+    size_t totalVertices = 0;
+    size_t totalIndices = 0;
+
     for (fastgltf::Mesh& mesh : gltf.meshes) {
         std::shared_ptr<MeshAsset> newmesh = std::make_shared<MeshAsset>();
         meshes.push_back(newmesh);
         file.meshes[mesh.name.c_str()] = newmesh;
         newmesh->name = mesh.name;
+
+        // Progress log for large files
+        if (gltf.meshes.size() > 10 && meshIndex % 10 == 0) {
+            fmt::print("    Mesh {}/{}: {}\n", meshIndex + 1, gltf.meshes.size(), mesh.name);
+        }
 
         // clear the mesh arrays each mesh, we dont want to merge them by error
         indices.clear();
@@ -930,8 +1016,14 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             newmesh->surfaces.push_back(newSurface);
         }
 
+        totalVertices += vertices.size();
+        totalIndices += indices.size();
+
         newmesh->meshBuffers = engine->uploadMesh(indices, vertices);
+        meshIndex++;
     }
+
+    fmt::print("  Total: {} vertices, {} triangles\n", totalVertices, totalIndices / 3);
     //> load_nodes
         // load all nodes and their meshes
     for (fastgltf::Node& node : gltf.nodes) {
@@ -987,8 +1079,22 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             node->refreshTransform(glm::mat4{ 1.f });
         }
     }
-    return scene;
-    //< load_graph
+        fmt::print("GLTF loaded successfully: {} nodes, {} meshes, {} materials\n",
+            scene->nodes.size(), scene->meshes.size(), scene->materials.size());
+        return scene;
+        //< load_graph
+
+    } catch (const std::bad_alloc& e) {
+        fmt::print("ERROR: Out of memory while loading GLTF: {}\n", e.what());
+        fmt::print("  Try reducing model complexity or texture resolution\n");
+        return {};
+    } catch (const std::exception& e) {
+        fmt::print("ERROR: Exception while loading GLTF: {}\n", e.what());
+        return {};
+    } catch (...) {
+        fmt::print("ERROR: Unknown exception while loading GLTF\n");
+        return {};
+    }
 }
 
 
@@ -1164,32 +1270,55 @@ void LoadedGLTF::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
 
 void LoadedGLTF::clearAll()
 {
+    if (!creator) return;
+
     VkDevice dv = creator->_device;
 
+    // CRITICAL: Wait for GPU to finish all operations before destroying resources
+    // This prevents crashes when resources are still in use by pending command buffers
+    vkDeviceWaitIdle(dv);
+
+    // Clear all shared_ptr references first to prevent dangling pointers
+    topNodes.clear();
+    nodes.clear();
+    materials.clear();
+
+    // Destroy mesh buffers
     for (auto& [k, v] : meshes) {
-
-        creator->destroy_buffer(v->meshBuffers.indexBuffer);
-        creator->destroy_buffer(v->meshBuffers.vertexBuffer);
-    }
-
-    for (auto& [k, v] : images) {
-
-        if (v.image == creator->_errorCheckerboardImage.image) {
-            // dont destroy the default images
-            continue;
+        if (v) {
+            if (v->meshBuffers.indexBuffer.buffer != VK_NULL_HANDLE) {
+                creator->destroy_buffer(v->meshBuffers.indexBuffer);
+            }
+            if (v->meshBuffers.vertexBuffer.buffer != VK_NULL_HANDLE) {
+                creator->destroy_buffer(v->meshBuffers.vertexBuffer);
+            }
         }
+    }
+    meshes.clear();
+
+    // Destroy images (skip default/error images)
+    for (auto& [k, v] : images) {
+        if (v.image == VK_NULL_HANDLE) continue;
+        if (v.image == creator->_errorCheckerboardImage.image) continue;
+        if (v.image == creator->_whiteImage.image) continue;
         creator->destroy_image(v);
     }
+    images.clear();
 
+    // Destroy samplers (only once)
     for (auto& sampler : samplers) {
-        
-        vkDestroySampler(dv, sampler, nullptr);
+        if (sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(dv, sampler, nullptr);
+        }
     }
+    samplers.clear();
 
-    auto materialBuffer = materialDataBuffer;
-    auto samplersToDestroy = samplers;
-
+    // Destroy descriptor pools
     descriptorPool.destroy_pools(dv);
 
-    creator->destroy_buffer(materialBuffer);
+    // Destroy material data buffer
+    if (materialDataBuffer.buffer != VK_NULL_HANDLE) {
+        creator->destroy_buffer(materialDataBuffer);
+        materialDataBuffer = {};
+    }
 }

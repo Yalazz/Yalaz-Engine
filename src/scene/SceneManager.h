@@ -60,6 +60,34 @@ public:
     void ClearAllScenes();
 
     // =========================================================================
+    // Scene Serialization (Save/Load)
+    // =========================================================================
+
+    /**
+     * @brief Save current scene configuration to a .yscene file
+     * @param filePath Path to save file (e.g., "scenes/my_scene.yscene")
+     * @return true if saved successfully
+     */
+    bool SaveScene(const std::string& filePath);
+
+    /**
+     * @brief Load scene configuration from a .yscene file
+     * @param filePath Path to scene file
+     * @return true if loaded successfully
+     */
+    bool LoadScene(const std::string& filePath);
+
+    /**
+     * @brief Get list of recently saved scenes
+     */
+    const std::vector<std::string>& GetRecentScenes() const { return m_RecentScenes; }
+
+    /**
+     * @brief Add a scene to recent list
+     */
+    void AddRecentScene(const std::string& path);
+
+    // =========================================================================
     // Scene Access
     // =========================================================================
 
@@ -143,6 +171,9 @@ private:
     std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> m_LoadedScenes;
     std::unordered_map<std::string, std::string> m_SceneFilePaths;
     std::unordered_map<std::string, std::shared_ptr<Node>> m_LoadedNodes;
+
+    // Recent scenes for quick access
+    std::vector<std::string> m_RecentScenes;
 
     // Draw context pointers (owned by VulkanEngine during migration)
     DrawContext* m_DrawContext = nullptr;

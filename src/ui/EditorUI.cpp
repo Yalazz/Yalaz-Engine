@@ -6,7 +6,9 @@
 
 #include "EditorUI.h"
 #include "../vk_engine.h"
+#include "../scene/SceneManager.h"
 #include <fstream>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -294,13 +296,79 @@ void EditorUI::RenderMenuBar() {
             if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
                 m_Engine->resetState();
             }
+
             ImGui::Separator();
-            if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
-                m_Engine->saveState("scene.json");
+            ImGui::TextDisabled("Scene Files:");
+
+            // Save Scene submenu
+            if (ImGui::BeginMenu("Save Scene...")) {
+                static char saveNameBuffer[128] = "my_scene";
+
+                ImGui::Text("Save Name:");
+                ImGui::SetNextItemWidth(200);
+                ImGui::InputText("##SaveName", saveNameBuffer, sizeof(saveNameBuffer));
+
+                if (ImGui::Button("Save", ImVec2(100, 0))) {
+                    std::string savePath = "saves/" + std::string(saveNameBuffer) + ".yscene";
+                    Yalaz::Scene::SceneManager::Get().SaveScene(savePath);
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Recent:");
+
+                const auto& recentScenes = Yalaz::Scene::SceneManager::Get().GetRecentScenes();
+                for (const auto& recent : recentScenes) {
+                    std::filesystem::path p(recent);
+                    if (ImGui::MenuItem(p.stem().string().c_str())) {
+                        Yalaz::Scene::SceneManager::Get().SaveScene(recent);
+                    }
+                }
+
+                ImGui::EndMenu();
             }
-            if (ImGui::MenuItem("Load Scene", "Ctrl+O")) {
-                m_Engine->loadState("scene.json");
+
+            // Load Scene submenu
+            if (ImGui::BeginMenu("Load Scene...")) {
+                ImGui::TextDisabled("Saved Scenes:");
+
+                // List files in saves folder
+                std::filesystem::path savesDir("saves");
+                if (std::filesystem::exists(savesDir)) {
+                    for (const auto& entry : std::filesystem::directory_iterator(savesDir)) {
+                        if (entry.path().extension() == ".yscene") {
+                            std::string name = entry.path().stem().string();
+                            if (ImGui::MenuItem(name.c_str())) {
+                                Yalaz::Scene::SceneManager::Get().LoadScene(entry.path().string());
+                            }
+                        }
+                    }
+                } else {
+                    ImGui::TextDisabled("No saves folder found");
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Recent:");
+
+                const auto& recentScenes = Yalaz::Scene::SceneManager::Get().GetRecentScenes();
+                for (const auto& recent : recentScenes) {
+                    std::filesystem::path p(recent);
+                    if (ImGui::MenuItem(p.stem().string().c_str())) {
+                        Yalaz::Scene::SceneManager::Get().LoadScene(recent);
+                    }
+                }
+
+                ImGui::EndMenu();
             }
+
+            ImGui::Separator();
+            if (ImGui::MenuItem("Quick Save", "Ctrl+S")) {
+                Yalaz::Scene::SceneManager::Get().SaveScene("saves/quicksave.yscene");
+            }
+            if (ImGui::MenuItem("Quick Load", "Ctrl+O")) {
+                Yalaz::Scene::SceneManager::Get().LoadScene("saves/quicksave.yscene");
+            }
+
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) {
                 // Will be handled by SDL

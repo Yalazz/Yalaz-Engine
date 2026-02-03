@@ -14,6 +14,7 @@ class VulkanEngine;
 
 struct GLTFMaterial {
     MaterialInstance data;
+    uint32_t bufferOffset = 0;  // Offset in materialDataBuffer for real-time updates
 };
 
 struct GeoSurface {

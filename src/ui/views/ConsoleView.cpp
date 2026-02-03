@@ -7,8 +7,62 @@
 #include "../../vk_engine.h"
 #include <ctime>
 #include <algorithm>
+#include <cstdio>
 
 namespace Yalaz::UI {
+
+// =============================================================================
+// Global Log Storage
+// =============================================================================
+
+void LogStorage::AddLog(LogLevel level, const std::string& msg) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+
+    LogEntry entry;
+    entry.level = level;
+    entry.message = msg;
+
+    // Get timestamp
+    time_t now = time(nullptr);
+    tm* t = localtime(&now);
+    char buf[32];
+    strftime(buf, sizeof(buf), "[%H:%M:%S]", t);
+    entry.timestamp = buf;
+
+    m_Logs.push_back(entry);
+
+    // Limit size
+    while (m_Logs.size() > 1000) {
+        m_Logs.erase(m_Logs.begin());
+    }
+
+    // Also print to stdout for debugging
+    const char* prefix = (level == LogLevel::Info) ? "[INFO]" :
+                         (level == LogLevel::Warning) ? "[WARN]" : "[ERROR]";
+    printf("%s %s %s\n", buf, prefix, msg.c_str());
+}
+
+// =============================================================================
+// Console Namespace Functions
+// =============================================================================
+
+namespace Console {
+    void Log(const std::string& msg) {
+        LogStorage::Get().AddLog(LogLevel::Info, msg);
+    }
+
+    void Warn(const std::string& msg) {
+        LogStorage::Get().AddLog(LogLevel::Warning, msg);
+    }
+
+    void Error(const std::string& msg) {
+        LogStorage::Get().AddLog(LogLevel::Error, msg);
+    }
+}
+
+// =============================================================================
+// ConsoleView Implementation
+// =============================================================================
 
 void ConsoleView::OnUpdate(float deltaTime) {
     if (deltaTime > 0.0f && deltaTime < 1.0f) {
@@ -29,8 +83,8 @@ void ConsoleView::OnRender() {
 
     // Menu bar
     if (ImGui::BeginMenuBar()) {
-        if (ImGui::Button("Clear")) {
-            m_Logs.clear();
+        if (ImGui::Button("Clear All")) {
+            LogStorage::Get().Clear();
         }
 
         ImGui::SameLine();
@@ -122,6 +176,14 @@ void ConsoleView::RenderLogs() {
     ImGui::SetNextItemWidth(200);
     ImGui::InputTextWithHint("##Filter", "Filter...", m_FilterBuffer, sizeof(m_FilterBuffer));
 
+    ImGui::SameLine();
+    if (ImGui::Button("Clear")) {
+        LogStorage::Get().Clear();
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%zu entries)", LogStorage::Get().GetLogs().size());
+
     ImGui::Separator();
 
     // Log list
@@ -130,7 +192,10 @@ void ConsoleView::RenderLogs() {
     std::string lowerFilter = m_FilterBuffer;
     std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
 
-    for (const auto& log : m_Logs) {
+    // Read from global storage
+    const auto& logs = LogStorage::Get().GetLogs();
+
+    for (const auto& log : logs) {
         // Level filter
         if (log.level == LogLevel::Info && !m_ShowInfo) continue;
         if (log.level == LogLevel::Warning && !m_ShowWarnings) continue;
@@ -169,26 +234,6 @@ void ConsoleView::RenderLogs() {
     }
 
     ImGui::EndChild();
-}
-
-void ConsoleView::AddLog(LogLevel level, const std::string& msg) {
-    LogEntry entry;
-    entry.level = level;
-    entry.message = msg;
-
-    // Get timestamp
-    time_t now = time(nullptr);
-    tm* t = localtime(&now);
-    char buf[32];
-    strftime(buf, sizeof(buf), "[%H:%M:%S]", t);
-    entry.timestamp = buf;
-
-    m_Logs.push_back(entry);
-
-    // Limit size
-    while (m_Logs.size() > 1000) {
-        m_Logs.erase(m_Logs.begin());
-    }
 }
 
 } // namespace Yalaz::UI

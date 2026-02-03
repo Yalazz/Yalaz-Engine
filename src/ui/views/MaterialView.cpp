@@ -1,17 +1,19 @@
 // =============================================================================
 // YALAZ ENGINE - Material View Implementation
 // =============================================================================
-// Dynamic material editor connected to selected primitive:
-// - Edits material of currently selected primitive
-// - PBR properties with real-time preview
-// - Material presets apply to selection
-// - Syncs with ObjectInspectorView
+// Dynamic material editor supporting both primitives and GLTF materials
+// - Real-time PBR property updates via GPU buffer mapping
+// - Dynamic texture loading from Asset Browser drag-drop
+// - Descriptor set rebuilding for texture changes
 // =============================================================================
 
 #include "MaterialView.h"
 #include "../../vk_engine.h"
+#include "../../vk_loader.h"
+#include "../../vk_descriptors.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <filesystem>
+#include <stb_image.h>
 
 namespace fs = std::filesystem;
 
@@ -58,45 +60,55 @@ void MaterialView::OnRender() {
         return;
     }
 
-    // Sync with selected primitive
+    // Sync with current selection
     SyncWithSelection();
 
+    // Menu bar
     if (ImGui::BeginMenuBar()) {
         // Show what's selected
-        if (m_Engine && m_Engine->selectedPrimitiveIndex >= 0) {
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Editing: %s",
+        if (m_SelectionType == MaterialSelectionType::GLTFMaterial && m_SelectedMeshNode) {
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "GLTF: %s",
+                m_SelectedMeshNode->mesh ? m_SelectedMeshNode->mesh->name.c_str() : "Unknown");
+        } else if (m_SelectionType == MaterialSelectionType::Primitive && m_Engine &&
+                   m_Engine->selectedPrimitiveIndex >= 0) {
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Primitive: %s",
                 m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex].name.c_str());
         } else {
-            ImGui::TextDisabled("No primitive selected");
+            ImGui::TextDisabled("No selection");
         }
 
-        ImGui::SameLine(ImGui::GetWindowWidth() - 180);
-        ImGui::Checkbox("Auto-rotate", &m_AutoRotate);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 200);
+        ImGui::Checkbox("Materials", &m_ShowMaterialList);
         ImGui::SameLine();
         ImGui::Checkbox("Presets", &m_ShowPresets);
         ImGui::EndMenuBar();
     }
 
-    // Check if we have a valid selection
-    bool hasSelection = m_Engine && m_Engine->selectedPrimitiveIndex >= 0 &&
-                        m_Engine->selectedPrimitiveIndex < static_cast<int>(m_Engine->static_shapes.size());
-
-    if (!hasSelection) {
-        ImGui::TextWrapped("Select a primitive in the Hierarchy to edit its material.");
+    // No selection
+    if (m_SelectionType == MaterialSelectionType::None) {
+        ImGui::TextWrapped("Select a GLTF model or primitive in the Hierarchy to edit its material.");
+        ImGui::Spacing();
+        ImGui::TextDisabled("Supported:");
+        ImGui::BulletText("GLTF/GLB model nodes");
+        ImGui::BulletText("Primitive shapes (cube, sphere, etc.)");
         EndView();
         return;
     }
 
     // Main layout
-    ImGui::Columns(2, "MaterialColumns", true);
-    ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() * 0.4f);
+    float leftPanelWidth = m_ShowMaterialList ? ImGui::GetWindowWidth() * 0.25f : 0;
 
-    // Left: Preview
-    RenderPreview();
+    if (m_ShowMaterialList && m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+        ImGui::Columns(2, "MaterialViewColumns", true);
+        ImGui::SetColumnWidth(0, leftPanelWidth);
 
-    ImGui::NextColumn();
+        // Left: Material list for GLTF
+        RenderGLTFMaterialList();
 
-    // Right: Properties and textures in tabs
+        ImGui::NextColumn();
+    }
+
+    // Right: Material editor
     if (ImGui::BeginTabBar("MaterialTabs")) {
         if (ImGui::BeginTabItem("Properties")) {
             RenderMaterialProperties();
@@ -108,6 +120,11 @@ void MaterialView::OnRender() {
             ImGui::EndTabItem();
         }
 
+        if (ImGui::BeginTabItem("Preview")) {
+            RenderPreview();
+            ImGui::EndTabItem();
+        }
+
         if (m_ShowPresets && ImGui::BeginTabItem("Presets")) {
             RenderPresets();
             ImGui::EndTabItem();
@@ -116,7 +133,9 @@ void MaterialView::OnRender() {
         ImGui::EndTabBar();
     }
 
-    ImGui::Columns(1);
+    if (m_ShowMaterialList && m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+        ImGui::Columns(1);
+    }
 
     EndView();
 }
@@ -124,43 +143,614 @@ void MaterialView::OnRender() {
 void MaterialView::SyncWithSelection() {
     if (!m_Engine) return;
 
-    int currentSelection = m_Engine->selectedPrimitiveIndex;
+    // Check for GLTF MeshNode selection first
+    MeshNode* meshNode = m_Engine->selectedNode;
 
-    // If selection changed, load the primitive's material
-    if (currentSelection != m_LastSelectedIndex && currentSelection >= 0 &&
-        currentSelection < static_cast<int>(m_Engine->static_shapes.size())) {
+    if (meshNode && meshNode->mesh && !meshNode->mesh->surfaces.empty()) {
+        // GLTF model selected
+        if (meshNode != m_LastSelectedMeshNode) {
+            m_SelectionType = MaterialSelectionType::GLTFMaterial;
+            m_SelectedMeshNode = meshNode;
+            m_SelectedSurfaceIndex = 0;
+            m_LastSelectedMeshNode = meshNode;
+            m_LastSelectedPrimitiveIndex = -1;
 
-        auto& shape = m_Engine->static_shapes[currentSelection];
-        m_BaseColor = shape.mainColor;
-        // Note: metallic/roughness would need to be stored in StaticMeshData
-        m_LastSelectedIndex = currentSelection;
+            // Load material data
+            LoadGLTFMaterialData();
+        }
+    } else if (m_Engine->selectedPrimitiveIndex >= 0 &&
+               m_Engine->selectedPrimitiveIndex < static_cast<int>(m_Engine->static_shapes.size())) {
+        // Primitive selected
+        if (m_Engine->selectedPrimitiveIndex != m_LastSelectedPrimitiveIndex) {
+            m_SelectionType = MaterialSelectionType::Primitive;
+            m_SelectedMeshNode = nullptr;
+            m_CurrentGLTFMaterial = nullptr;
+            m_LastSelectedPrimitiveIndex = m_Engine->selectedPrimitiveIndex;
+            m_LastSelectedMeshNode = nullptr;
+
+            // Load primitive color
+            auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
+            m_BaseColor = shape.mainColor;
+        }
+    } else {
+        // Nothing selected
+        m_SelectionType = MaterialSelectionType::None;
+        m_SelectedMeshNode = nullptr;
+        m_CurrentGLTFMaterial = nullptr;
+        m_LastSelectedPrimitiveIndex = -1;
+        m_LastSelectedMeshNode = nullptr;
+    }
+}
+
+void MaterialView::LoadGLTFMaterialData() {
+    if (!m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
+
+    auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
+    if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) {
+        m_SelectedSurfaceIndex = 0;
+    }
+
+    if (surfaces.empty()) return;
+
+    auto& surface = surfaces[m_SelectedSurfaceIndex];
+    m_CurrentGLTFMaterial = surface.material;
+
+    if (!m_CurrentGLTFMaterial) return;
+
+    // Read material constants from the material data buffer
+    // The material data is stored in the LoadedGLTF's materialDataBuffer
+    // We need to find which LoadedGLTF owns this material
+
+    // For now, try to read from the material's descriptor set data
+    // This would require accessing the mapped buffer data
+
+    // Default values if we can't read from buffer
+    m_BaseColor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+    m_Metallic = 0.0f;
+    m_Roughness = 0.5f;
+
+    // Try to find the material in loaded scenes to get its data
+    for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
+        if (!scene) continue;
+
+        for (auto& [matName, mat] : scene->materials) {
+            if (mat.get() == m_CurrentGLTFMaterial.get()) {
+                // Found the material - now we need to read its constants
+                // The constants are in scene->materialDataBuffer
+
+                // For now, we'll use defaults and update them when the user changes values
+                // A full implementation would memory-map the buffer to read current values
+                break;
+            }
+        }
+    }
+}
+
+void MaterialView::RenderGLTFMaterialList() {
+    SectionHeader("Materials");
+
+    if (!m_SelectedMeshNode || !m_SelectedMeshNode->mesh) {
+        ImGui::TextDisabled("No mesh selected");
+        return;
+    }
+
+    auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
+
+    ImGui::BeginChild("MaterialList", ImVec2(0, 0), true);
+
+    for (int i = 0; i < static_cast<int>(surfaces.size()); ++i) {
+        auto& surface = surfaces[i];
+
+        ImGui::PushID(i);
+
+        bool isSelected = (i == m_SelectedSurfaceIndex);
+
+        // Material card
+        ImVec4 cardColor = isSelected ?
+            ImVec4(0.25f, 0.4f, 0.55f, 1.0f) :
+            ImVec4(0.18f, 0.18f, 0.22f, 1.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, cardColor);
+
+        if (ImGui::BeginChild("MatCard", ImVec2(-1, 50), true)) {
+            // Material icon
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "[MAT]");
+            ImGui::SameLine();
+
+            // Material name/index
+            char label[64];
+            snprintf(label, sizeof(label), "Material %d", i);
+            ImGui::Text("%s", label);
+
+            // Triangle count
+            ImGui::TextDisabled("%u triangles", surface.count / 3);
+
+            // Click to select
+            if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
+                m_SelectedSurfaceIndex = i;
+                LoadGLTFMaterialData();
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::PopStyleColor();
+        ImGui::PopID();
+
+        ImGui::Spacing();
+    }
+
+    ImGui::EndChild();
+}
+
+void MaterialView::RenderMaterialProperties() {
+    bool changed = false;
+
+    // Base Color with alpha
+    SectionHeader("Base Color");
+    float col[4] = { m_BaseColor.r, m_BaseColor.g, m_BaseColor.b, m_BaseColor.a };
+    if (ImGui::ColorEdit4("##BaseColor", col, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_AlphaBar)) {
+        m_BaseColor = glm::vec4(col[0], col[1], col[2], col[3]);
+        changed = true;
+    }
+
+    ImGui::Spacing();
+    SectionHeader("PBR Properties");
+
+    // Metallic
+    ImGui::Text("Metallic");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 80);
+    ImGui::TextDisabled("%.0f%%", m_Metallic * 100);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.8f, 0.7f, 0.3f, 1.0f));
+    if (ImGui::SliderFloat("##Metallic", &m_Metallic, 0.0f, 1.0f, "")) {
+        changed = true;
+    }
+    ImGui::PopStyleColor();
+
+    // Roughness
+    ImGui::Text("Roughness");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 80);
+    ImGui::TextDisabled("%.0f%%", m_Roughness * 100);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+    if (ImGui::SliderFloat("##Roughness", &m_Roughness, 0.0f, 1.0f, "")) {
+        changed = true;
+    }
+    ImGui::PopStyleColor();
+
+    // Quick presets
+    ImGui::Spacing();
+    ImGui::TextDisabled("Quick:");
+    if (ImGui::Button("Shiny", ImVec2(50, 0))) { m_Roughness = 0.1f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Matte", ImVec2(50, 0))) { m_Roughness = 0.8f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Metal", ImVec2(50, 0))) { m_Metallic = 1.0f; m_Roughness = 0.3f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Plastic", ImVec2(50, 0))) { m_Metallic = 0.0f; m_Roughness = 0.4f; changed = true; }
+
+    ImGui::Spacing();
+    SectionHeader("Additional");
+
+    // AO
+    if (ImGui::SliderFloat("Ambient Occlusion", &m_AO, 0.0f, 1.0f)) {
+        changed = true;
+    }
+    if (ImGui::SliderFloat("Normal Strength", &m_NormalStrength, 0.0f, 2.0f)) {
+        changed = true;
+    }
+
+    ImGui::Spacing();
+    SectionHeader("Emission");
+
+    float emCol[3] = { m_Emission.r, m_Emission.g, m_Emission.b };
+    if (ImGui::ColorEdit3("##EmissionColor", emCol)) {
+        m_Emission = glm::vec3(emCol[0], emCol[1], emCol[2]);
+        changed = true;
+    }
+    if (ImGui::SliderFloat("Emission Strength", &m_EmissionStrength, 0.0f, 10.0f)) {
+        changed = true;
+    }
+
+    // Apply button for GLTF materials
+    if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::Button("Apply to GLTF Material", ImVec2(-1, 30))) {
+            ApplyToGLTFMaterial();
+        }
+        ImGui::TextDisabled("Updates the GPU buffer in real-time");
+    }
+
+    // Apply changes
+    if (changed) {
+        ApplyToSelection();
     }
 }
 
 void MaterialView::ApplyToSelection() {
     if (!m_Engine) return;
 
-    if (m_Engine->selectedPrimitiveIndex >= 0 &&
-        m_Engine->selectedPrimitiveIndex < static_cast<int>(m_Engine->static_shapes.size())) {
+    if (m_SelectionType == MaterialSelectionType::Primitive) {
+        if (m_Engine->selectedPrimitiveIndex >= 0 &&
+            m_Engine->selectedPrimitiveIndex < static_cast<int>(m_Engine->static_shapes.size())) {
+            auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
+            shape.mainColor = m_BaseColor;
+        }
+    }
+    // For GLTF, we apply on button click via ApplyToGLTFMaterial()
+}
 
-        auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
-        shape.mainColor = m_BaseColor;
-        // Apply other properties as engine supports them
+void MaterialView::ApplyToGLTFMaterial() {
+    if (!m_Engine || !m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
+
+    auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
+    if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) return;
+
+    // Find the LoadedGLTF that owns this mesh
+    for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
+        if (!scene) continue;
+
+        // Check if this scene contains our mesh
+        bool found = false;
+        for (auto& [nodeName, node] : scene->nodes) {
+            if (node.get() == m_SelectedMeshNode) {
+                found = true;
+                break;
+            }
+        }
+
+        if (found && scene->materialDataBuffer.buffer != VK_NULL_HANDLE) {
+            // Update the material constants in the buffer
+            UpdateGLTFMaterialBuffer();
+            return;
+        }
     }
 }
 
+void MaterialView::UpdateGLTFMaterialBuffer() {
+    if (!m_Engine || !m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
+
+    auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
+    if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) return;
+
+    auto& surface = surfaces[m_SelectedSurfaceIndex];
+    if (!surface.material) return;
+
+    // Get the buffer offset stored in the material
+    uint32_t bufferOffset = surface.material->bufferOffset;
+
+    // Find the scene that owns this material to get the buffer
+    for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
+        if (!scene) continue;
+
+        // Check if this scene contains the material
+        bool found = false;
+        for (auto& [matName, mat] : scene->materials) {
+            if (mat == surface.material) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) continue;
+
+        // Map the buffer and update the material constants
+        if (scene->materialDataBuffer.buffer != VK_NULL_HANDLE &&
+            scene->materialDataBuffer.allocation != VK_NULL_HANDLE) {
+
+            void* data = nullptr;
+            VkResult result = vmaMapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation, &data);
+
+            if (result == VK_SUCCESS && data) {
+                // Use the stored buffer offset
+                GLTFMetallic_Roughness::MaterialConstants* constants =
+                    reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+                        static_cast<char*>(data) + bufferOffset);
+
+                // Update the constants
+                constants->colorFactors = m_BaseColor;
+                constants->metal_rough_factors = glm::vec4(m_Metallic, m_Roughness, 0.0f, 0.0f);
+
+                vmaUnmapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation);
+
+                // Flush to ensure GPU sees the changes
+                vmaFlushAllocation(m_Engine->_allocator, scene->materialDataBuffer.allocation, bufferOffset,
+                    sizeof(GLTFMetallic_Roughness::MaterialConstants));
+            }
+            return;
+        }
+    }
+}
+
+void MaterialView::RenderTextureSlots() {
+    if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+        ImGui::TextWrapped("Drag textures from Asset Browser to change GLTF material textures.");
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Note: Texture changes require material rebuild.");
+    } else {
+        ImGui::TextWrapped("Drag textures from Asset Browser to assign them to slots.");
+    }
+
+    ImGui::Spacing();
+
+    RenderTextureSlot("Albedo (Base Color)", m_AlbedoSlot, "TEXTURE_PATH");
+    RenderTextureSlot("Normal Map", m_NormalSlot, "TEXTURE_PATH");
+    RenderTextureSlot("Metallic/Roughness", m_MetallicRoughnessSlot, "TEXTURE_PATH");
+    RenderTextureSlot("Ambient Occlusion", m_AOSlot, "TEXTURE_PATH");
+    RenderTextureSlot("Emission", m_EmissionSlot, "TEXTURE_PATH");
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Clear all button
+    if (ImGui::Button("Clear All Textures", ImVec2(-1, 0))) {
+        m_AlbedoSlot = {"Albedo", "", false, 0};
+        m_NormalSlot = {"Normal", "", false, 0};
+        m_MetallicRoughnessSlot = {"Metallic/Roughness", "", false, 0};
+        m_AOSlot = {"Ambient Occlusion", "", false, 0};
+        m_EmissionSlot = {"Emission", "", false, 0};
+    }
+
+    // Apply textures button for GLTF
+    if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+        bool hasTextures = m_AlbedoSlot.isLoaded || m_MetallicRoughnessSlot.isLoaded ||
+                           m_NormalSlot.isLoaded || m_EmissionSlot.isLoaded;
+
+        if (hasTextures) {
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.3f, 1.0f));
+
+            if (ImGui::Button("Apply Textures to Material", ImVec2(-1, 35))) {
+                // Load albedo texture
+                if (m_AlbedoSlot.isLoaded && !m_AlbedoSlot.path.empty()) {
+                    uint32_t texID = 0;
+                    if (LoadTextureFromFile(m_AlbedoSlot.path, texID)) {
+                        m_AlbedoSlot.textureID = texID;
+                    }
+                }
+
+                // Load metallic/roughness texture
+                if (m_MetallicRoughnessSlot.isLoaded && !m_MetallicRoughnessSlot.path.empty()) {
+                    uint32_t texID = 0;
+                    if (LoadTextureFromFile(m_MetallicRoughnessSlot.path, texID)) {
+                        m_MetallicRoughnessSlot.textureID = texID;
+                    }
+                }
+
+                // Load normal texture
+                if (m_NormalSlot.isLoaded && !m_NormalSlot.path.empty()) {
+                    uint32_t texID = 0;
+                    if (LoadTextureFromFile(m_NormalSlot.path, texID)) {
+                        m_NormalSlot.textureID = texID;
+                    }
+                }
+
+                // Update material with new texture IDs
+                RebuildMaterialDescriptorSet();
+            }
+
+            ImGui::PopStyleColor();
+
+            ImGui::TextDisabled("Updates GPU material buffer in real-time");
+        }
+    }
+}
+
+void MaterialView::RenderTextureSlot(const char* label, TextureSlot& slot, const char* payloadType) {
+    ImGui::PushID(label);
+
+    // Slot header
+    ImGui::TextDisabled("%s", label);
+
+    // Slot button/drop target
+    ImVec4 slotColor = slot.isLoaded ?
+        ImVec4(0.2f, 0.4f, 0.3f, 1.0f) :
+        ImVec4(0.2f, 0.2f, 0.25f, 1.0f);
+
+    ImGui::PushStyleColor(ImGuiCol_Button, slotColor);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(slotColor.x + 0.1f, slotColor.y + 0.1f, slotColor.z + 0.1f, 1.0f));
+
+    std::string buttonLabel = slot.isLoaded ?
+        fs::path(slot.path).filename().string() :
+        "[Drop Texture Here]";
+
+    if (ImGui::Button(buttonLabel.c_str(), ImVec2(-30, 40))) {
+        // Click to clear
+        if (slot.isLoaded) {
+            slot.path.clear();
+            slot.isLoaded = false;
+            slot.textureID = 0;
+        }
+    }
+
+    // Drag-drop target
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(payloadType)) {
+            const char* droppedPath = static_cast<const char*>(payload->Data);
+            slot.path = droppedPath;
+
+            // Immediately try to load the texture for preview
+            uint32_t texID = 0;
+            if (LoadTextureFromFile(droppedPath, texID)) {
+                slot.textureID = texID;
+                slot.isLoaded = true;
+            } else {
+                slot.isLoaded = true;  // Mark as loaded even if GPU load fails (path is valid)
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    ImGui::PopStyleColor(2);
+
+    // Tooltip
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        if (slot.isLoaded) {
+            ImGui::Text("Texture: %s", slot.path.c_str());
+            ImGui::TextDisabled("Click to remove");
+        } else {
+            ImGui::Text("Drop a texture from Asset Browser");
+        }
+        ImGui::EndTooltip();
+    }
+
+    // Clear button
+    ImGui::SameLine();
+    if (ImGui::Button("X", ImVec2(25, 40))) {
+        slot.path.clear();
+        slot.isLoaded = false;
+        slot.textureID = 0;
+    }
+
+    ImGui::PopID();
+    ImGui::Spacing();
+}
+
+bool MaterialView::LoadTextureFromFile(const std::string& texturePath, uint32_t& outTextureID) {
+    if (!m_Engine) return false;
+
+    // Check if texture already loaded in cache
+    auto& cache = m_Engine->texCache;
+    auto it = cache.NameMap.find(texturePath);
+    if (it != cache.NameMap.end()) {
+        outTextureID = it->second.Index;
+        return true;
+    }
+
+    // Load image from file using stb_image
+    int width, height, channels;
+    unsigned char* data = stbi_load(texturePath.c_str(), &width, &height, &channels, 4);
+    if (!data) {
+        fmt::print("Failed to load texture: {}\n", texturePath);
+        return false;
+    }
+
+    // Create Vulkan image
+    VkExtent3D imageSize{};
+    imageSize.width = static_cast<uint32_t>(width);
+    imageSize.height = static_cast<uint32_t>(height);
+    imageSize.depth = 1;
+
+    AllocatedImage newImage = m_Engine->create_image(
+        data, imageSize,
+        VK_FORMAT_R8G8B8A8_SRGB,
+        VK_IMAGE_USAGE_SAMPLED_BIT,
+        false  // No mipmaps for now
+    );
+
+    stbi_image_free(data);
+
+    if (newImage.image == VK_NULL_HANDLE) {
+        fmt::print("Failed to create Vulkan image for: {}\n", texturePath);
+        return false;
+    }
+
+    // Add to texture cache
+    TextureID texID = cache.AddTexture(
+        newImage.imageView,
+        m_Engine->_defaultSamplerLinear,
+        texturePath
+    );
+
+    outTextureID = texID.Index;
+    fmt::print("Loaded texture: {} -> ID {}\n", texturePath, outTextureID);
+    return true;
+}
+
+void MaterialView::UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoughTexID) {
+    if (!m_Engine || !m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
+
+    auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
+    if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) return;
+
+    auto& surface = surfaces[m_SelectedSurfaceIndex];
+    if (!surface.material) return;
+
+    uint32_t bufferOffset = surface.material->bufferOffset;
+
+    // Find the scene and update texture IDs in the material buffer
+    for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
+        if (!scene) continue;
+
+        bool found = false;
+        for (auto& [matName, mat] : scene->materials) {
+            if (mat == surface.material) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) continue;
+
+        if (scene->materialDataBuffer.buffer != VK_NULL_HANDLE &&
+            scene->materialDataBuffer.allocation != VK_NULL_HANDLE) {
+
+            void* data = nullptr;
+            VkResult result = vmaMapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation, &data);
+
+            if (result == VK_SUCCESS && data) {
+                GLTFMetallic_Roughness::MaterialConstants* constants =
+                    reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+                        static_cast<char*>(data) + bufferOffset);
+
+                // Update texture IDs
+                constants->colorTexID = colorTexID;
+                constants->metalRoughTexID = metalRoughTexID;
+
+                vmaUnmapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation);
+
+                vmaFlushAllocation(m_Engine->_allocator, scene->materialDataBuffer.allocation, bufferOffset,
+                    sizeof(GLTFMetallic_Roughness::MaterialConstants));
+
+                fmt::print("Updated material texture IDs: color={}, metalRough={}\n", colorTexID, metalRoughTexID);
+            }
+            return;
+        }
+    }
+}
+
+void MaterialView::RebuildMaterialDescriptorSet() {
+    // This function would rebuild the material's descriptor set with new textures
+    // For now, this requires the texture IDs to be set in the MaterialConstants buffer
+    // which the shader reads via bindless texturing
+
+    if (!m_Engine || !m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
+
+    auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
+    if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) return;
+
+    // Note: In a full implementation, you would:
+    // 1. Wait for GPU idle on this material's descriptor set
+    // 2. Destroy old descriptor set
+    // 3. Allocate new descriptor set
+    // 4. Write new texture bindings
+    // 5. Update the material's data.materialSet
+
+    // For bindless texture approach, we just update the texture IDs in the buffer
+    // The shader uses these IDs to index into a global texture array
+
+    uint32_t colorTexID = m_AlbedoSlot.isLoaded ? m_AlbedoSlot.textureID : 0;
+    uint32_t metalRoughTexID = m_MetallicRoughnessSlot.isLoaded ? m_MetallicRoughnessSlot.textureID : 0;
+
+    UpdateMaterialTexture(colorTexID, metalRoughTexID);
+}
+
 void MaterialView::RenderPreview() {
-    SectionHeader("Preview");
+    SectionHeader("Material Preview");
 
     // Preview mesh selector
     const char* meshes[] = { "Sphere", "Cube", "Plane", "Cylinder", "Torus" };
-    ImGui::SetNextItemWidth(-1);
-    ImGui::Combo("##PreviewMesh", &m_PreviewMesh, meshes, 5);
+    ImGui::SetNextItemWidth(150);
+    ImGui::Combo("Preview Mesh", &m_PreviewMesh, meshes, 5);
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-rotate", &m_AutoRotate);
 
     // Preview area
     ImVec2 size = ImGui::GetContentRegionAvail();
-    float previewSize = std::min(size.x - 10, size.y - 30);
-    previewSize = std::max(previewSize, 100.0f);
+    float previewSize = std::min(size.x - 10, 300.0f);
+    previewSize = std::max(previewSize, 150.0f);
 
     ImGui::BeginChild("PreviewArea", ImVec2(previewSize, previewSize), true);
     ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -197,9 +787,9 @@ void MaterialView::RenderPreview() {
             break;
         case 2: // Plane
             drawList->AddQuadFilled(
-                ImVec2(center.x, center.y - radius * 0.8f),
+                ImVec2(center.x, center.y - radius * 0.5f),
                 ImVec2(center.x + radius, center.y),
-                ImVec2(center.x, center.y + radius * 0.8f),
+                ImVec2(center.x, center.y + radius * 0.5f),
                 ImVec2(center.x - radius, center.y),
                 matColor);
             break;
@@ -208,7 +798,7 @@ void MaterialView::RenderPreview() {
             break;
     }
 
-    // Specular highlight (based on roughness and metallic)
+    // Specular highlight
     float highlightIntensity = (1.0f - m_Roughness) * (m_Metallic * 0.5f + 0.5f);
     float highlightSize = radius * (1.0f - m_Roughness * 0.8f) * 0.3f;
     ImVec2 highlightPos(center.x - radius * 0.25f, center.y - radius * 0.25f);
@@ -235,182 +825,19 @@ void MaterialView::RenderPreview() {
     }
 
     // Material info
+    ImGui::Spacing();
     ImGui::TextDisabled("Metallic: %.0f%% | Roughness: %.0f%%",
         m_Metallic * 100, m_Roughness * 100);
-}
 
-void MaterialView::RenderMaterialProperties() {
-    bool changed = false;
-
-    // Base Color with alpha
-    SectionHeader("Base Color");
-    float col[4] = { m_BaseColor.r, m_BaseColor.g, m_BaseColor.b, m_BaseColor.a };
-    if (ImGui::ColorEdit4("##BaseColor", col, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_AlphaBar)) {
-        m_BaseColor = glm::vec4(col[0], col[1], col[2], col[3]);
-        changed = true;
+    if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+        ImGui::TextDisabled("Type: GLTF Material");
+    } else if (m_SelectionType == MaterialSelectionType::Primitive) {
+        ImGui::TextDisabled("Type: Primitive");
     }
-
-    ImGui::Spacing();
-    SectionHeader("PBR Properties");
-
-    // Metallic with visual indicator
-    ImGui::Text("Metallic");
-    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
-    ImGui::TextDisabled("%.0f%%", m_Metallic * 100);
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.8f, 0.7f, 0.3f, 1.0f));
-    if (ImGui::SliderFloat("##Metallic", &m_Metallic, 0.0f, 1.0f, "")) {
-        changed = true;
-    }
-    ImGui::PopStyleColor();
-
-    // Roughness with visual indicator
-    ImGui::Text("Roughness");
-    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
-    ImGui::TextDisabled("%.0f%%", m_Roughness * 100);
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
-    if (ImGui::SliderFloat("##Roughness", &m_Roughness, 0.0f, 1.0f, "")) {
-        changed = true;
-    }
-    ImGui::PopStyleColor();
-
-    // Quick presets for metallic/roughness
-    ImGui::TextDisabled("Quick:");
-    if (ImGui::Button("Shiny", ImVec2(50, 0))) { m_Roughness = 0.1f; changed = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("Matte", ImVec2(50, 0))) { m_Roughness = 0.8f; changed = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("Metal", ImVec2(50, 0))) { m_Metallic = 1.0f; m_Roughness = 0.3f; changed = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("Plastic", ImVec2(50, 0))) { m_Metallic = 0.0f; m_Roughness = 0.4f; changed = true; }
-
-    ImGui::Spacing();
-    SectionHeader("Additional");
-
-    // AO
-    if (ImGui::SliderFloat("Ambient Occlusion", &m_AO, 0.0f, 1.0f)) {
-        changed = true;
-    }
-    if (ImGui::SliderFloat("Normal Strength", &m_NormalStrength, 0.0f, 2.0f)) {
-        changed = true;
-    }
-
-    ImGui::Spacing();
-    SectionHeader("Emission");
-
-    float emCol[3] = { m_Emission.r, m_Emission.g, m_Emission.b };
-    if (ImGui::ColorEdit3("##EmissionColor", emCol)) {
-        m_Emission = glm::vec3(emCol[0], emCol[1], emCol[2]);
-        changed = true;
-    }
-    if (ImGui::SliderFloat("Emission Strength", &m_EmissionStrength, 0.0f, 10.0f)) {
-        changed = true;
-    }
-
-    // Emission presets
-    if (m_EmissionStrength > 0) {
-        ImGui::TextDisabled("Presets:");
-        if (ImGui::Button("Fire", ImVec2(40, 0))) { m_Emission = glm::vec3(1.0f, 0.3f, 0.1f); m_EmissionStrength = 3.0f; changed = true; }
-        ImGui::SameLine();
-        if (ImGui::Button("Neon", ImVec2(40, 0))) { m_Emission = glm::vec3(0.2f, 1.0f, 0.8f); m_EmissionStrength = 5.0f; changed = true; }
-        ImGui::SameLine();
-        if (ImGui::Button("Glow", ImVec2(40, 0))) { m_Emission = glm::vec3(0.5f, 0.5f, 1.0f); m_EmissionStrength = 2.0f; changed = true; }
-    }
-
-    // Apply changes to selected primitive
-    if (changed) {
-        ApplyToSelection();
-    }
-}
-
-void MaterialView::RenderTextureSlots() {
-    ImGui::TextWrapped("Drag textures from Asset Browser to assign them to slots.");
-    ImGui::Spacing();
-
-    RenderTextureSlot("Albedo (Base Color)", m_AlbedoSlot, "TEXTURE_PATH");
-    RenderTextureSlot("Normal Map", m_NormalSlot, "TEXTURE_PATH");
-    RenderTextureSlot("Metallic/Roughness", m_MetallicRoughnessSlot, "TEXTURE_PATH");
-    RenderTextureSlot("Ambient Occlusion", m_AOSlot, "TEXTURE_PATH");
-    RenderTextureSlot("Emission", m_EmissionSlot, "TEXTURE_PATH");
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Clear all button
-    if (ImGui::Button("Clear All Textures", ImVec2(-1, 0))) {
-        m_AlbedoSlot = {"Albedo", "", false};
-        m_NormalSlot = {"Normal", "", false};
-        m_MetallicRoughnessSlot = {"Metallic/Roughness", "", false};
-        m_AOSlot = {"Ambient Occlusion", "", false};
-        m_EmissionSlot = {"Emission", "", false};
-    }
-}
-
-void MaterialView::RenderTextureSlot(const char* label, TextureSlot& slot, const char* payloadType) {
-    ImGui::PushID(label);
-
-    // Slot header
-    ImGui::TextDisabled("%s", label);
-
-    // Slot button/drop target
-    ImVec4 slotColor = slot.isLoaded ?
-        ImVec4(0.2f, 0.4f, 0.3f, 1.0f) :
-        ImVec4(0.2f, 0.2f, 0.25f, 1.0f);
-
-    ImGui::PushStyleColor(ImGuiCol_Button, slotColor);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(slotColor.x + 0.1f, slotColor.y + 0.1f, slotColor.z + 0.1f, 1.0f));
-
-    std::string buttonLabel = slot.isLoaded ?
-        fs::path(slot.path).filename().string() :
-        "[Drop Texture Here]";
-
-    if (ImGui::Button(buttonLabel.c_str(), ImVec2(-1, 40))) {
-        // Click to clear
-        if (slot.isLoaded) {
-            slot.path.clear();
-            slot.isLoaded = false;
-        }
-    }
-
-    // Drag-drop target
-    if (ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(payloadType)) {
-            const char* droppedPath = static_cast<const char*>(payload->Data);
-            slot.path = droppedPath;
-            slot.isLoaded = true;
-        }
-        ImGui::EndDragDropTarget();
-    }
-
-    ImGui::PopStyleColor(2);
-
-    // Tooltip
-    if (ImGui::IsItemHovered()) {
-        ImGui::BeginTooltip();
-        if (slot.isLoaded) {
-            ImGui::Text("Texture: %s", slot.path.c_str());
-            ImGui::TextDisabled("Click to remove");
-        } else {
-            ImGui::Text("Drop a texture from Asset Browser");
-        }
-        ImGui::EndTooltip();
-    }
-
-    // Clear button for loaded textures
-    if (slot.isLoaded) {
-        ImGui::SameLine();
-        if (ImGui::Button("X", ImVec2(20, 40))) {
-            slot.path.clear();
-            slot.isLoaded = false;
-        }
-    }
-
-    ImGui::PopID();
-    ImGui::Spacing();
 }
 
 void MaterialView::RenderPresets() {
-    ImGui::TextDisabled("Click a preset to apply it to selected primitive");
+    ImGui::TextDisabled("Click a preset to apply it");
     ImGui::Spacing();
 
     // Group presets by category
@@ -432,7 +859,7 @@ void MaterialView::RenderPresets() {
                 ImGui::PushStyleColor(ImGuiCol_Button, previewColor);
 
                 if (ImGui::Button("##Color", ImVec2(25, 25))) {
-                    // Apply preset to material view
+                    // Apply preset
                     m_BaseColor = preset.baseColor;
                     m_Metallic = preset.metallic;
                     m_Roughness = preset.roughness;
@@ -441,8 +868,12 @@ void MaterialView::RenderPresets() {
                     m_EmissionStrength = glm::length(preset.emission) > 0 ? 2.0f : 0.0f;
                     m_SelectedPreset = i;
 
-                    // Apply to selected primitive
                     ApplyToSelection();
+
+                    // For GLTF, also update the buffer
+                    if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+                        ApplyToGLTFMaterial();
+                    }
                 }
 
                 ImGui::PopStyleColor();
@@ -455,7 +886,7 @@ void MaterialView::RenderPresets() {
                     ImGui::Text("%s", preset.name.c_str());
                 }
 
-                // Tooltip with details
+                // Tooltip
                 if (ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
                     ImGui::Text("%s", preset.name.c_str());
@@ -496,6 +927,30 @@ void MaterialView::SetAOTexture(const std::string& path) {
 void MaterialView::SetEmissionTexture(const std::string& path) {
     m_EmissionSlot.path = path;
     m_EmissionSlot.isLoaded = !path.empty();
+}
+
+void MaterialView::ClearGLTFSelection() {
+    m_SelectionType = MaterialSelectionType::None;
+    m_SelectedMeshNode = nullptr;
+    m_SelectedSurfaceIndex = 0;
+    m_CurrentGLTFMaterial = nullptr;
+    m_LastSelectedMeshNode = nullptr;
+}
+
+void MaterialView::OnSceneUnloading(const std::string& sceneName) {
+    if (!m_Engine || !m_SelectedMeshNode) return;
+
+    // Check if our selected node belongs to the scene being unloaded
+    auto it = m_Engine->loadedScenes.find(sceneName);
+    if (it != m_Engine->loadedScenes.end() && it->second) {
+        for (const auto& [name, node] : it->second->nodes) {
+            if (node.get() == m_SelectedMeshNode) {
+                // Our selection is being destroyed - clear it
+                ClearGLTFSelection();
+                return;
+            }
+        }
+    }
 }
 
 } // namespace Yalaz::UI
