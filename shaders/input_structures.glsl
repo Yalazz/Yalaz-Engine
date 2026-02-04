@@ -58,12 +58,16 @@ layout(set = 1, binding = 1) uniform sampler2D colorTex;
 layout(set = 1, binding = 2) uniform sampler2D metalRoughTex;
 #endif
 
-// Material data uniform buffer
+// Material data uniform buffer - MUST match C++ MaterialConstants struct
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
-    vec4 colorFactors;
-    vec4 metal_rough_factors;
-    int colorTexID;
-    int metalRoughTexID;
+    vec4 colorFactors;           // Base color RGBA
+    vec4 metal_rough_factors;    // x=metallic, y=roughness, z,w=unused
+    uint colorTexID;             // Bindless texture ID for base color
+    uint metalRoughTexID;        // Bindless texture ID for metallic-roughness
+    uint pad1;
+    uint pad2;
+    vec4 extra[13];              // extra[0] = emission (xyz=color, w=strength)
+                                 // extra[1-12] = reserved for future use
 } materialData;
 
 #endif // INPUT_STRUCTURES_GLSL

@@ -11,6 +11,7 @@
 struct LoadedGLTF;
 struct Node;
 struct MeshNode;
+class VulkanEngine;
 
 namespace Yalaz::Scene {
 
@@ -149,6 +150,11 @@ public:
         m_DrawCommands = commands;
     }
 
+    /**
+     * @brief Set engine pointer for save/load operations
+     */
+    void SetEngine(VulkanEngine* engine) { m_Engine = engine; }
+
     // =========================================================================
     // Migration Helpers
     // =========================================================================
@@ -178,6 +184,9 @@ private:
     // Draw context pointers (owned by VulkanEngine during migration)
     DrawContext* m_DrawContext = nullptr;
     DrawContext* m_DrawCommands = nullptr;
+
+    // Engine pointer for save/load operations
+    VulkanEngine* m_Engine = nullptr;
 
     // Helper for recursive node search
     MeshNode* FindNodeRecursive(std::shared_ptr<Node> node, const std::string& name);

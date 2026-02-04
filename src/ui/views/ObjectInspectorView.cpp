@@ -206,45 +206,146 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
     }
 
     // ==========================================================================
-    // MATERIAL SECTION
+    // MATERIAL SECTION - Full PBR Properties
     // ==========================================================================
     if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent();
 
-        // Main color
-        RenderColorEditor4("Main Color", shape.mainColor);
+        // Main color (Base Color / Albedo)
+        ImGui::TextDisabled("Base Color (Albedo)");
+        RenderColorEditor4("##MainColor", shape.mainColor);
 
-        // Material type selector
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // === PBR PROPERTIES ===
+        ImGui::TextDisabled("PBR Properties");
+
+        // Metallic with percentage display
+        ImGui::Text("Metallic");
+        ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+        ImGui::TextDisabled("%.0f%%", shape.metallic * 100);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.8f, 0.7f, 0.3f, 1.0f));
+        ImGui::SliderFloat("##Metallic", &shape.metallic, 0.0f, 1.0f, "");
+        ImGui::PopStyleColor();
+
+        // Roughness with percentage display
+        ImGui::Text("Roughness");
+        ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+        ImGui::TextDisabled("%.0f%%", shape.roughness * 100);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+        ImGui::SliderFloat("##Roughness", &shape.roughness, 0.0f, 1.0f, "");
+        ImGui::PopStyleColor();
+
+        // Quick PBR presets
+        ImGui::Spacing();
+        ImGui::TextDisabled("Quick:");
+        if (ImGui::Button("Shiny", ImVec2(50, 0))) { shape.roughness = 0.1f; }
+        ImGui::SameLine();
+        if (ImGui::Button("Matte", ImVec2(50, 0))) { shape.roughness = 0.8f; }
+        ImGui::SameLine();
+        if (ImGui::Button("Metal", ImVec2(50, 0))) { shape.metallic = 1.0f; shape.roughness = 0.3f; }
+        ImGui::SameLine();
+        if (ImGui::Button("Plastic", ImVec2(60, 0))) { shape.metallic = 0.0f; shape.roughness = 0.4f; }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // === EMISSION ===
+        ImGui::TextDisabled("Emission");
+
+        // Calculate emission strength from length
+        float emissionStrength = glm::length(shape.emission);
+        glm::vec3 emissionColor = emissionStrength > 0.001f ? shape.emission / emissionStrength : glm::vec3(1.0f);
+
+        float emCol[3] = { emissionColor.r, emissionColor.g, emissionColor.b };
+        if (ImGui::ColorEdit3("##EmissionColor", emCol, ImGuiColorEditFlags_Float)) {
+            emissionColor = glm::vec3(emCol[0], emCol[1], emCol[2]);
+            shape.emission = emissionColor * emissionStrength;
+        }
+
+        if (ImGui::SliderFloat("Strength##Emission", &emissionStrength, 0.0f, 10.0f, "%.2f")) {
+            shape.emission = emissionColor * emissionStrength;
+        }
+
+        // Emission presets
+        if (ImGui::Button("Off##Emission", ImVec2(40, 0))) { shape.emission = glm::vec3(0.0f); }
+        ImGui::SameLine();
+        if (ImGui::Button("Glow", ImVec2(40, 0))) { shape.emission = glm::vec3(1.0f, 0.5f, 0.2f) * 2.0f; }
+        ImGui::SameLine();
+        if (ImGui::Button("Neon", ImVec2(40, 0))) { shape.emission = glm::vec3(0.2f, 1.0f, 0.5f) * 3.0f; }
+        ImGui::SameLine();
+        if (ImGui::Button("Hot", ImVec2(40, 0))) { shape.emission = glm::vec3(1.0f, 0.2f, 0.1f) * 5.0f; }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // === MATERIAL PRESETS ===
+        ImGui::TextDisabled("Material Presets");
+
+        // Metals
+        if (ImGui::Button("Gold", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(1.0f, 0.766f, 0.336f, 1.0f);
+            shape.metallic = 1.0f; shape.roughness = 0.3f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Silver", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.972f, 0.960f, 0.915f, 1.0f);
+            shape.metallic = 1.0f; shape.roughness = 0.2f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Copper", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.955f, 0.637f, 0.538f, 1.0f);
+            shape.metallic = 1.0f; shape.roughness = 0.25f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Chrome", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.549f, 0.556f, 0.554f, 1.0f);
+            shape.metallic = 1.0f; shape.roughness = 0.1f;
+        }
+
+        // Dielectrics
+        if (ImGui::Button("Plastic R", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.9f, 0.1f, 0.1f, 1.0f);
+            shape.metallic = 0.0f; shape.roughness = 0.4f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Wood", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.6f, 0.4f, 0.2f, 1.0f);
+            shape.metallic = 0.0f; shape.roughness = 0.7f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Rubber", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.1f, 0.1f, 0.1f, 1.0f);
+            shape.metallic = 0.0f; shape.roughness = 0.9f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Glass", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.95f, 0.95f, 0.95f, 0.3f);
+            shape.metallic = 0.0f; shape.roughness = 0.05f;
+            shape.passType = MaterialPass::Transparent;
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Material type selector (advanced)
         const char* materialNames[] = { "Default", "Unlit", "PBR", "Normal Debug", "Wireframe" };
         int matType = static_cast<int>(shape.materialType);
-        if (ImGui::Combo("Material Type", &matType, materialNames, 5)) {
+        if (ImGui::Combo("Shader Type", &matType, materialNames, 5)) {
             shape.materialType = static_cast<ShaderOnlyMaterial>(matType);
         }
 
         // Pass type selector
-        const char* passNames[] = { "Main Color", "Shadow", "Wireframe", "Selection" };
+        const char* passNames[] = { "Opaque", "Transparent", "Other" };
         int passType = static_cast<int>(shape.passType);
-        if (ImGui::Combo("Pass Type", &passType, passNames, 4)) {
+        if (ImGui::Combo("Render Pass", &passType, passNames, 3)) {
             shape.passType = static_cast<MaterialPass>(passType);
         }
-
-        // Color presets
-        ImGui::Spacing();
-        ImGui::TextDisabled("Color Presets:");
-        if (ImGui::Button("Red", ImVec2(50, 0))) shape.mainColor = glm::vec4(1, 0.2f, 0.2f, 1);
-        ImGui::SameLine();
-        if (ImGui::Button("Green", ImVec2(50, 0))) shape.mainColor = glm::vec4(0.2f, 1, 0.2f, 1);
-        ImGui::SameLine();
-        if (ImGui::Button("Blue", ImVec2(50, 0))) shape.mainColor = glm::vec4(0.2f, 0.2f, 1, 1);
-        ImGui::SameLine();
-        if (ImGui::Button("White", ImVec2(50, 0))) shape.mainColor = glm::vec4(1, 1, 1, 1);
-        if (ImGui::Button("Gray", ImVec2(50, 0))) shape.mainColor = glm::vec4(0.5f, 0.5f, 0.5f, 1);
-        ImGui::SameLine();
-        if (ImGui::Button("Gold", ImVec2(50, 0))) shape.mainColor = glm::vec4(1, 0.84f, 0, 1);
-        ImGui::SameLine();
-        if (ImGui::Button("Silver", ImVec2(50, 0))) shape.mainColor = glm::vec4(0.75f, 0.75f, 0.75f, 1);
-        ImGui::SameLine();
-        if (ImGui::Button("Bronze", ImVec2(50, 0))) shape.mainColor = glm::vec4(0.8f, 0.5f, 0.2f, 1);
 
         ImGui::Unindent();
     }
@@ -781,6 +882,34 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
 
         } else {
             ImGui::TextDisabled("Unable to decompose transform matrix");
+        }
+
+        ImGui::Unindent();
+    }
+
+    // Material info for GLTF nodes
+    if (node->mesh && !node->mesh->surfaces.empty() && ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Indent();
+
+        ImGui::TextDisabled("GLTF materials are edited in the Material View.");
+        ImGui::TextDisabled("Select this node and open Material View to edit.");
+
+        ImGui::Spacing();
+
+        // Show material count
+        ImGui::Text("Materials: %zu surfaces", node->mesh->surfaces.size());
+
+        // List surfaces with their material info
+        for (size_t i = 0; i < node->mesh->surfaces.size() && i < 5; ++i) {
+            auto& surface = node->mesh->surfaces[i];
+            ImGui::BulletText("Surface %zu: %u tris", i, surface.count / 3);
+            if (surface.material) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(has material)");
+            }
+        }
+        if (node->mesh->surfaces.size() > 5) {
+            ImGui::TextDisabled("... and %zu more", node->mesh->surfaces.size() - 5);
         }
 
         ImGui::Unindent();

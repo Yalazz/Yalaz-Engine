@@ -303,13 +303,16 @@ enum class PrimitiveType {
 //    }
 //};
 // Push constants for primitive rendering - MUST match shader
+// Updated to support PBR material properties
 struct PrimitivePushConstants {
-    glm::mat4 worldMatrix;      // 64 bytes
-    glm::vec4 mainColor;        // 16 bytes
-    glm::vec4 faceColors[6];    // 96 bytes (Front, Back, Right, Left, Top, Bottom)
-    int useFaceColors;          // 4 bytes
-    int padding[3];             // 12 bytes (alignment)
-};  // Total: 192 bytes (within 256 byte limit)
+    glm::mat4 worldMatrix;      // 64 bytes (offset 0)
+    glm::vec4 mainColor;        // 16 bytes (offset 64) - RGBA base color
+    glm::vec4 faceColors[6];    // 96 bytes (offset 80) - Per-face colors
+    glm::vec4 pbrParams;        // 16 bytes (offset 176) - x=metallic, y=roughness, z=ao, w=unused
+    glm::vec4 emission;         // 16 bytes (offset 192) - xyz=emission color, w=emission strength
+    int useFaceColors;          // 4 bytes (offset 208)
+    int padding[3];             // 12 bytes (offset 212) - alignment padding
+};  // Total: 224 bytes (within 256 byte limit)
 
 struct StaticMeshData {
     GPUMeshBuffers mesh;
@@ -330,6 +333,11 @@ struct StaticMeshData {
     bool useFaceColors = false;                 // Toggle for face coloring
     bool visible = true;                        // Visibility toggle
     bool selected = false;                      // Selection state for UI/gizmo
+
+    // PBR material properties
+    float metallic = 0.0f;                      // Metallic factor (0-1)
+    float roughness = 0.5f;                     // Roughness factor (0-1)
+    glm::vec3 emission = glm::vec3(0.0f);       // Emission color * strength
 
     PrimitiveType type = PrimitiveType::Cube;
     ShaderOnlyMaterial materialType = ShaderOnlyMaterial::DEFAULT;
@@ -352,6 +360,12 @@ struct StaticMeshData {
         for (int i = 0; i < 6; ++i) {
             pc.faceColors[i] = faceColors[i];
         }
+        // PBR parameters: metallic, roughness, AO (fixed at 1.0), unused
+        pc.pbrParams = glm::vec4(metallic, roughness, 1.0f, 0.0f);
+        // Emission: RGB color with strength in alpha
+        float emissionStrength = glm::length(emission);
+        glm::vec3 emissionColor = emissionStrength > 0.001f ? emission / emissionStrength : glm::vec3(0.0f);
+        pc.emission = glm::vec4(emissionColor, emissionStrength);
         pc.useFaceColors = useFaceColors ? 1 : 0;
         pc.padding[0] = pc.padding[1] = pc.padding[2] = 0;
         return pc;

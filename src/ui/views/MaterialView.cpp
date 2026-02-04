@@ -168,9 +168,21 @@ void MaterialView::SyncWithSelection() {
             m_LastSelectedPrimitiveIndex = m_Engine->selectedPrimitiveIndex;
             m_LastSelectedMeshNode = nullptr;
 
-            // Load primitive color
+            // Load all primitive material properties
             auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
             m_BaseColor = shape.mainColor;
+            m_Metallic = shape.metallic;
+            m_Roughness = shape.roughness;
+
+            // Load emission (if non-zero)
+            float emissionLen = glm::length(shape.emission);
+            if (emissionLen > 0.001f) {
+                m_EmissionStrength = emissionLen;
+                m_Emission = shape.emission / emissionLen;
+            } else {
+                m_Emission = glm::vec3(0.0f);
+                m_EmissionStrength = 0.0f;
+            }
         }
     } else {
         // Nothing selected
@@ -375,7 +387,19 @@ void MaterialView::ApplyToSelection() {
         if (m_Engine->selectedPrimitiveIndex >= 0 &&
             m_Engine->selectedPrimitiveIndex < static_cast<int>(m_Engine->static_shapes.size())) {
             auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
+
+            // Update all material properties for primitives
             shape.mainColor = m_BaseColor;
+            shape.metallic = m_Metallic;
+            shape.roughness = m_Roughness;
+            shape.emission = m_Emission * m_EmissionStrength;
+
+            // Update pass type based on alpha
+            if (m_BaseColor.a < 1.0f) {
+                shape.passType = MaterialPass::Transparent;
+            } else {
+                shape.passType = MaterialPass::MainColor;
+            }
         }
     }
     // For GLTF, we apply on button click via ApplyToGLTFMaterial()
@@ -449,13 +473,21 @@ void MaterialView::UpdateGLTFMaterialBuffer() {
 
                 // Update the constants
                 constants->colorFactors = m_BaseColor;
-                constants->metal_rough_factors = glm::vec4(m_Metallic, m_Roughness, 0.0f, 0.0f);
+                constants->metal_rough_factors = glm::vec4(m_Metallic, m_Roughness, m_AO, m_NormalStrength);
+
+                // Store emission in extra[0] (x,y,z = color, w = strength)
+                constants->extra[0] = glm::vec4(m_Emission, m_EmissionStrength);
 
                 vmaUnmapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation);
 
                 // Flush to ensure GPU sees the changes
                 vmaFlushAllocation(m_Engine->_allocator, scene->materialDataBuffer.allocation, bufferOffset,
                     sizeof(GLTFMetallic_Roughness::MaterialConstants));
+
+                fmt::print("[MaterialView] Updated GLTF material - Base: ({:.2f},{:.2f},{:.2f},{:.2f}), Metal: {:.2f}, Rough: {:.2f}, Emission: ({:.2f},{:.2f},{:.2f}) x {:.2f}\n",
+                    m_BaseColor.r, m_BaseColor.g, m_BaseColor.b, m_BaseColor.a,
+                    m_Metallic, m_Roughness,
+                    m_Emission.r, m_Emission.g, m_Emission.b, m_EmissionStrength);
             }
             return;
         }

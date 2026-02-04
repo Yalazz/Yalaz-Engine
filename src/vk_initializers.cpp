@@ -238,6 +238,9 @@ VkRenderingAttachmentInfo vkinit::depth_attachment_info(
     depthAttachment.imageLayout = layout;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    // IMPORTANT: Using Reverse-Z depth (GREATER_OR_EQUAL comparison)
+    // In Reverse-Z: 1.0 = near plane, 0.0 = far plane
+    // Must clear to 0.0 (far) so closer objects pass the GREATER test
     depthAttachment.clearValue.depthStencil.depth = 0.f;
 
     return depthAttachment;

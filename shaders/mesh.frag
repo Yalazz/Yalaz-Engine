@@ -96,13 +96,13 @@ vec3 calculate_directional_light(vec3 normal, vec3 baseColor, vec3 viewDir)
 }
 
 // =============================================================================
-// MAIN
+// MAIN - With PBR metallic/roughness and emission support
 // =============================================================================
 
 void main()
 {
-    // === BASE COLOR ===
-    vec3 baseColor = inColor;
+    // === BASE COLOR (ALBEDO) ===
+    vec3 albedo = inColor * materialData.colorFactors.rgb;
 
 #ifdef USE_BINDLESS
     vec4 texColor = texture(allTextures[materialData.colorTexID], inUV);
@@ -110,31 +110,63 @@ void main()
     vec4 texColor = texture(colorTex, inUV);
 #endif
 
-    baseColor *= texColor.rgb;
+    albedo *= texColor.rgb;
+
+    // === PBR PARAMETERS ===
+    float metallic = materialData.metal_rough_factors.x;
+    float roughness = max(materialData.metal_rough_factors.y, 0.04); // Prevent div by zero
+
+    // Sample metallic-roughness map (G=roughness, B=metallic in GLTF spec)
+#ifndef USE_BINDLESS
+    vec4 metalRoughSample = texture(metalRoughTex, inUV);
+    roughness *= metalRoughSample.g;
+    metallic *= metalRoughSample.b;
+#endif
 
     // === NORMAL & VIEW DIRECTION ===
-    vec3 normal = normalize(inNormal);
-    vec3 viewDir = normalize(sceneData.cameraPosition.xyz - inWorldPos);
+    vec3 N = normalize(inNormal);
+    vec3 V = normalize(sceneData.cameraPosition.xyz - inWorldPos);
 
     // === AMBIENT LIGHTING ===
-    vec3 ambient = baseColor * sceneData.ambientColor.rgb * sceneData.ambientColor.a;
+    vec3 ambient = albedo * sceneData.ambientColor.rgb * sceneData.ambientColor.a;
 
-    // === DIRECTIONAL LIGHTING (SUN) ===
-    vec3 directional = calculate_directional_light(normal, baseColor, viewDir);
+    // === DIRECTIONAL LIGHTING (SUN) - Simple PBR influence ===
+    vec3 sunDir = normalize(-sceneData.sunlightDirection.xyz);
+    float sunIntensity = sceneData.sunlightDirection.w;
+    float NdotL = max(dot(N, sunDir), 0.0);
+
+    // Fresnel at normal incidence
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+    // Simple approximation: less diffuse for metals, sharper specular for smooth surfaces
+    vec3 diffuse = albedo * (1.0 - metallic) * NdotL;
+
+    // Specular with roughness influence
+    vec3 H = normalize(V + sunDir);
+    float NdotH = max(dot(N, H), 0.0);
+    float specPower = mix(8.0, 256.0, 1.0 - roughness);
+    float spec = pow(NdotH, specPower) * (1.0 - roughness) * 0.5;
+    vec3 specular = mix(vec3(spec), albedo * spec, metallic);
+
+    vec3 directional = (diffuse + specular) * sceneData.sunlightColor.rgb * sunIntensity;
 
     // === POINT LIGHTING ===
-    vec3 pointLighting = calculate_point_lights(inWorldPos, normal, baseColor, viewDir);
+    vec3 pointLighting = calculate_point_lights(inWorldPos, N, albedo, V);
+
+    // === EMISSION ===
+    vec3 emission = materialData.extra[0].rgb * materialData.extra[0].w;
 
     // === FINAL COMPOSITION ===
-    vec3 result = ambient + directional + pointLighting;
+    vec3 result = ambient + directional + pointLighting + emission;
 
-    // Simple tone mapping to prevent over-bright areas
+    // Reinhard tone mapping
     result = result / (result + vec3(1.0));
 
-    // DEBUG: Visualize point light count (uncomment to debug)
-    // If you see magenta tint, point lights ARE being read from buffer
-    // float debugLightCount = float(sceneData.pointLightCount) / 10.0;
-    // result = mix(result, vec3(debugLightCount, 0.0, debugLightCount), 0.3);
+    // Gamma correction
+    result = pow(result, vec3(1.0 / 2.2));
 
-    outFragColor = vec4(result, 1.0);
+    // Alpha from material
+    float alpha = materialData.colorFactors.a * texColor.a;
+
+    outFragColor = vec4(result, alpha);
 }

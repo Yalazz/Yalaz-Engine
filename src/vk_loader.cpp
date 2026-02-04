@@ -890,6 +890,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         materialResources.dataBuffer = file.materialDataBuffer.buffer;
         materialResources.dataBufferOffset = data_index * sizeof(GLTFMetallic_Roughness::MaterialConstants);
         // grab textures from gltf file
+        // Load base color (albedo) texture
         if (mat.pbrData.baseColorTexture.has_value()) {
             size_t img = gltf.textures[mat.pbrData.baseColorTexture.value().textureIndex].imageIndex.value();
             size_t sampler = gltf.textures[mat.pbrData.baseColorTexture.value().textureIndex].samplerIndex.value();
@@ -897,6 +898,38 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             materialResources.colorImage = images[img];
             materialResources.colorSampler = file.samplers[sampler];
         }
+
+        // Load metallic-roughness texture
+        if (mat.pbrData.metallicRoughnessTexture.has_value()) {
+            size_t img = gltf.textures[mat.pbrData.metallicRoughnessTexture.value().textureIndex].imageIndex.value();
+            size_t sampler = gltf.textures[mat.pbrData.metallicRoughnessTexture.value().textureIndex].samplerIndex.value();
+
+            materialResources.metalRoughImage = images[img];
+            materialResources.metalRoughSampler = file.samplers[sampler];
+        }
+
+        // Load emissive factor into material constants (works with or without texture)
+        // Note: extra[0] is used for emissive (xyz=color, w=strength)
+        // Check if any emissive factor component is non-zero
+        bool hasEmissive = (mat.emissiveFactor[0] > 0.0f ||
+                           mat.emissiveFactor[1] > 0.0f ||
+                           mat.emissiveFactor[2] > 0.0f);
+
+        if (hasEmissive) {
+            constants.extra[0] = glm::vec4(
+                mat.emissiveFactor[0],
+                mat.emissiveFactor[1],
+                mat.emissiveFactor[2],
+                1.0f  // Emissive strength multiplier
+            );
+            // Update the buffer with emissive data
+            sceneMaterialConstants[data_index] = constants;
+        }
+
+        // Load normal map texture (if needed later)
+        // Note: Normal maps require additional shader support
+        // if (mat.normalTexture.has_value()) { ... }
+
         // build material
         newMat->data = engine->metalRoughMaterial.write_material(engine->_device, passType, materialResources, file.descriptorPool);
         newMat->bufferOffset = materialResources.dataBufferOffset;  // Store for runtime updates

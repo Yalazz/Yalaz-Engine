@@ -47,6 +47,9 @@ void EditorUI::Init(VulkanEngine* engine) {
     // Initialize view manager
     ViewManager::Get().Init(m_Engine);
 
+    // Initialize scene manager with engine pointer for save/load
+    Yalaz::Scene::SceneManager::Get().SetEngine(m_Engine);
+
     // Initialize workspace system
     InitBuiltInWorkspaces();
     LoadWorkspacesFromFile();
@@ -432,10 +435,10 @@ void EditorUI::RenderMenuBar() {
     if (!io.WantTextInput) {
         if (io.KeyCtrl) {
             if (ImGui::IsKeyPressed(ImGuiKey_S, false)) {
-                m_Engine->saveState("scene.json");
+                Yalaz::Scene::SceneManager::Get().SaveScene("saves/quicksave.yscene");
             }
             if (ImGui::IsKeyPressed(ImGuiKey_O, false)) {
-                m_Engine->loadState("scene.json");
+                Yalaz::Scene::SceneManager::Get().LoadScene("saves/quicksave.yscene");
             }
             if (ImGui::IsKeyPressed(ImGuiKey_N, false)) {
                 m_Engine->resetState();

@@ -14,8 +14,11 @@ public:
     float fov{ 60.0f };
     float targetFov{ 60.0f };
     float aspectRatio{ 16.0f / 9.0f };
-    float nearPlane{ 0.1f };
-    float farPlane{ 1000.0f };
+    // NOTE: Using reverse-Z with swapped near/far in perspectiveRH_ZO() in update_scene()
+    // Reverse-Z provides much better depth precision at far distances
+    // Near plane should be as large as possible while still showing close objects
+    float nearPlane{ 0.1f };     // Near plane (meters) - keep small for close inspection
+    float farPlane{ 5000.0f };   // Far plane (meters) - reduced for better precision
     glm::mat4 projectionMatrix{ 1.0f };
 
     // --- Movement tuning ---

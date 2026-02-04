@@ -21,13 +21,15 @@ layout(location = 2) out vec4 fragColor;
 layout(location = 3) out vec2 fragUV;
 layout(location = 4) flat out int fragFaceIndex;
 
-// Push constants for primitive rendering
+// Push constants for primitive rendering - MUST match C++ struct
 layout(push_constant) uniform PushConstants {
-    mat4 worldMatrix;       // 64 bytes
-    vec4 mainColor;         // 16 bytes
-    vec4 faceColors[6];     // 96 bytes (Front, Back, Right, Left, Top, Bottom)
-    int useFaceColors;      // 4 bytes
-    int padding[3];         // 12 bytes
+    mat4 worldMatrix;       // 64 bytes (offset 0)
+    vec4 mainColor;         // 16 bytes (offset 64) - RGBA base color
+    vec4 faceColors[6];     // 96 bytes (offset 80) - Per-face colors
+    vec4 pbrParams;         // 16 bytes (offset 176) - x=metallic, y=roughness, z=ao, w=unused
+    vec4 emission;          // 16 bytes (offset 192) - xyz=emission color, w=emission strength
+    int useFaceColors;      // 4 bytes (offset 208)
+    int padding[3];         // 12 bytes (offset 212)
 } push;
 
 // Scene data - MUST match GPUSceneData in vk_types.h

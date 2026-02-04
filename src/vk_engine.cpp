@@ -13281,7 +13281,7 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
         def.transform = nodeMatrix;
 
         def.name = mesh->name;
-        def.nodePointer = this;   // 🎯 RenderObject → MeshNode eşlemesi
+        def.nodePointer = this;
 
         if (s.material->data.passType == MaterialPass::Transparent)
             ctx.TransparentSurfaces.push_back(def);
