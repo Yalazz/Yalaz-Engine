@@ -1,0 +1,112 @@
+#version 450
+
+// =============================================================================
+// GPU CULLING COMPUTE SHADER
+// =============================================================================
+// Performs frustum culling on the GPU and generates indirect draw commands
+// =============================================================================
+
+layout(local_size_x = 64) in;
+
+// Object data structure (must match GPUObjectData in C++)
+struct ObjectData {
+    mat4 modelMatrix;
+    vec4 sphereBounds;      // xyz = center, w = radius
+    uint materialIndex;
+    uint meshIndex;
+    uint flags;
+    uint padding;
+};
+
+// Indirect draw command (must match VkDrawIndexedIndirectCommand)
+struct IndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+// Mesh info for generating draw commands
+struct MeshInfo {
+    uint indexCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint padding;
+};
+
+// Push constants
+layout(push_constant) uniform CullPushConstants {
+    mat4 viewProj;          // View-projection matrix for culling
+    vec4 frustumPlanes[6];  // Frustum planes (xyz = normal, w = distance)
+    uint objectCount;       // Total number of objects
+    uint enableCulling;     // 1 = enable culling, 0 = pass all
+    uint padding[2];
+} cull;
+
+// Object data buffer (read-only)
+layout(std430, set = 0, binding = 0) readonly buffer ObjectBuffer {
+    ObjectData objects[];
+};
+
+// Mesh info buffer (read-only)
+layout(std430, set = 0, binding = 1) readonly buffer MeshInfoBuffer {
+    MeshInfo meshes[];
+};
+
+// Indirect commands buffer (write)
+layout(std430, set = 0, binding = 2) writeonly buffer IndirectBuffer {
+    IndirectCommand commands[];
+};
+
+// Draw count buffer (atomic counter)
+layout(std430, set = 0, binding = 3) buffer DrawCountBuffer {
+    uint drawCount;
+};
+
+// Frustum culling test - returns true if sphere is visible
+bool isVisible(vec4 sphereBounds) {
+    if (cull.enableCulling == 0) return true;
+
+    // Transform sphere center to world space (already in world space)
+    vec3 center = sphereBounds.xyz;
+    float radius = sphereBounds.w;
+
+    // Test against each frustum plane
+    for (int i = 0; i < 6; i++) {
+        float distance = dot(cull.frustumPlanes[i].xyz, center) + cull.frustumPlanes[i].w;
+        if (distance < -radius) {
+            return false;  // Sphere is completely outside this plane
+        }
+    }
+
+    return true;  // Sphere is at least partially inside frustum
+}
+
+void main() {
+    uint objectIndex = gl_GlobalInvocationID.x;
+
+    // Bounds check
+    if (objectIndex >= cull.objectCount) return;
+
+    ObjectData obj = objects[objectIndex];
+
+    // Skip invisible objects
+    if ((obj.flags & 1u) == 0) return;
+
+    // Perform frustum culling
+    if (!isVisible(obj.sphereBounds)) return;
+
+    // Object is visible - add to indirect draw buffer
+    uint drawIndex = atomicAdd(drawCount, 1);
+
+    // Get mesh info
+    MeshInfo mesh = meshes[obj.meshIndex];
+
+    // Write indirect command
+    commands[drawIndex].indexCount = mesh.indexCount;
+    commands[drawIndex].instanceCount = 1;
+    commands[drawIndex].firstIndex = mesh.firstIndex;
+    commands[drawIndex].vertexOffset = mesh.vertexOffset;
+    commands[drawIndex].firstInstance = objectIndex;  // Pass object index for material lookup
+}

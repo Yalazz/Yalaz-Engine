@@ -21,7 +21,24 @@ void vkutil::transition_image(VkCommandBuffer cmd, VkImage image, VkImageLayout 
     imageBarrier.oldLayout = currentLayout;
     imageBarrier.newLayout = newLayout;
 
-    VkImageAspectFlags aspectMask = (newLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    // Determine aspect mask based on layout - check BOTH current and new layouts
+    // Depth layouts require VK_IMAGE_ASPECT_DEPTH_BIT
+    auto isDepthLayout = [](VkImageLayout layout) {
+        return layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ||
+               layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
+               layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL ||
+               layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ||
+               layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
+               layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
+    };
+
+    VkImageAspectFlags aspectMask;
+    if (isDepthLayout(currentLayout) || isDepthLayout(newLayout)) {
+        aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    } else {
+        aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+
     imageBarrier.subresourceRange = vkinit::image_subresource_range(aspectMask);
     imageBarrier.image = image;
 

@@ -101,7 +101,9 @@ struct alignas(16) PointLight {
 static_assert(sizeof(PointLight) == 32, "PointLight must be 32 bytes for GPU alignment");
 
 // GPU Scene Data - Uniform buffer structure (std140 layout)
-// Contains view/projection matrices, lighting info, and point light array
+// Contains view/projection matrices, lighting info, point lights, and shadow data
+constexpr int SHADOW_CASCADE_COUNT = 4;
+
 struct alignas(16) GPUSceneData {
     // === Camera Matrices (192 bytes) ===
     glm::mat4 view;                             // offset 0,   size 64
@@ -119,14 +121,21 @@ struct alignas(16) GPUSceneData {
     // === Point Light Array (2048 bytes) ===
     PointLight pointLights[MAX_POINT_LIGHTS];   // offset 256, size 64 * 32 = 2048
 
-    // === Point Light Count (16 bytes for alignment) ===
+    // === Point Light Count + Shadow Settings (16 bytes) ===
     int pointLightCount;                        // offset 2304, size 4
-    float _pad0;                                // offset 2308, size 4
-    float _pad1;                                // offset 2312, size 4
-    float _pad2;                                // offset 2316, size 4
-    // Total: 2320 bytes
+    float shadowBias;                           // offset 2308, size 4
+    float shadowNormalBias;                     // offset 2312, size 4
+    int shadowsEnabled;                         // offset 2316, size 4 (bool as int for GPU)
+
+    // === Shadow Cascade Matrices (256 bytes) ===
+    glm::mat4 shadowMatrices[SHADOW_CASCADE_COUNT]; // offset 2320, size 64 * 4 = 256
+
+    // === Shadow Cascade Split Depths (16 bytes) ===
+    glm::vec4 cascadeSplits;                    // offset 2576, size 16 (x,y,z,w = split distances)
+
+    // Total: 2592 bytes
 };
-static_assert(sizeof(GPUSceneData) == 2320, "GPUSceneData must be 2320 bytes for GPU alignment");
+static_assert(sizeof(GPUSceneData) == 2592, "GPUSceneData must be 2592 bytes for GPU alignment");
 
 enum class ShaderOnlyMaterial : uint8_t {
     DEFAULT,

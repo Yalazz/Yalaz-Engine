@@ -360,6 +360,54 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
     }
 
     // ==========================================================================
+    // TEXTURES SECTION - Texture paths for primitive materials
+    // ==========================================================================
+    if (ImGui::CollapsingHeader("Textures")) {
+        ImGui::Indent();
+
+        ImGui::TextDisabled("Assign textures via Material View or drag-drop");
+        ImGui::Spacing();
+
+        // Helper lambda to display texture path status
+        auto showTexturePath = [](const char* label, const std::string& path) {
+            if (!path.empty()) {
+                // Extract filename from path
+                size_t lastSlash = path.find_last_of("/\\");
+                std::string filename = (lastSlash != std::string::npos) ?
+                    path.substr(lastSlash + 1) : path;
+                ImGui::Text("%s: %s", label, filename.c_str());
+            } else {
+                ImGui::TextDisabled("%s: [Default White]", label);
+            }
+        };
+
+        showTexturePath("Albedo", shape.albedoTexturePath);
+        showTexturePath("Metal/Rough", shape.metalRoughTexturePath);
+        showTexturePath("Emission", shape.emissionTexturePath);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Clear textures button
+        bool hasTextures = !shape.albedoTexturePath.empty() ||
+                          !shape.metalRoughTexturePath.empty() ||
+                          !shape.emissionTexturePath.empty();
+        if (hasTextures) {
+            if (ImGui::Button("Clear All Textures", ImVec2(-1, 0))) {
+                shape.material = nullptr;  // Reverts to default material
+                shape.albedoTexturePath.clear();
+                shape.metalRoughTexturePath.clear();
+                shape.emissionTexturePath.clear();
+            }
+        } else {
+            ImGui::TextDisabled("No custom textures assigned");
+        }
+
+        ImGui::Unindent();
+    }
+
+    // ==========================================================================
     // STATISTICS SECTION
     // ==========================================================================
     if (ImGui::CollapsingHeader("Statistics")) {

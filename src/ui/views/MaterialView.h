@@ -8,9 +8,11 @@
 // - Real-time GPU buffer updates for GLTF materials
 // - Material presets
 // - Live preview
+// - Save/Load .mat files (JSON format)
 // =============================================================================
 
 #include "EditorView.h"
+#include "../../assets/MaterialFile.h"
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -93,6 +95,13 @@ private:
     void UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoughTexID);
     void RebuildMaterialDescriptorSet();
 
+    // Material file save/load
+    void RenderSaveLoadUI();
+    void SaveMaterialToFile();
+    void LoadMaterialFromFile();
+    MaterialFile::MaterialData GetCurrentMaterialData() const;
+    void ApplyMaterialData(const MaterialFile::MaterialData& data);
+
     // Current selection type
     MaterialSelectionType m_SelectionType = MaterialSelectionType::None;
 
@@ -131,6 +140,16 @@ private:
     bool m_ShowMaterialList = true;
     int m_LastSelectedPrimitiveIndex = -1;
     MeshNode* m_LastSelectedMeshNode = nullptr;
+
+    // Material file state
+    std::string m_CurrentMaterialPath;
+    std::string m_MaterialName = "Unnamed Material";
+    std::string m_MaterialCategory;
+    std::string m_MaterialTags;
+    bool m_ShowSaveLoadDialog = false;
+    bool m_IsLoadDialog = false;
+    char m_FilePathBuffer[512] = "";
+    char m_MaterialNameBuffer[128] = "";
 };
 
 } // namespace Yalaz::UI

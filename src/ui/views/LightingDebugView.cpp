@@ -46,10 +46,55 @@ void LightingDebugView::OnRender() {
 }
 
 void LightingDebugView::RenderLightList() {
-    SectionHeader("Scene Point Lights");
+    // === Sun / Directional Light ===
+    SectionHeader("Sun (Directional Light)");
+
+    if (ImGui::Checkbox("Sun Enabled", &m_Engine->sunEnabled)) {
+        if (m_Engine->sunEnabled) {
+            m_Engine->sceneData.sunlightDirection.w = m_Engine->savedSunIntensity;
+        } else {
+            m_Engine->savedSunIntensity = m_Engine->sceneData.sunlightDirection.w;
+            m_Engine->sceneData.sunlightDirection.w = 0.0f;
+        }
+    }
+
+    if (m_Engine->sunEnabled) {
+        ImGui::ColorEdit3("Sun Color", (float*)&m_Engine->sceneData.sunlightColor);
+        if (ImGui::SliderFloat("Sun Intensity", &m_Engine->sceneData.sunlightDirection.w, 0.0f, 10.0f)) {
+            m_Engine->savedSunIntensity = m_Engine->sceneData.sunlightDirection.w;
+        }
+
+        glm::vec3 sunDir = glm::vec3(m_Engine->sceneData.sunlightDirection);
+        if (ImGui::DragFloat3("Sun Direction", (float*)&sunDir, 0.1f, -1.0f, 1.0f)) {
+            m_Engine->sceneData.sunlightDirection = glm::vec4(glm::normalize(sunDir), m_Engine->sceneData.sunlightDirection.w);
+        }
+        ImGui::TextDisabled("Direction is normalized");
+    }
+
+    ImGui::Spacing();
+
+    // === Ambient Light ===
+    SectionHeader("Ambient Light");
+    ImGui::ColorEdit3("Ambient Color", (float*)&m_Engine->sceneData.ambientColor);
+    ImGui::SliderFloat("Ambient Intensity", &m_Engine->sceneData.ambientColor.w, 0.0f, 2.0f);
+
+    ImGui::Spacing();
+
+    // === Shadow Settings ===
+    SectionHeader("Shadow Settings");
+    ImGui::Checkbox("Shadows Enabled", &m_Engine->shadowsEnabled);
+    if (m_Engine->shadowsEnabled) {
+        ImGui::SliderFloat("Shadow Bias", &m_Engine->shadowBias, 0.0001f, 0.01f, "%.5f");
+        ImGui::SliderFloat("Normal Bias", &m_Engine->shadowNormalBias, 0.0f, 0.1f, "%.4f");
+    }
+
+    ImGui::Spacing();
+
+    // === Point Lights ===
+    SectionHeader("Point Lights");
 
     if (m_Engine->scenePointLights.empty()) {
-        ImGui::TextDisabled("No lights in scene");
+        ImGui::TextDisabled("No point lights in scene");
         ImGui::Spacing();
         if (ImGui::Button("Add Point Light", ImVec2(-1, 0))) {
             PointLight newLight;

@@ -130,10 +130,13 @@ void main()
     // === AMBIENT LIGHTING ===
     vec3 ambient = albedo * sceneData.ambientColor.rgb * sceneData.ambientColor.a;
 
-    // === DIRECTIONAL LIGHTING (SUN) - Simple PBR influence ===
+    // === DIRECTIONAL LIGHTING (SUN) - Simple PBR influence with shadows ===
     vec3 sunDir = normalize(-sceneData.sunlightDirection.xyz);
     float sunIntensity = sceneData.sunlightDirection.w;
     float NdotL = max(dot(N, sunDir), 0.0);
+
+    // Calculate shadow factor
+    float shadow = calculate_shadow(inWorldPos, N);
 
     // Fresnel at normal incidence
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
@@ -148,7 +151,8 @@ void main()
     float spec = pow(NdotH, specPower) * (1.0 - roughness) * 0.5;
     vec3 specular = mix(vec3(spec), albedo * spec, metallic);
 
-    vec3 directional = (diffuse + specular) * sceneData.sunlightColor.rgb * sunIntensity;
+    // Apply shadow to directional lighting
+    vec3 directional = (diffuse + specular) * sceneData.sunlightColor.rgb * sunIntensity * shadow;
 
     // === POINT LIGHTING ===
     vec3 pointLighting = calculate_point_lights(inWorldPos, N, albedo, V);

@@ -343,6 +343,17 @@ struct StaticMeshData {
     ShaderOnlyMaterial materialType = ShaderOnlyMaterial::DEFAULT;
     MaterialPass passType = MaterialPass::MainColor;
 
+    // Texture support - shared material with descriptor set
+    std::shared_ptr<MaterialInstance> material = nullptr;
+
+    // Texture paths for UI/serialization (empty = use defaults)
+    std::string albedoTexturePath;
+    std::string metalRoughTexturePath;
+    std::string emissionTexturePath;
+
+    // Helper to get material descriptor set (returns default if no custom material)
+    VkDescriptorSet getMaterialDescriptorSet(class VulkanEngine* engine) const;
+
     glm::mat4 get_transform() const {
         glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
         t = glm::rotate(t, rotation.x, glm::vec3(1, 0, 0));
@@ -888,6 +899,105 @@ public:
 
     VkSampler _defaultSamplerLinear;
     VkSampler _defaultSamplerNearest;
+
+    // Default material for primitives (uses white textures)
+    MaterialInstance _defaultPrimitiveMaterial;
+    AllocatedBuffer _primitiveMaterialDataBuffer;
+
+    // Helper to create primitive material with custom textures
+    MaterialInstance create_primitive_material(
+        const std::string& albedoPath = "",
+        const std::string& metalRoughPath = "",
+        const std::string& emissionPath = ""
+    );
+    void init_default_primitive_material();
+
+    // ==========================================================================
+    // SHADOW MAPPING SYSTEM
+    // ==========================================================================
+    static constexpr uint32_t SHADOW_MAP_SIZE = 2048;  // Shadow map resolution
+    static constexpr uint32_t SHADOW_CASCADE_COUNT = 4;  // Number of cascade levels
+
+    // Shadow map textures (one per cascade)
+    AllocatedImage _shadowMapImage;
+    VkImageView _shadowMapView = VK_NULL_HANDLE;
+    VkSampler _shadowSampler = VK_NULL_HANDLE;
+
+    // Shadow pipeline (depth-only rendering)
+    VkPipeline _shadowPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _shadowPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout _shadowDescriptorLayout = VK_NULL_HANDLE;
+    VkDescriptorSet _shadowDescriptorSet = VK_NULL_HANDLE;
+
+    // Cascade shadow map data
+    struct CascadeData {
+        glm::mat4 viewProjMatrix;
+        float splitDepth;
+    };
+    std::array<CascadeData, SHADOW_CASCADE_COUNT> _shadowCascades;
+
+    // Shadow mapping functions
+    void init_shadow_map();
+    void init_shadow_pipeline();
+    void update_shadow_cascades();
+    void render_shadow_pass(VkCommandBuffer cmd);
+    glm::mat4 get_light_space_matrix(float nearPlane, float farPlane);
+
+    // Shadow settings (exposed to UI)
+    float shadowBias = 0.002f;   // Base bias for shadow acne prevention
+    float shadowNormalBias = 0.015f;  // Normal offset bias
+    bool shadowsEnabled = true;
+
+    // Sun/Directional light toggle
+    bool sunEnabled = true;
+    float savedSunIntensity = 3.0f;  // Store intensity when disabled
+
+    // ==========================================================================
+    // GPU-DRIVEN RENDERING SYSTEM
+    // ==========================================================================
+    // Efficient batched rendering using indirect draw calls and compute culling
+    // ==========================================================================
+
+    // GPU object data structure (per-object transform + bounds for culling)
+    struct GPUObjectData {
+        glm::mat4 modelMatrix;      // Object transform
+        glm::vec4 sphereBounds;     // xyz = center, w = radius (for frustum culling)
+        uint32_t materialIndex;     // Index into material buffer
+        uint32_t meshIndex;         // Index into mesh buffer
+        uint32_t flags;             // Visibility, shadow, etc.
+        uint32_t padding;
+    };
+
+    // Indirect draw command (matches VkDrawIndexedIndirectCommand)
+    struct GPUIndirectCommand {
+        uint32_t indexCount;
+        uint32_t instanceCount;
+        uint32_t firstIndex;
+        int32_t  vertexOffset;
+        uint32_t firstInstance;     // Used as object index
+    };
+
+    // GPU-Driven rendering buffers
+    AllocatedBuffer _gpuObjectBuffer;           // All object data
+    AllocatedBuffer _indirectDrawBuffer;        // Indirect draw commands
+    AllocatedBuffer _drawCountBuffer;           // Number of draws after culling
+    AllocatedBuffer _gpuMeshInfoBuffer;         // Mesh vertex/index info
+
+    // Compute shader for frustum culling
+    VkPipeline _cullComputePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _cullComputeLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout _cullDescriptorLayout = VK_NULL_HANDLE;
+
+    // GPU-Driven rendering settings
+    bool gpuDrivenEnabled = false;              // Toggle for GPU-driven mode
+    uint32_t maxGPUObjects = 10000;             // Max objects in GPU buffer
+
+    // GPU-Driven rendering functions
+    void init_gpu_driven_rendering();
+    void update_gpu_object_buffer();
+    void perform_gpu_culling(VkCommandBuffer cmd);
+    void draw_indirect(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor);
+    int shadowPcfSamples = 3;  // PCF filter kernel size (1, 2, 3 for 3x3, 5x5, 7x7)
 
     EngineStats stats;
     std::vector<ComputeEffect> backgroundEffects;

@@ -5,12 +5,14 @@
 // - Real-time PBR property updates via GPU buffer mapping
 // - Dynamic texture loading from Asset Browser drag-drop
 // - Descriptor set rebuilding for texture changes
+// - Save/Load .mat files (JSON format)
 // =============================================================================
 
 #include "MaterialView.h"
 #include "../../vk_engine.h"
 #include "../../vk_loader.h"
 #include "../../vk_descriptors.h"
+#include "../../assets/MaterialFile.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <filesystem>
 #include <stb_image.h>
@@ -65,6 +67,26 @@ void MaterialView::OnRender() {
 
     // Menu bar
     if (ImGui::BeginMenuBar()) {
+        // File menu for save/load
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Save Material...", "Ctrl+S", false, m_SelectionType != MaterialSelectionType::None)) {
+                m_IsLoadDialog = false;
+                m_ShowSaveLoadDialog = true;
+                strncpy(m_MaterialNameBuffer, m_MaterialName.c_str(), sizeof(m_MaterialNameBuffer) - 1);
+            }
+            if (ImGui::MenuItem("Load Material...", "Ctrl+O")) {
+                m_IsLoadDialog = true;
+                m_ShowSaveLoadDialog = true;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Export as .mat", nullptr, false, m_SelectionType != MaterialSelectionType::None)) {
+                SaveMaterialToFile();
+            }
+            ImGui::EndMenu();
+        }
+
+        ImGui::Separator();
+
         // Show what's selected
         if (m_SelectionType == MaterialSelectionType::GLTFMaterial && m_SelectedMeshNode) {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "GLTF: %s",
@@ -83,6 +105,9 @@ void MaterialView::OnRender() {
         ImGui::Checkbox("Presets", &m_ShowPresets);
         ImGui::EndMenuBar();
     }
+
+    // Render save/load dialog if open
+    RenderSaveLoadUI();
 
     // No selection
     if (m_SelectionType == MaterialSelectionType::None) {
@@ -377,6 +402,44 @@ void MaterialView::RenderMaterialProperties() {
     // Apply changes
     if (changed) {
         ApplyToSelection();
+    }
+
+    // Material File section
+    ImGui::Spacing();
+    ImGui::Separator();
+    SectionHeader("Material File");
+
+    // Show current material name
+    ImGui::Text("Name:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputText("##MaterialName", m_MaterialNameBuffer, sizeof(m_MaterialNameBuffer))) {
+        m_MaterialName = m_MaterialNameBuffer;
+    }
+
+    // Show current file path if any
+    if (!m_CurrentMaterialPath.empty()) {
+        ImGui::TextDisabled("File: %s", fs::path(m_CurrentMaterialPath).filename().string().c_str());
+
+        // Quick save button
+        if (ImGui::Button("Quick Save", ImVec2(-1, 0))) {
+            SaveMaterialToFile();
+        }
+    }
+
+    // Save/Load buttons
+    ImGui::Spacing();
+    float buttonWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
+    if (ImGui::Button("Save As...", ImVec2(buttonWidth, 0))) {
+        m_CurrentMaterialPath.clear();  // Force dialog
+        m_IsLoadDialog = false;
+        m_ShowSaveLoadDialog = true;
+        strncpy(m_MaterialNameBuffer, m_MaterialName.c_str(), sizeof(m_MaterialNameBuffer) - 1);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load...", ImVec2(buttonWidth, 0))) {
+        m_IsLoadDialog = true;
+        m_ShowSaveLoadDialog = true;
     }
 }
 
@@ -982,6 +1045,258 @@ void MaterialView::OnSceneUnloading(const std::string& sceneName) {
                 return;
             }
         }
+    }
+}
+
+// =============================================================================
+// MATERIAL FILE SAVE/LOAD
+// =============================================================================
+
+void MaterialView::RenderSaveLoadUI() {
+    if (!m_ShowSaveLoadDialog) return;
+
+    const char* title = m_IsLoadDialog ? "Load Material###MaterialFileDialog" : "Save Material###MaterialFileDialog";
+
+    ImGui::SetNextWindowSize(ImVec2(500, 220), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(title, &m_ShowSaveLoadDialog, ImGuiWindowFlags_NoCollapse)) {
+
+        if (m_IsLoadDialog) {
+            // Load dialog
+            ImGui::TextWrapped("Load a material file (.mat) to apply its properties to the current selection.");
+            ImGui::Spacing();
+
+            ImGui::Text("File Path:");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##FilePath", m_FilePathBuffer, sizeof(m_FilePathBuffer));
+
+            ImGui::TextDisabled("Enter path to .mat file (e.g., assets/materials/metal.mat)");
+
+            // Show validation
+            fs::path filePath(m_FilePathBuffer);
+            if (strlen(m_FilePathBuffer) > 0) {
+                if (fs::exists(filePath)) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "File exists");
+                } else {
+                    ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "File not found");
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            bool canLoad = strlen(m_FilePathBuffer) > 0 && fs::exists(filePath);
+            if (!canLoad) ImGui::BeginDisabled();
+            if (ImGui::Button("Load", ImVec2(100, 0))) {
+                m_CurrentMaterialPath = m_FilePathBuffer;
+                LoadMaterialFromFile();
+                m_ShowSaveLoadDialog = false;
+            }
+            if (!canLoad) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+                m_ShowSaveLoadDialog = false;
+            }
+        } else {
+            // Save dialog
+            ImGui::TextWrapped("Save current material properties to a .mat file.");
+            ImGui::Spacing();
+
+            ImGui::Text("Material Name:");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##MatName", m_MaterialNameBuffer, sizeof(m_MaterialNameBuffer));
+
+            ImGui::Text("File Path:");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##FilePath", m_FilePathBuffer, sizeof(m_FilePathBuffer));
+
+            ImGui::TextDisabled("Tip: Use assets/materials/ folder for organization");
+
+            // Show preview of the path
+            if (strlen(m_FilePathBuffer) > 0) {
+                fs::path filePath(m_FilePathBuffer);
+                if (filePath.extension() != ".mat") {
+                    ImGui::TextDisabled("Will save as: %s.mat", m_FilePathBuffer);
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            bool canSave = strlen(m_FilePathBuffer) > 0 && strlen(m_MaterialNameBuffer) > 0;
+            if (!canSave) ImGui::BeginDisabled();
+            if (ImGui::Button("Save", ImVec2(100, 0))) {
+                m_MaterialName = m_MaterialNameBuffer;
+                m_CurrentMaterialPath = m_FilePathBuffer;
+                SaveMaterialToFile();
+                m_ShowSaveLoadDialog = false;
+            }
+            if (!canSave) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+                m_ShowSaveLoadDialog = false;
+            }
+        }
+    }
+    ImGui::End();
+}
+
+void MaterialView::SaveMaterialToFile() {
+    if (m_CurrentMaterialPath.empty()) {
+        // Open save dialog
+        m_IsLoadDialog = false;
+        m_ShowSaveLoadDialog = true;
+        return;
+    }
+
+    // Ensure .mat extension
+    fs::path path(m_CurrentMaterialPath);
+    if (path.extension() != ".mat") {
+        m_CurrentMaterialPath += ".mat";
+    }
+
+    MaterialFile::MaterialData data = GetCurrentMaterialData();
+
+    if (MaterialFile::save(m_CurrentMaterialPath, data)) {
+        fmt::print("[MaterialView] Saved material to: {}\n", m_CurrentMaterialPath);
+    } else {
+        fmt::print("[MaterialView] Failed to save material to: {}\n", m_CurrentMaterialPath);
+    }
+}
+
+void MaterialView::LoadMaterialFromFile() {
+    if (m_CurrentMaterialPath.empty()) {
+        // Open load dialog
+        m_IsLoadDialog = true;
+        m_ShowSaveLoadDialog = true;
+        return;
+    }
+
+    auto materialOpt = MaterialFile::load(m_CurrentMaterialPath);
+    if (materialOpt.has_value()) {
+        ApplyMaterialData(materialOpt.value());
+        fmt::print("[MaterialView] Loaded material from: {}\n", m_CurrentMaterialPath);
+    } else {
+        fmt::print("[MaterialView] Failed to load material from: {}\n", m_CurrentMaterialPath);
+    }
+}
+
+MaterialFile::MaterialData MaterialView::GetCurrentMaterialData() const {
+    MaterialFile::MaterialData data;
+
+    data.name = m_MaterialName;
+    data.version = "1.0";
+
+    // PBR properties
+    data.baseColor = m_BaseColor;
+    data.metallic = m_Metallic;
+    data.roughness = m_Roughness;
+    data.ao = m_AO;
+
+    // Emission
+    data.emissionColor = m_Emission;
+    data.emissionStrength = m_EmissionStrength;
+
+    // Texture paths
+    if (m_AlbedoSlot.isLoaded) {
+        data.albedoTexturePath = m_AlbedoSlot.path;
+    }
+    if (m_MetallicRoughnessSlot.isLoaded) {
+        data.metallicRoughnessTexturePath = m_MetallicRoughnessSlot.path;
+    }
+    if (m_NormalSlot.isLoaded) {
+        data.normalTexturePath = m_NormalSlot.path;
+        data.normalScale = m_NormalStrength;
+    }
+    if (m_EmissionSlot.isLoaded) {
+        data.emissionTexturePath = m_EmissionSlot.path;
+    }
+
+    // Metadata
+    data.category = m_MaterialCategory;
+    data.tags = m_MaterialTags;
+
+    // Rendering options (default values for now)
+    data.doubleSided = false;
+    data.castShadows = true;
+    data.receiveShadows = true;
+    data.alphaMode = m_BaseColor.a < 1.0f ?
+        MaterialFile::MaterialData::AlphaMode::Blend :
+        MaterialFile::MaterialData::AlphaMode::Opaque;
+    data.alphaCutoff = 0.5f;
+
+    return data;
+}
+
+void MaterialView::ApplyMaterialData(const MaterialFile::MaterialData& data) {
+    // Update material name
+    m_MaterialName = data.name;
+    strncpy(m_MaterialNameBuffer, data.name.c_str(), sizeof(m_MaterialNameBuffer) - 1);
+
+    // PBR properties
+    m_BaseColor = data.baseColor;
+    m_Metallic = data.metallic;
+    m_Roughness = data.roughness;
+    m_AO = data.ao;
+
+    // Emission
+    m_Emission = data.emissionColor;
+    m_EmissionStrength = data.emissionStrength;
+
+    // Normal scale
+    m_NormalStrength = data.normalScale;
+
+    // Texture paths
+    if (!data.albedoTexturePath.empty()) {
+        m_AlbedoSlot.path = data.albedoTexturePath;
+        m_AlbedoSlot.isLoaded = true;
+        // Try to load the texture
+        uint32_t texID = 0;
+        if (LoadTextureFromFile(data.albedoTexturePath, texID)) {
+            m_AlbedoSlot.textureID = texID;
+        }
+    }
+
+    if (!data.metallicRoughnessTexturePath.empty()) {
+        m_MetallicRoughnessSlot.path = data.metallicRoughnessTexturePath;
+        m_MetallicRoughnessSlot.isLoaded = true;
+        uint32_t texID = 0;
+        if (LoadTextureFromFile(data.metallicRoughnessTexturePath, texID)) {
+            m_MetallicRoughnessSlot.textureID = texID;
+        }
+    }
+
+    if (!data.normalTexturePath.empty()) {
+        m_NormalSlot.path = data.normalTexturePath;
+        m_NormalSlot.isLoaded = true;
+        uint32_t texID = 0;
+        if (LoadTextureFromFile(data.normalTexturePath, texID)) {
+            m_NormalSlot.textureID = texID;
+        }
+    }
+
+    if (!data.emissionTexturePath.empty()) {
+        m_EmissionSlot.path = data.emissionTexturePath;
+        m_EmissionSlot.isLoaded = true;
+        uint32_t texID = 0;
+        if (LoadTextureFromFile(data.emissionTexturePath, texID)) {
+            m_EmissionSlot.textureID = texID;
+        }
+    }
+
+    // Metadata
+    m_MaterialCategory = data.category;
+    m_MaterialTags = data.tags;
+
+    // Apply to current selection
+    ApplyToSelection();
+
+    // For GLTF materials, also update the GPU buffer
+    if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+        ApplyToGLTFMaterial();
     }
 }
 

@@ -74,6 +74,8 @@ add_executable(Yalaz_Engine
     # Assets Subsystem - Asset loading and caching
     assets/AssetManager.h
     assets/AssetManager.cpp
+    assets/MaterialFile.h
+    assets/MaterialFile.cpp
 
     # UI System - Professional View-Based Architecture
     ui/EditorTheme.h
