@@ -91,10 +91,17 @@ void SceneView::RenderToolbar() {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
 
     // === VIEW MODE ===
-    const char* viewModes[] = {"Solid", "Shaded", "Material", "Rendered", "Wireframe", "Normals", "UV"};
-    ImGui::SetNextItemWidth(90);
+    const char* viewModes[] = {"Solid", "Shaded", "Material", "Rendered", "Wireframe", "Normals", "UV", "Path Traced"};
+    ImGui::SetNextItemWidth(100);
     if (ImGui::Combo("##ViewMode", &m_ViewMode, viewModes, IM_ARRAYSIZE(viewModes))) {
         m_Engine->_currentViewMode = static_cast<VulkanEngine::ViewMode>(m_ViewMode);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::Text("Rendered = Full PBR + Shadows + Reflections");
+        ImGui::Text("Shaded = Simple lighting (no shadows)");
+        ImGui::Text("Path Traced = GPU ray tracing with GI");
+        ImGui::EndTooltip();
     }
 
     ImGui::SameLine();

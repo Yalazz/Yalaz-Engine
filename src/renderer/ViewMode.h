@@ -9,9 +9,9 @@ namespace Yalaz::Renderer {
  */
 enum class ViewMode {
     Solid = 0,             // Flat color, no lighting - fastest
-    Shaded = 1,            // Hemisphere + N·L studio lighting
+    Shaded = 1,            // Hemisphere + N·L studio lighting (NO shadows)
     MaterialPreview = 2,   // IBL-based material preview
-    Rendered = 3,          // Full PBR with scene lights
+    Rendered = 3,          // Full PBR with scene lights + SHADOWS + reflections
     Wireframe = 4,         // Edge visualization
     Normals = 5,           // World-space normals as RGB
     UVChecker = 6,         // UV checker pattern debug

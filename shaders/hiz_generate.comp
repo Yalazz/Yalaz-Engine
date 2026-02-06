@@ -1,0 +1,42 @@
+// =============================================================================
+// HI-Z GENERATE - Hierarchical Z-buffer mip generation
+// =============================================================================
+// Generates hierarchical depth buffer by taking the maximum (closest in
+// reverse-Z) of 4 texels from the previous mip level.
+// =============================================================================
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D srcDepth;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D dstDepth;
+
+layout(push_constant) uniform PushConstants {
+    int srcMipLevel;
+    int _pad[3];
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dstSize = imageSize(dstDepth);
+
+    if (coord.x >= dstSize.x || coord.y >= dstSize.y) return;
+
+    // Calculate source texel coordinates (2x2 region)
+    ivec2 srcCoord = coord * 2;
+    vec2 srcTexelSize = 1.0 / vec2(textureSize(srcDepth, 0));
+    vec2 srcUV = (vec2(srcCoord) + 1.0) * srcTexelSize;
+
+    // Sample 4 texels from source
+    // For reverse-Z, we want the maximum (closest depth)
+    float d00 = textureLodOffset(srcDepth, srcUV, 0, ivec2(-1, -1)).r;
+    float d10 = textureLodOffset(srcDepth, srcUV, 0, ivec2( 0, -1)).r;
+    float d01 = textureLodOffset(srcDepth, srcUV, 0, ivec2(-1,  0)).r;
+    float d11 = textureLodOffset(srcDepth, srcUV, 0, ivec2( 0,  0)).r;
+
+    // Take maximum (closest) for conservative Hi-Z
+    float maxDepth = max(max(d00, d10), max(d01, d11));
+
+    imageStore(dstDepth, coord, vec4(maxDepth));
+}

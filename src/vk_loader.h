@@ -5,6 +5,7 @@
 #include "vk_descriptors.h"
 #include <unordered_map>
 #include <filesystem>
+#include <glm/gtc/matrix_transform.hpp>
 
 
 
@@ -15,6 +16,47 @@ class VulkanEngine;
 struct GLTFMaterial {
     MaterialInstance data;
     uint32_t bufferOffset = 0;  // Offset in materialDataBuffer for real-time updates
+};
+
+// GLTF Camera - stores camera data from GLTF files
+struct GLTFCamera {
+    std::string name;
+
+    // Camera type
+    bool isPerspective = true;
+
+    // Perspective camera params
+    float fov = 60.0f;           // Vertical FOV in degrees
+    float aspectRatio = 0.0f;    // 0 = use window aspect
+    float nearPlane = 0.1f;
+    float farPlane = 1000.0f;
+
+    // Orthographic camera params
+    float orthoWidth = 10.0f;    // xmag
+    float orthoHeight = 10.0f;   // ymag
+
+    // Transform from node hierarchy (world space)
+    glm::mat4 worldTransform = glm::mat4(1.0f);
+    glm::vec3 position = glm::vec3(0.0f);
+    glm::vec3 forward = glm::vec3(0.0f, 0.0f, -1.0f);
+    glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    // Helper to get view matrix
+    glm::mat4 getViewMatrix() const {
+        return glm::inverse(worldTransform);
+    }
+
+    // Helper to get projection matrix
+    glm::mat4 getProjectionMatrix(float windowAspect) const {
+        float aspect = (aspectRatio > 0.0f) ? aspectRatio : windowAspect;
+        if (isPerspective) {
+            return glm::perspective(glm::radians(fov), aspect, nearPlane, farPlane);
+        } else {
+            float halfW = orthoWidth * 0.5f;
+            float halfH = orthoHeight * 0.5f;
+            return glm::ortho(-halfW, halfW, -halfH, halfH, nearPlane, farPlane);
+        }
+    }
 };
 
 struct GeoSurface {
@@ -28,6 +70,11 @@ struct MeshAsset {
     std::string name;
     std::vector<GeoSurface> surfaces;
     GPUMeshBuffers meshBuffers;
+
+    // CPU-side vertex data for path tracing (optional, populated on demand)
+    std::vector<Vertex> cpuVertices;
+    std::vector<uint32_t> cpuIndices;
+    bool hasCpuData = false;
 };
 
 struct LoadedGLTF : public IRenderable {
@@ -37,6 +84,9 @@ struct LoadedGLTF : public IRenderable {
     std::unordered_map<std::string, std::shared_ptr<Node>> nodes;
     std::unordered_map<std::string, AllocatedImage> images;
     std::unordered_map<std::string, std::shared_ptr<GLTFMaterial>> materials;
+
+    // GLTF cameras loaded from the scene
+    std::vector<GLTFCamera> cameras;
 
     // nodes that dont have a parent, for iterating through the file in tree order
     std::vector<std::shared_ptr<Node>> topNodes;

@@ -34,6 +34,7 @@
 #include <fmt/core.h>
 #include <glm/mat4x4.hpp>
 #include <glm/vec4.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <vulkan/vk_enum_string_helper.h>
 #include <vk_mem_alloc.h>
 
@@ -87,10 +88,12 @@ static_assert(sizeof(GPUGLTFMaterial) == 256);
 // =============================================================================
 
 constexpr int MAX_POINT_LIGHTS = 64;
+constexpr int MAX_SHADOW_CASTING_LIGHTS = 4;  // Max point lights that can cast shadows
 
-// GPU-aligned point light structure (32 bytes, matches std140 layout)
+// GPU-only point light structure (32 bytes, matches std140 layout)
 // Layout: [position.xyz, radius] [color.xyz, intensity] = 2 x vec4 = 32 bytes
-struct alignas(16) PointLight {
+// This struct is used ONLY in the GPU uniform buffer - no CPU-only fields allowed!
+struct GPUPointLight {
     glm::vec3 position;     // offset 0,  size 12
     float radius;           // offset 12, size 4  (packs with vec3)
 
@@ -98,7 +101,87 @@ struct alignas(16) PointLight {
     float intensity;        // offset 28, size 4  (packs with vec3)
     // Total: 32 bytes per light
 };
-static_assert(sizeof(PointLight) == 32, "PointLight must be 32 bytes for GPU alignment");
+static_assert(sizeof(GPUPointLight) == 32, "GPUPointLight must be 32 bytes");
+
+// CPU-side point light structure (used in scenePointLights array)
+// Contains GPU data + CPU-only tracking fields for shadow casting
+struct PointLight {
+    glm::vec3 position;
+    float radius;
+    glm::vec3 color;
+    float intensity;
+
+    // CPU-only fields for shadow tracking
+    bool castsShadow = false;  // Enable shadow casting for this light
+    int shadowIndex = -1;      // Index into shadow cubemap array (-1 = no shadow)
+
+    // Convert to GPU-only struct for uniform buffer
+    GPUPointLight toGPU() const {
+        return GPUPointLight{ position, radius, color, intensity };
+    }
+};
+
+// =============================================================================
+// SPOT LIGHT SYSTEM - GPU-aligned structures for Vulkan uniform buffers
+// =============================================================================
+constexpr int MAX_SPOT_LIGHTS = 16;
+constexpr int MAX_SHADOW_CASTING_SPOT_LIGHTS = 4;
+
+// GPU-only spot light structure (64 bytes, matches std140 layout)
+struct GPUSpotLight {
+    glm::vec3 position;       // offset 0,  size 12
+    float innerConeAngle;     // offset 12, size 4 (cosine of inner cone angle)
+
+    glm::vec3 direction;      // offset 16, size 12
+    float outerConeAngle;     // offset 28, size 4 (cosine of outer cone angle)
+
+    glm::vec3 color;          // offset 32, size 12
+    float intensity;          // offset 44, size 4
+
+    float range;              // offset 48, size 4 (max distance)
+    int shadowMapIndex;       // offset 52, size 4 (-1 = no shadow)
+    float _pad[2];            // offset 56, size 8 (padding to 64 bytes)
+    // Total: 64 bytes per light
+};
+static_assert(sizeof(GPUSpotLight) == 64, "GPUSpotLight must be 64 bytes");
+
+// CPU-side spot light structure
+struct SpotLight {
+    glm::vec3 position = glm::vec3(0.0f, 5.0f, 0.0f);
+    glm::vec3 direction = glm::vec3(0.0f, -1.0f, 0.0f);
+    glm::vec3 color = glm::vec3(1.0f);
+    float intensity = 10.0f;
+    float range = 20.0f;
+    float innerConeAngle = 25.0f;  // Degrees
+    float outerConeAngle = 35.0f;  // Degrees
+
+    // CPU-only fields
+    bool castsShadow = true;
+    int shadowMapIndex = -1;
+    std::string name = "SpotLight";
+
+    // Convert to GPU struct
+    GPUSpotLight toGPU() const {
+        GPUSpotLight gpu{};
+        gpu.position = position;
+        gpu.direction = glm::normalize(direction);
+        gpu.color = color;
+        gpu.intensity = intensity;
+        gpu.range = range;
+        gpu.innerConeAngle = glm::cos(glm::radians(innerConeAngle));
+        gpu.outerConeAngle = glm::cos(glm::radians(outerConeAngle));
+        gpu.shadowMapIndex = castsShadow ? shadowMapIndex : -1;
+        return gpu;
+    }
+
+    // Calculate view-projection matrix for shadow mapping
+    glm::mat4 getViewProjMatrix() const {
+        glm::mat4 view = glm::lookAt(position, position + direction, glm::vec3(0, 1, 0));
+        float fov = glm::radians(outerConeAngle * 2.0f);
+        glm::mat4 proj = glm::perspective(fov, 1.0f, 0.1f, range);
+        return proj * view;
+    }
+};
 
 // GPU Scene Data - Uniform buffer structure (std140 layout)
 // Contains view/projection matrices, lighting info, point lights, and shadow data
@@ -119,7 +202,7 @@ struct alignas(16) GPUSceneData {
     glm::vec4 cameraPosition;                   // offset 240, size 16 (xyz = pos, w = unused)
 
     // === Point Light Array (2048 bytes) ===
-    PointLight pointLights[MAX_POINT_LIGHTS];   // offset 256, size 64 * 32 = 2048
+    GPUPointLight pointLights[MAX_POINT_LIGHTS];   // offset 256, size 64 * 32 = 2048
 
     // === Point Light Count + Shadow Settings (16 bytes) ===
     int pointLightCount;                        // offset 2304, size 4
@@ -133,16 +216,30 @@ struct alignas(16) GPUSceneData {
     // === Shadow Cascade Split Depths (16 bytes) ===
     glm::vec4 cascadeSplits;                    // offset 2576, size 16 (x,y,z,w = split distances)
 
-    // Total: 2592 bytes
+    // === Point Light Shadow Data (96 bytes) ===
+    // For each shadow-casting point light: position + far plane
+    glm::vec4 pointLightShadowData[MAX_SHADOW_CASTING_LIGHTS];  // offset 2592, size 16 * 4 = 64
+    // xyz = light position, w = far plane (radius)
+    int pointLightShadowCount;                  // offset 2656, size 4
+    int _shadowPad1;                            // offset 2660, padding
+    int _shadowPad2;                            // offset 2664, padding
+    int _shadowPad3;                            // offset 2668, padding
+    glm::ivec4 pointLightShadowIndices;         // offset 2672, size 16 (x,y,z,w = indices into pointLights)
+
+    // Total: 2688 bytes
 };
-static_assert(sizeof(GPUSceneData) == 2592, "GPUSceneData must be 2592 bytes for GPU alignment");
+static_assert(sizeof(GPUSceneData) == 2688, "GPUSceneData must be 2688 bytes for GPU alignment");
 
 enum class ShaderOnlyMaterial : uint8_t {
-    DEFAULT,
-    GRID,
-    EMISSIVE,
-    POINTLIGHT_VIS
-    // vs...
+    DEFAULT = 0,      // Full PBR primitive pipeline (default)
+    UNLIT = 1,        // Simple unlit color (no lighting)
+    PBR = 2,          // Same as DEFAULT (explicit PBR)
+    NORMAL_DEBUG = 3, // Display normals as colors
+    WIREFRAME = 4,    // Wireframe rendering
+    // Internal types (not shown in UI)
+    GRID = 10,
+    EMISSIVE = 11,
+    POINTLIGHT_VIS = 12
 };
 
 

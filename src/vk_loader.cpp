@@ -1112,8 +1112,79 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             node->refreshTransform(glm::mat4{ 1.f });
         }
     }
-        fmt::print("GLTF loaded successfully: {} nodes, {} meshes, {} materials\n",
-            scene->nodes.size(), scene->meshes.size(), scene->materials.size());
+
+    //> load_cameras
+    // Load cameras from GLTF
+    if (!gltf.cameras.empty()) {
+        fmt::print("  Loading {} cameras...\n", gltf.cameras.size());
+
+        for (size_t camIdx = 0; camIdx < gltf.cameras.size(); camIdx++) {
+            const fastgltf::Camera& gltfCam = gltf.cameras[camIdx];
+
+            GLTFCamera newCamera;
+            newCamera.name = gltfCam.name.empty() ?
+                ("Camera_" + std::to_string(camIdx)) : std::string(gltfCam.name);
+
+            // Check camera type and extract parameters
+            if (auto* persp = std::get_if<fastgltf::Camera::Perspective>(&gltfCam.camera)) {
+                newCamera.isPerspective = true;
+                newCamera.fov = glm::degrees(persp->yfov);
+                newCamera.aspectRatio = persp->aspectRatio.has_value() ?
+                    persp->aspectRatio.value() : 0.0f;
+                newCamera.nearPlane = persp->znear;
+                newCamera.farPlane = persp->zfar.has_value() ?
+                    persp->zfar.value() : 10000.0f;
+
+                fmt::print("    Camera '{}': Perspective, FOV={:.1f}°, near={:.3f}, far={:.1f}\n",
+                    newCamera.name, newCamera.fov, newCamera.nearPlane, newCamera.farPlane);
+            }
+            else if (auto* ortho = std::get_if<fastgltf::Camera::Orthographic>(&gltfCam.camera)) {
+                newCamera.isPerspective = false;
+                newCamera.orthoWidth = ortho->xmag * 2.0f;
+                newCamera.orthoHeight = ortho->ymag * 2.0f;
+                newCamera.nearPlane = ortho->znear;
+                newCamera.farPlane = ortho->zfar;
+
+                fmt::print("    Camera '{}': Orthographic, size={:.1f}x{:.1f}\n",
+                    newCamera.name, newCamera.orthoWidth, newCamera.orthoHeight);
+            }
+
+            file.cameras.push_back(newCamera);
+        }
+
+        // Find nodes that reference cameras and extract their transforms
+        for (size_t nodeIdx = 0; nodeIdx < gltf.nodes.size(); nodeIdx++) {
+            const fastgltf::Node& gltfNode = gltf.nodes[nodeIdx];
+
+            if (gltfNode.cameraIndex.has_value()) {
+                size_t camIdx = gltfNode.cameraIndex.value();
+                if (camIdx < file.cameras.size()) {
+                    // Get world transform from our scene node
+                    glm::mat4 worldTransform = nodes[nodeIdx]->worldTransform;
+                    file.cameras[camIdx].worldTransform = worldTransform;
+
+                    // Extract position from transform
+                    file.cameras[camIdx].position = glm::vec3(worldTransform[3]);
+
+                    // Extract forward and up vectors (GLTF cameras look down -Z)
+                    file.cameras[camIdx].forward = glm::normalize(
+                        glm::vec3(-worldTransform[2]));  // -Z axis
+                    file.cameras[camIdx].up = glm::normalize(
+                        glm::vec3(worldTransform[1]));   // Y axis
+
+                    fmt::print("    Camera '{}' at position ({:.2f}, {:.2f}, {:.2f})\n",
+                        file.cameras[camIdx].name,
+                        file.cameras[camIdx].position.x,
+                        file.cameras[camIdx].position.y,
+                        file.cameras[camIdx].position.z);
+                }
+            }
+        }
+    }
+    //< load_cameras
+
+        fmt::print("GLTF loaded successfully: {} nodes, {} meshes, {} materials, {} cameras\n",
+            scene->nodes.size(), scene->meshes.size(), scene->materials.size(), scene->cameras.size());
         return scene;
         //< load_graph
 

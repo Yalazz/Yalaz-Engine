@@ -37,7 +37,7 @@ private:
     void RenderSettingsPopup();
 
     // View settings
-    int m_ViewMode = 1;  // 0=Solid, 1=Shaded, 2=Material, 3=Rendered, 4=Wireframe, 5=Normals, 6=UV
+    int m_ViewMode = 3;  // 0=Solid, 1=Shaded, 2=Material, 3=Rendered (shadows), 4=Wireframe, 5=Normals, 6=UV
     bool m_ShowGrid = true;
     bool m_ShowOutlines = true;
     bool m_ShowGizmos = true;

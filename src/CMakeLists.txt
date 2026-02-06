@@ -56,6 +56,20 @@ add_executable(Yalaz_Engine
     renderer/PipelineManager.cpp
     renderer/RenderSystem.h
     renderer/RenderSystem.cpp
+    renderer/PostProcess.h
+    renderer/PostProcess.cpp
+    renderer/BloomPass.h
+    renderer/BloomPass.cpp
+    renderer/ToneMappingPass.h
+    renderer/ToneMappingPass.cpp
+    renderer/SSAOPass.h
+    renderer/SSAOPass.cpp
+    renderer/SSRPass.h
+    renderer/SSRPass.cpp
+    renderer/PathTracer.h
+    renderer/PathTracer.cpp
+    renderer/EnvironmentMap.h
+    renderer/EnvironmentMap.cpp
 
     # Scene Subsystem - Scene management
     scene/SceneManager.h
@@ -132,6 +146,8 @@ add_executable(Yalaz_Engine
     ui/views/PhysicsDebugView.cpp
     ui/views/CameraSequencerView.h
     ui/views/CameraSequencerView.cpp
+    ui/views/RenderSettingsView.h
+    ui/views/RenderSettingsView.cpp
 )
 
 # =============================================================

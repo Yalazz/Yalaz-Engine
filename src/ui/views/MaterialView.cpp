@@ -630,6 +630,24 @@ void MaterialView::RenderTextureSlots() {
             ImGui::TextDisabled("Updates GPU material buffer in real-time");
         }
     }
+
+    // Apply textures button for PRIMITIVES
+    if (m_SelectionType == MaterialSelectionType::Primitive) {
+        bool hasTextures = m_AlbedoSlot.isLoaded || m_MetallicRoughnessSlot.isLoaded;
+
+        if (hasTextures) {
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.2f, 1.0f));
+
+            if (ImGui::Button("Apply Textures to Primitive", ImVec2(-1, 35))) {
+                ApplyTexturesToPrimitive();
+            }
+
+            ImGui::PopStyleColor();
+
+            ImGui::TextDisabled("Creates a new material for this primitive");
+        }
+    }
 }
 
 void MaterialView::RenderTextureSlot(const char* label, TextureSlot& slot, const char* payloadType) {
@@ -829,6 +847,35 @@ void MaterialView::RebuildMaterialDescriptorSet() {
     uint32_t metalRoughTexID = m_MetallicRoughnessSlot.isLoaded ? m_MetallicRoughnessSlot.textureID : 0;
 
     UpdateMaterialTexture(colorTexID, metalRoughTexID);
+}
+
+void MaterialView::ApplyTexturesToPrimitive() {
+    if (!m_Engine) return;
+    if (m_Engine->selectedPrimitiveIndex < 0 ||
+        m_Engine->selectedPrimitiveIndex >= static_cast<int>(m_Engine->static_shapes.size())) {
+        return;
+    }
+
+    auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
+
+    // Create a new material for this primitive using the engine's create_primitive_material
+    std::string albedoPath = m_AlbedoSlot.isLoaded ? m_AlbedoSlot.path : "";
+    std::string metalRoughPath = m_MetallicRoughnessSlot.isLoaded ? m_MetallicRoughnessSlot.path : "";
+    std::string emissionPath = m_EmissionSlot.isLoaded ? m_EmissionSlot.path : "";
+
+    MaterialInstance newMaterial = m_Engine->create_primitive_material(albedoPath, metalRoughPath, emissionPath);
+
+    // Create a shared_ptr and assign to the shape
+    shape.material = std::make_shared<MaterialInstance>(newMaterial);
+
+    // Store texture paths for serialization
+    shape.albedoTexturePath = albedoPath;
+    shape.metalRoughTexturePath = metalRoughPath;
+    shape.emissionTexturePath = emissionPath;
+
+    fmt::print("[MaterialView] Applied textures to primitive '{}'\n", shape.name);
+    fmt::print("  Albedo: {}\n", albedoPath.empty() ? "[default white]" : albedoPath);
+    fmt::print("  MetalRough: {}\n", metalRoughPath.empty() ? "[default white]" : metalRoughPath);
 }
 
 void MaterialView::RenderPreview() {

@@ -1,0 +1,77 @@
+// =============================================================================
+// SSAO BLUR - Bilateral blur for edge-preserving SSAO smoothing
+// =============================================================================
+// Uses a bilateral filter that considers depth differences to preserve edges
+// while smoothing out the noise from SSAO sampling.
+// =============================================================================
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inputTexture;
+layout(set = 0, binding = 1, r8) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    vec2 direction;    // (1,0) for horizontal, (0,1) for vertical
+    float sharpness;   // Edge-awareness factor
+    float _pad;
+} pc;
+
+// Gaussian weights for 9-tap filter
+const float gaussianWeights[5] = float[](
+    0.227027,
+    0.1945946,
+    0.1216216,
+    0.054054,
+    0.016216
+);
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outputSize = imageSize(outputImage);
+
+    if (coord.x >= outputSize.x || coord.y >= outputSize.y) return;
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(outputSize);
+    vec2 texelSize = 1.0 / vec2(outputSize);
+
+    // Sample center pixel
+    float centerValue = texture(inputTexture, uv).r;
+
+    // Bilateral blur
+    float result = centerValue * gaussianWeights[0];
+    float totalWeight = gaussianWeights[0];
+
+    // Sample in both directions along the blur axis
+    for (int i = 1; i < 5; ++i) {
+        vec2 offset = pc.direction * texelSize * float(i);
+
+        // Positive direction
+        vec2 sampleUV1 = uv + offset;
+        float sample1 = texture(inputTexture, sampleUV1).r;
+
+        // Bilateral weight based on value difference
+        float diff1 = abs(sample1 - centerValue);
+        float bilateralWeight1 = exp(-diff1 * diff1 * pc.sharpness * pc.sharpness);
+        float weight1 = gaussianWeights[i] * bilateralWeight1;
+
+        result += sample1 * weight1;
+        totalWeight += weight1;
+
+        // Negative direction
+        vec2 sampleUV2 = uv - offset;
+        float sample2 = texture(inputTexture, sampleUV2).r;
+
+        float diff2 = abs(sample2 - centerValue);
+        float bilateralWeight2 = exp(-diff2 * diff2 * pc.sharpness * pc.sharpness);
+        float weight2 = gaussianWeights[i] * bilateralWeight2;
+
+        result += sample2 * weight2;
+        totalWeight += weight2;
+    }
+
+    result /= totalWeight;
+
+    imageStore(outputImage, coord, vec4(result));
+}

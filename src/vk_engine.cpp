@@ -110,10 +110,20 @@ void VulkanEngine::init()
 
     // Initialize shadow mapping system
     init_shadow_map();
+    init_point_light_shadow_maps();  // Point light cubemap shadows
     init_shadow_pipeline();
 
     // Initialize GPU-driven rendering system (optional, disabled by default)
     init_gpu_driven_rendering();
+
+    // Initialize post-processing system
+    init_post_processing();
+
+    // Initialize path tracing system (optional, for path traced mode)
+    init_path_tracer();
+
+    // Initialize environment map / skybox system
+    init_environment_map();
 
     init_renderables();
 
@@ -739,6 +749,11 @@ void VulkanEngine::cleanup()
         // Make sure the GPU has stopped doing its things
         vkDeviceWaitIdle(_device);
 
+        // Cleanup post-processing and path tracing systems
+        cleanup_path_tracer();
+        cleanup_environment_map();
+        cleanup_post_processing();
+
         // 1. Shutdown EditorUI FIRST (while ImGui is still fully active)
         Yalaz::UI::EditorUI::Get().Shutdown();
 
@@ -1128,6 +1143,292 @@ void VulkanEngine::init_shadow_pipeline() {
     });
 
     fmt::print("[Shadow] Shadow pipeline initialized\n");
+}
+
+// =============================================================================
+// POINT LIGHT SHADOW MAPS
+// =============================================================================
+
+void VulkanEngine::init_point_light_shadow_maps() {
+    fmt::print("[Shadow] Initializing point light shadow cubemaps...\n");
+
+    // Create cubemap sampler for point light shadows
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 1.0f;
+
+    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_pointLightShadowSampler));
+
+    // Create cubemap shadow maps for each slot
+    for (uint32_t i = 0; i < MAX_SHADOW_POINT_LIGHTS; i++) {
+        auto& shadowData = _pointLightShadows[i];
+
+        // Create cubemap image (6 faces)
+        VkImageCreateInfo imgInfo{};
+        imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imgInfo.imageType = VK_IMAGE_TYPE_2D;
+        imgInfo.format = VK_FORMAT_D32_SFLOAT;
+        imgInfo.extent = { POINT_LIGHT_SHADOW_SIZE, POINT_LIGHT_SHADOW_SIZE, 1 };
+        imgInfo.mipLevels = 1;
+        imgInfo.arrayLayers = 6;  // Cubemap = 6 faces
+        imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imgInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imgInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+        VK_CHECK(vmaCreateImage(_allocator, &imgInfo, &allocInfo,
+            &shadowData.cubemap.image, &shadowData.cubemap.allocation, nullptr));
+
+        shadowData.cubemap.imageFormat = VK_FORMAT_D32_SFLOAT;
+        shadowData.cubemap.imageExtent = { POINT_LIGHT_SHADOW_SIZE, POINT_LIGHT_SHADOW_SIZE, 1 };
+
+        // Create full cubemap view for sampling
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = shadowData.cubemap.image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+        viewInfo.format = VK_FORMAT_D32_SFLOAT;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 6;
+
+        VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &shadowData.cubemapView));
+
+        // Create per-face views for rendering
+        for (uint32_t face = 0; face < 6; face++) {
+            VkImageViewCreateInfo faceViewInfo{};
+            faceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            faceViewInfo.image = shadowData.cubemap.image;
+            faceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            faceViewInfo.format = VK_FORMAT_D32_SFLOAT;
+            faceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            faceViewInfo.subresourceRange.baseMipLevel = 0;
+            faceViewInfo.subresourceRange.levelCount = 1;
+            faceViewInfo.subresourceRange.baseArrayLayer = face;
+            faceViewInfo.subresourceRange.layerCount = 1;
+
+            VK_CHECK(vkCreateImageView(_device, &faceViewInfo, nullptr, &shadowData.faceViews[face]));
+        }
+
+        shadowData.lightIndex = -1;  // Not assigned yet
+    }
+
+    // Add to deletion queue
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroySampler(_device, _pointLightShadowSampler, nullptr);
+        for (uint32_t i = 0; i < MAX_SHADOW_POINT_LIGHTS; i++) {
+            auto& shadowData = _pointLightShadows[i];
+            for (uint32_t face = 0; face < 6; face++) {
+                if (shadowData.faceViews[face] != VK_NULL_HANDLE) {
+                    vkDestroyImageView(_device, shadowData.faceViews[face], nullptr);
+                }
+            }
+            if (shadowData.cubemapView != VK_NULL_HANDLE) {
+                vkDestroyImageView(_device, shadowData.cubemapView, nullptr);
+            }
+            if (shadowData.cubemap.image != VK_NULL_HANDLE) {
+                vmaDestroyImage(_allocator, shadowData.cubemap.image, shadowData.cubemap.allocation);
+            }
+        }
+    });
+
+    fmt::print("[Shadow] Point light shadow cubemaps initialized: {} slots, {}x{} per face\n",
+        MAX_SHADOW_POINT_LIGHTS, POINT_LIGHT_SHADOW_SIZE, POINT_LIGHT_SHADOW_SIZE);
+}
+
+void VulkanEngine::update_point_light_shadow_data() {
+    // Assign shadow slots to lights that want shadows
+    int shadowSlot = 0;
+    sceneData.pointLightShadowCount = 0;
+
+    for (size_t i = 0; i < scenePointLights.size() && shadowSlot < MAX_SHADOW_POINT_LIGHTS; i++) {
+        auto& light = scenePointLights[i];
+
+        if (light.castsShadow) {
+            light.shadowIndex = shadowSlot;
+            _pointLightShadows[shadowSlot].lightIndex = static_cast<int>(i);
+
+            // Store shadow data in scene data for shader
+            sceneData.pointLightShadowData[shadowSlot] = glm::vec4(
+                light.position.x, light.position.y, light.position.z,
+                light.radius  // Far plane = light radius
+            );
+            sceneData.pointLightShadowIndices[shadowSlot] = static_cast<int>(i);  // ivec4 [] access
+            shadowSlot++;
+        } else {
+            light.shadowIndex = -1;
+        }
+    }
+
+    sceneData.pointLightShadowCount = shadowSlot;
+
+    // Clear unused slots
+    for (int i = shadowSlot; i < MAX_SHADOW_POINT_LIGHTS; i++) {
+        _pointLightShadows[i].lightIndex = -1;
+    }
+}
+
+void VulkanEngine::render_point_light_shadows(VkCommandBuffer cmd) {
+    if (!pointLightShadowsEnabled || !shadowsEnabled) return;
+    if (_shadowPipeline == VK_NULL_HANDLE) return;
+
+    // Update which lights have shadow slots
+    update_point_light_shadow_data();
+
+    if (sceneData.pointLightShadowCount == 0) return;
+
+    // Cubemap face directions (view matrices)
+    // Order: +X, -X, +Y, -Y, +Z, -Z
+    static const glm::vec3 faceDirs[6] = {
+        glm::vec3( 1,  0,  0),  // +X
+        glm::vec3(-1,  0,  0),  // -X
+        glm::vec3( 0,  1,  0),  // +Y
+        glm::vec3( 0, -1,  0),  // -Y
+        glm::vec3( 0,  0,  1),  // +Z
+        glm::vec3( 0,  0, -1)   // -Z
+    };
+    static const glm::vec3 faceUps[6] = {
+        glm::vec3( 0, -1,  0),  // +X
+        glm::vec3( 0, -1,  0),  // -X
+        glm::vec3( 0,  0,  1),  // +Y
+        glm::vec3( 0,  0, -1),  // -Y
+        glm::vec3( 0, -1,  0),  // +Z
+        glm::vec3( 0, -1,  0)   // -Z
+    };
+
+    // Bind shadow pipeline
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipeline);
+
+    // Render each shadow-casting light
+    for (int slot = 0; slot < sceneData.pointLightShadowCount; slot++) {
+        auto& shadowData = _pointLightShadows[slot];
+        if (shadowData.lightIndex < 0) continue;
+
+        PointLight& light = scenePointLights[shadowData.lightIndex];
+        glm::vec3 lightPos = light.position;
+        float farPlane = light.radius;
+        float nearPlane = 0.1f;
+
+        // Perspective projection for point light (90 degree FOV for cube face)
+        glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, nearPlane, farPlane);
+
+        // Render each face
+        for (uint32_t face = 0; face < 6; face++) {
+            // Transition face to depth attachment
+            VkImageMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            barrier.image = shadowData.cubemap.image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.baseArrayLayer = face;
+            barrier.subresourceRange.layerCount = 1;
+
+            VkDependencyInfo depInfo{};
+            depInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            depInfo.imageMemoryBarrierCount = 1;
+            depInfo.pImageMemoryBarriers = &barrier;
+            vkCmdPipelineBarrier2(cmd, &depInfo);
+
+            // Begin rendering to this face
+            VkRenderingAttachmentInfo depthAttachment{};
+            depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depthAttachment.imageView = shadowData.faceViews[face];
+            depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            depthAttachment.clearValue.depthStencil = { 1.0f, 0 };
+
+            VkRenderingInfo renderInfo{};
+            renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            renderInfo.renderArea = { {0, 0}, {POINT_LIGHT_SHADOW_SIZE, POINT_LIGHT_SHADOW_SIZE} };
+            renderInfo.layerCount = 1;
+            renderInfo.colorAttachmentCount = 0;
+            renderInfo.pDepthAttachment = &depthAttachment;
+
+            vkCmdBeginRendering(cmd, &renderInfo);
+
+            // Set viewport and scissor
+            VkViewport viewport{ 0, 0, (float)POINT_LIGHT_SHADOW_SIZE, (float)POINT_LIGHT_SHADOW_SIZE, 0, 1 };
+            VkRect2D scissor{ {0, 0}, {POINT_LIGHT_SHADOW_SIZE, POINT_LIGHT_SHADOW_SIZE} };
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+            // Calculate view matrix for this face
+            glm::mat4 view = glm::lookAt(lightPos, lightPos + faceDirs[face], faceUps[face]);
+            glm::mat4 lightSpaceMatrix = proj * view;
+
+            // Temporarily store in cascade 0 for the shadow shader
+            glm::mat4 originalMatrix = sceneData.shadowMatrices[0];
+            sceneData.shadowMatrices[0] = lightSpaceMatrix;
+
+            // Render opaque objects
+            struct ShadowPushConstants {
+                glm::mat4 worldMatrix;
+                int32_t cascadeIndex;
+            } shadowPC;
+            shadowPC.cascadeIndex = 0;  // Using cascade 0 slot
+
+            for (const auto& obj : drawCommands.OpaqueSurfaces) {
+                if (!obj.indexBuffer) continue;
+
+                shadowPC.worldMatrix = obj.transform;
+                vkCmdPushConstants(cmd, _shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                    0, sizeof(ShadowPushConstants), &shadowPC);
+
+                VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &obj.vertexBuffer, &offset);
+                vkCmdBindIndexBuffer(cmd, obj.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, obj.indexCount, 1, obj.firstIndex, 0, 0);
+            }
+
+            // Render primitives
+            for (const auto& shape : static_shapes) {
+                if (!shape.visible || shape.mesh.indexBuffer.buffer == VK_NULL_HANDLE) continue;
+
+                shadowPC.worldMatrix = shape.get_transform();
+                vkCmdPushConstants(cmd, _shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                    0, sizeof(ShadowPushConstants), &shadowPC);
+
+                VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &shape.mesh.vertexBuffer.buffer, &offset);
+                vkCmdBindIndexBuffer(cmd, shape.mesh.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, shape.mesh.indexCount, 1, 0, 0, 0);
+            }
+
+            sceneData.shadowMatrices[0] = originalMatrix;
+
+            vkCmdEndRendering(cmd);
+
+            // Transition face to shader read
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            vkCmdPipelineBarrier2(cmd, &depInfo);
+        }
+    }
 }
 
 void VulkanEngine::update_shadow_cascades() {
@@ -2161,6 +2462,12 @@ void VulkanEngine::init_default_data() {
     samplerInfo.minFilter = VK_FILTER_LINEAR;
     vkCreateSampler(_device, &samplerInfo, nullptr, &_defaultSamplerLinear);
 
+    // Add default textures to texture cache so descriptor sets always have valid bindings
+    // This ensures the grid and other scene elements work even when no objects are loaded
+    texCache.AddTexture(_whiteImage.imageView, _defaultSamplerLinear, "__default_white");
+    texCache.AddTexture(_errorCheckerboardImage.imageView, _defaultSamplerLinear, "__default_error");
+    fmt::print("Default textures added to cache: {} textures\n", texCache.Cache.size());
+
     // Note: Default images and samplers are cleaned up explicitly in cleanup()
 }
 
@@ -2259,6 +2566,11 @@ void VulkanEngine::draw_main(VkCommandBuffer cmd)
     // === SHADOW PASS (before main rendering) ===
     if (shadowsEnabled && _shadowPipeline != VK_NULL_HANDLE) {
         render_shadow_pass(cmd);
+    }
+
+    // === POINT LIGHT SHADOW PASS ===
+    if (shadowsEnabled && pointLightShadowsEnabled) {
+        render_point_light_shadows(cmd);
     }
 
     // PathTraced mode uses compute shader path tracing
@@ -5765,8 +6077,14 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
     if (gpuSceneDataBuffer.buffer == VK_NULL_HANDLE) {
-        fmt::print("gpuSceneDataBuffer null!\n");
+        fmt::print("[ERROR] gpuSceneDataBuffer null!\n");
         return;
+    }
+
+    static bool geometryDebugPrinted = false;
+    if (!geometryDebugPrinted) {
+        fmt::print("[DEBUG] draw_geometry: texCache.size={}, gpuSceneDataBuffer=OK\n", texCache.Cache.size());
+        geometryDebugPrinted = true;
     }
 
     get_current_frame()._deletionQueue.push_function([=, this]() {
@@ -5781,7 +6099,8 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO
     };
 
-    uint32_t descriptorCounts = static_cast<uint32_t>(texCache.Cache.size());
+    // Ensure at least 1 descriptor count to avoid allocation issues when texture cache is empty
+    uint32_t descriptorCounts = std::max(1u, static_cast<uint32_t>(texCache.Cache.size()));
     allocArrayInfo.pDescriptorCounts = &descriptorCounts;
     allocArrayInfo.descriptorSetCount = 1;
 
@@ -5806,6 +6125,33 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     if (_shadowMapView != VK_NULL_HANDLE && _shadowSampler != VK_NULL_HANDLE) {
         writer.write_image(2, _shadowMapView, _shadowSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    }
+
+    // Point light shadow cubemaps binding (binding 3)
+    if (_pointLightShadowSampler != VK_NULL_HANDLE) {
+        std::array<VkDescriptorImageInfo, MAX_SHADOW_POINT_LIGHTS> cubemapInfos;
+        for (uint32_t i = 0; i < MAX_SHADOW_POINT_LIGHTS; i++) {
+            cubemapInfos[i].sampler = _pointLightShadowSampler;
+            cubemapInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            // Use actual cubemap view if valid, otherwise use a placeholder (first valid one or error image)
+            if (_pointLightShadows[i].cubemapView != VK_NULL_HANDLE) {
+                cubemapInfos[i].imageView = _pointLightShadows[i].cubemapView;
+            } else if (_pointLightShadows[0].cubemapView != VK_NULL_HANDLE) {
+                cubemapInfos[i].imageView = _pointLightShadows[0].cubemapView;
+            } else {
+                // Use error image as fallback (single layer, may cause issues but prevents crash)
+                cubemapInfos[i].imageView = _errorCheckerboardImage.imageView;
+            }
+        }
+
+        VkWriteDescriptorSet cubemapWrite{ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        cubemapWrite.dstSet = globalDescriptor;
+        cubemapWrite.dstBinding = 3;
+        cubemapWrite.dstArrayElement = 0;
+        cubemapWrite.descriptorCount = MAX_SHADOW_POINT_LIGHTS;
+        cubemapWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        cubemapWrite.pImageInfo = cubemapInfos.data();
+        writer.writes.push_back(cubemapWrite);
     }
 
     writer.update_set(_device, globalDescriptor);
@@ -5927,8 +6273,8 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         break;
     }
 
-    // Draw primitives with the new primitive pipeline (face colors + lighting)
-    draw_primitives_with_viewport(cmd, globalDescriptor, viewport, scissor);
+    // Draw primitives with view-mode-aware rendering
+    draw_primitives_with_viewport(cmd, globalDescriptor, viewport, scissor, _currentViewMode);
 
     drawCommands.OpaqueSurfaces.clear();
     drawCommands.TransparentSurfaces.clear();
@@ -6556,6 +6902,15 @@ void VulkanEngine::draw_viewing(VkCommandBuffer cmd)
     draw_geometry(cmd);
 
     // Grid drawn after geometry so globalDescriptor is initialized
+    // Always set viewport/scissor for grid (even when no objects were drawn)
+    // The view mode draw functions only set these when they have objects to draw
+    VkViewport viewport = get_letterbox_viewport();
+    viewport.width = std::max(1.0f, viewport.width);
+    viewport.height = std::max(1.0f, viewport.height);
+    VkRect2D scissor = { {0, 0}, _windowExtent };
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
     if (_showGrid && globalDescriptor != VK_NULL_HANDLE)
     {
         draw_grid(cmd, globalDescriptor);
@@ -9922,7 +10277,7 @@ void VulkanEngine::update_scene() {
     sceneData.pointLightCount = 0;
     for (const auto& light : scenePointLights) {
         if (sceneData.pointLightCount >= MAX_POINT_LIGHTS) break;
-        sceneData.pointLights[sceneData.pointLightCount++] = light;
+        sceneData.pointLights[sceneData.pointLightCount++] = light.toGPU();
     }
 
     // === Update Shadow Cascades ===
@@ -11662,6 +12017,8 @@ void VulkanEngine::init_pipelines() {
 
     // === PRIMITIVE PIPELINE (Face colors + lighting + textures) ===
     init_primitive_pipeline();
+    init_primitive_wireframe_pipeline();  // Wireframe view mode for primitives
+    init_primitive_solid_pipeline();      // Solid view mode for primitives
     // Note: init_default_primitive_material() is called after init_default_data()
     // because it needs _whiteImage to be created first
 
@@ -12252,6 +12609,261 @@ void VulkanEngine::init_primitive_pipeline()
 }
 
 // =============================================================================
+// PRIMITIVE WIREFRAME PIPELINE - For wireframe view mode
+// =============================================================================
+void VulkanEngine::init_primitive_wireframe_pipeline()
+{
+    // Destroy old pipeline if exists
+    if (_primitiveWireframePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(_device, _primitiveWireframePipeline, nullptr);
+        _primitiveWireframePipeline = VK_NULL_HANDLE;
+    }
+
+    // Reuse same pipeline layout as regular primitive pipeline
+    if (_primitivePipelineLayout == VK_NULL_HANDLE) {
+        fmt::print("Warning: Primitive pipeline layout not initialized, skipping wireframe pipeline\n");
+        return;
+    }
+
+    // Load same shaders as regular primitive pipeline
+    VkShaderModule vertShaderModule;
+    if (!vkutil::load_shader_module("../../shaders/primitive.vert.spv", _device, &vertShaderModule)) {
+        fmt::print("Warning: Failed to load primitive vertex shader for wireframe\n");
+        return;
+    }
+
+    VkShaderModule fragShaderModule;
+    if (!vkutil::load_shader_module("../../shaders/primitive.frag.spv", _device, &fragShaderModule)) {
+        vkDestroyShaderModule(_device, vertShaderModule, nullptr);
+        fmt::print("Warning: Failed to load primitive fragment shader for wireframe\n");
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {
+        vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_VERTEX_BIT, vertShaderModule),
+        vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_FRAGMENT_BIT, fragShaderModule)
+    };
+
+    auto vertexDesc = Vertex::get_vertex_description();
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(vertexDesc.bindings.size());
+    vertexInputInfo.pVertexBindingDescriptions = vertexDesc.bindings.data();
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexDesc.attributes.size());
+    vertexInputInfo.pVertexAttributeDescriptions = vertexDesc.attributes.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkViewport viewport{ 0.0f, 0.0f, (float)_windowExtent.width, (float)_windowExtent.height, 0.0f, 1.0f };
+    VkRect2D scissor{ {0, 0}, _windowExtent };
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    // WIREFRAME MODE - key difference
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_LINE;  // WIREFRAME
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;  // No culling for wireframe
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = 0xF;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkFormat colorFormat = _drawImage.imageFormat;
+    VkPipelineRenderingCreateInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachmentFormats = &colorFormat;
+    renderingInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &renderingInfo;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = _primitivePipelineLayout;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;
+    pipelineInfo.subpass = 0;
+
+    VK_CHECK(vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &_primitiveWireframePipeline));
+
+    vkDestroyShaderModule(_device, vertShaderModule, nullptr);
+    vkDestroyShaderModule(_device, fragShaderModule, nullptr);
+
+    fmt::print("Primitive wireframe pipeline initialized successfully\n");
+}
+
+// =============================================================================
+// PRIMITIVE SOLID PIPELINE - For solid view mode (no lighting)
+// =============================================================================
+void VulkanEngine::init_primitive_solid_pipeline()
+{
+    // Destroy old pipeline if exists
+    if (_primitiveSolidPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(_device, _primitiveSolidPipeline, nullptr);
+        _primitiveSolidPipeline = VK_NULL_HANDLE;
+    }
+
+    if (_primitivePipelineLayout == VK_NULL_HANDLE) {
+        fmt::print("Warning: Primitive pipeline layout not initialized, skipping solid pipeline\n");
+        return;
+    }
+
+    // Use same shaders - the push constants control color behavior
+    VkShaderModule vertShaderModule;
+    if (!vkutil::load_shader_module("../../shaders/primitive.vert.spv", _device, &vertShaderModule)) {
+        fmt::print("Warning: Failed to load primitive vertex shader for solid\n");
+        return;
+    }
+
+    VkShaderModule fragShaderModule;
+    if (!vkutil::load_shader_module("../../shaders/primitive.frag.spv", _device, &fragShaderModule)) {
+        vkDestroyShaderModule(_device, vertShaderModule, nullptr);
+        fmt::print("Warning: Failed to load primitive fragment shader for solid\n");
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {
+        vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_VERTEX_BIT, vertShaderModule),
+        vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_FRAGMENT_BIT, fragShaderModule)
+    };
+
+    auto vertexDesc = Vertex::get_vertex_description();
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(vertexDesc.bindings.size());
+    vertexInputInfo.pVertexBindingDescriptions = vertexDesc.bindings.data();
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexDesc.attributes.size());
+    vertexInputInfo.pVertexAttributeDescriptions = vertexDesc.attributes.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkViewport viewport{ 0.0f, 0.0f, (float)_windowExtent.width, (float)_windowExtent.height, 0.0f, 1.0f };
+    VkRect2D scissor{ {0, 0}, _windowExtent };
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    // Solid fill mode
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = 0xF;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkFormat colorFormat = _drawImage.imageFormat;
+    VkPipelineRenderingCreateInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachmentFormats = &colorFormat;
+    renderingInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &renderingInfo;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = _primitivePipelineLayout;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;
+    pipelineInfo.subpass = 0;
+
+    VK_CHECK(vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &_primitiveSolidPipeline));
+
+    vkDestroyShaderModule(_device, vertShaderModule, nullptr);
+    vkDestroyShaderModule(_device, fragShaderModule, nullptr);
+
+    fmt::print("Primitive solid pipeline initialized successfully\n");
+}
+
+// =============================================================================
 // DRAW PRIMITIVES - Using new primitive pipeline with face colors and textures
 // =============================================================================
 void VulkanEngine::draw_primitives(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor)
@@ -12300,12 +12912,122 @@ void VulkanEngine::draw_primitives(VkCommandBuffer cmd, VkDescriptorSet globalDe
     }
 }
 
+// Helper to select pipeline based on view mode and material type
+VkPipeline VulkanEngine::select_primitive_pipeline(ViewMode viewMode, ShaderOnlyMaterial materialType) {
+    // Always fall back to _primitivePipeline if it exists
+    VkPipeline fallbackPipeline = _primitivePipeline;
+    if (fallbackPipeline == VK_NULL_HANDLE) {
+        return VK_NULL_HANDLE;  // No pipeline available
+    }
+
+    // Material type overrides view mode for special materials
+    switch (materialType) {
+    case ShaderOnlyMaterial::WIREFRAME:
+        return _primitiveWireframePipeline != VK_NULL_HANDLE ? _primitiveWireframePipeline : fallbackPipeline;
+
+    case ShaderOnlyMaterial::UNLIT:
+        // Unlit uses the solid pipeline (no lighting calculations via push constants)
+        return _primitiveSolidPipeline != VK_NULL_HANDLE ? _primitiveSolidPipeline : fallbackPipeline;
+
+    case ShaderOnlyMaterial::NORMAL_DEBUG:
+        // Normal debug could use a dedicated normals pipeline, falling back to solid then main
+        return _primitiveSolidPipeline != VK_NULL_HANDLE ? _primitiveSolidPipeline : fallbackPipeline;
+
+    case ShaderOnlyMaterial::DEFAULT:
+    case ShaderOnlyMaterial::PBR:
+        // DEFAULT and PBR both use the main primitive pipeline with full PBR lighting
+        // But still respect view mode for wireframe/solid overrides
+        break;
+
+    case ShaderOnlyMaterial::GRID:
+    case ShaderOnlyMaterial::EMISSIVE:
+    case ShaderOnlyMaterial::POINTLIGHT_VIS:
+        // Internal types - use default primitive pipeline
+        return fallbackPipeline;
+
+    default:
+        // Unknown type - use default
+        return fallbackPipeline;
+    }
+
+    // For DEFAULT/PBR materials, use view mode to select pipeline
+    switch (viewMode) {
+    case ViewMode::Wireframe:
+        return _primitiveWireframePipeline != VK_NULL_HANDLE ? _primitiveWireframePipeline : fallbackPipeline;
+    case ViewMode::Solid:
+        return _primitiveSolidPipeline != VK_NULL_HANDLE ? _primitiveSolidPipeline : fallbackPipeline;
+    default:
+        return fallbackPipeline;
+    }
+}
+
 // Wrapper to maintain compatibility with existing call pattern
-void VulkanEngine::draw_primitives_with_viewport(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor)
+void VulkanEngine::draw_primitives_with_viewport(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor, ViewMode viewMode)
 {
+    if (static_shapes.empty()) return;
+    if (_primitivePipelineLayout == VK_NULL_HANDLE) return;
+
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-    draw_primitives(cmd, globalDescriptor);
+
+    // Track last bound state to avoid redundant binds
+    VkDescriptorSet lastMaterial = VK_NULL_HANDLE;
+    VkPipeline lastPipeline = VK_NULL_HANDLE;
+    bool descriptorSet0Bound = false;
+
+    for (auto& shape : static_shapes) {
+        if (!shape.visible) continue;
+
+        // Filter by render pass type - only MainColor and Transparent are rendered
+        if (shape.passType != MaterialPass::MainColor && shape.passType != MaterialPass::Transparent) {
+            continue;
+        }
+
+        // Select pipeline based on view mode AND material type
+        VkPipeline pipelineToUse = select_primitive_pipeline(viewMode, shape.materialType);
+        if (pipelineToUse == VK_NULL_HANDLE) continue;
+
+        // Bind pipeline if changed (MUST happen before descriptor set binding)
+        if (pipelineToUse != lastPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineToUse);
+            lastPipeline = pipelineToUse;
+
+            // After binding pipeline, bind scene data (Set 0) if not already bound
+            // This ensures descriptor set is bound AFTER pipeline for proper state
+            if (!descriptorSet0Bound && globalDescriptor != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _primitivePipelineLayout,
+                    0, 1, &globalDescriptor, 0, nullptr);
+                descriptorSet0Bound = true;
+            }
+        }
+
+        // Bind material descriptor set (Set 1) - only if different from last
+        VkDescriptorSet materialSet = shape.getMaterialDescriptorSet(this);
+        if (materialSet != lastMaterial && materialSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _primitivePipelineLayout,
+                1, 1, &materialSet, 0, nullptr);
+            lastMaterial = materialSet;
+        }
+
+        // Get push constants from the shape
+        PrimitivePushConstants pc = shape.get_push_constants();
+
+        vkCmdPushConstants(cmd, _primitivePipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(PrimitivePushConstants), &pc);
+
+        // Bind vertex buffer
+        VkBuffer vertexBuffers[] = { shape.mesh.vertexBuffer.buffer };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+
+        // Bind index buffer and draw
+        vkCmdBindIndexBuffer(cmd, shape.mesh.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, shape.mesh.indexCount, 1, 0, 0, 0);
+
+        stats.drawcall_count++;
+        stats.triangle_count += shape.mesh.indexCount / 3;
+    }
 }
 
 void VulkanEngine::init_pathtrace_pipeline()
@@ -13402,12 +14124,13 @@ void VulkanEngine::init_descriptors()
         _drawImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
     }
 
-    // b) Scene data + bindless texture array + shadow map için (set = 0)
+    // b) Scene data + bindless texture array + shadow maps için (set = 0)
     {
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT); // sceneData
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, MAX_BINDLESS_TEXTURES, true);          // allTextures[]
-        builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // shadowMap
+        builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // directional shadowMap
+        builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, MAX_SHADOW_POINT_LIGHTS); // point light shadow cubemaps[4]
         _gpuSceneDataDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
     }
 
@@ -13843,10 +14566,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     fmt::print("[Pipelines] Opaque pipeline olusturuluyor...\n");
     opaquePipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
 
-    // Transparent pipeline
+    // Transparent pipeline (alpha blending for glass, water, etc.)
     fmt::print("[Pipelines] Transparent pipeline olusturuluyor...\n");
-    pipelineBuilder.enable_blending_additive();
-    pipelineBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    pipelineBuilder.enable_blending_alphablend();  // Use alpha blend, not additive
+    pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);  // Read depth, but don't write
+    pipelineBuilder._depthStencil.depthWriteEnable = VK_FALSE;  // Don't write to depth for transparency
     transparentPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
 
     // Shader modüllerini temizle
@@ -14400,5 +15124,177 @@ void VulkanEngine::recompileShader(int index) {
 void VulkanEngine::recompileAllShaders() {
     for (size_t i = 0; i < shaderPipelines.size(); ++i) {
         recompileShader(static_cast<int>(i));
+    }
+}
+
+// =============================================================================
+// GLTF CAMERA MANAGEMENT
+// =============================================================================
+
+void VulkanEngine::applyGLTFCamera(const std::string& sceneName, int cameraIndex) {
+    auto it = loadedScenes.find(sceneName);
+    if (it == loadedScenes.end()) {
+        fmt::print("[Camera] Scene '{}' not found\n", sceneName);
+        return;
+    }
+
+    auto& scene = it->second;
+    if (cameraIndex < 0 || cameraIndex >= static_cast<int>(scene->cameras.size())) {
+        fmt::print("[Camera] Invalid camera index {} for scene '{}'\n", cameraIndex, sceneName);
+        return;
+    }
+
+    GLTFCamera& gltfCam = scene->cameras[cameraIndex];
+
+    // Apply GLTF camera settings to main camera
+    mainCamera.position = gltfCam.position;
+    mainCamera.fov = gltfCam.fov;
+    mainCamera.nearPlane = gltfCam.nearPlane;
+    mainCamera.farPlane = gltfCam.farPlane;
+
+    // Calculate pitch and yaw from forward direction
+    glm::vec3 forward = gltfCam.forward;
+    mainCamera.yaw = atan2(forward.x, -forward.z);
+    mainCamera.pitch = asin(glm::clamp(forward.y, -1.0f, 1.0f));
+
+    // Sync target values for smooth camera
+    mainCamera.targetPitch = mainCamera.pitch;
+    mainCamera.targetYaw = mainCamera.yaw;
+    mainCamera.targetPosition = mainCamera.position;
+    mainCamera.targetFov = mainCamera.fov;
+
+    currentGLTFCameraScene = sceneName;
+    currentGLTFCameraIndex = cameraIndex;
+    useGLTFCamera = true;
+
+    fmt::print("[Camera] Applied GLTF camera '{}' from scene '{}'\n",
+        gltfCam.name, sceneName);
+}
+
+void VulkanEngine::resetToFreeCamera() {
+    useGLTFCamera = false;
+    currentGLTFCameraIndex = -1;
+    currentGLTFCameraScene.clear();
+    fmt::print("[Camera] Reset to free camera mode\n");
+}
+
+GLTFCamera* VulkanEngine::getCurrentGLTFCamera() {
+    if (!useGLTFCamera || currentGLTFCameraIndex < 0) {
+        return nullptr;
+    }
+
+    auto it = loadedScenes.find(currentGLTFCameraScene);
+    if (it == loadedScenes.end()) {
+        return nullptr;
+    }
+
+    auto& scene = it->second;
+    if (currentGLTFCameraIndex >= static_cast<int>(scene->cameras.size())) {
+        return nullptr;
+    }
+
+    return &scene->cameras[currentGLTFCameraIndex];
+}
+
+std::vector<std::pair<std::string, GLTFCamera*>> VulkanEngine::getAllGLTFCameras() {
+    std::vector<std::pair<std::string, GLTFCamera*>> result;
+
+    for (auto& [sceneName, scene] : loadedScenes) {
+        for (auto& camera : scene->cameras) {
+            std::string fullName = sceneName + "/" + camera.name;
+            result.emplace_back(fullName, &camera);
+        }
+    }
+
+    return result;
+}
+
+// =============================================================================
+// POST-PROCESSING SYSTEM
+// =============================================================================
+
+void VulkanEngine::init_post_processing() {
+    fmt::print("[PostProcess] Initializing post-processing system...\n");
+
+    // Create post-process manager
+    _postProcessManager = std::make_unique<Yalaz::Renderer::PostProcessManager>(this);
+
+    // Initialize with default settings
+    _renderSettings = Yalaz::Renderer::RenderSettings{};
+
+    fmt::print("[PostProcess] Post-processing system initialized\n");
+}
+
+void VulkanEngine::cleanup_post_processing() {
+    if (_postProcessManager) {
+        _postProcessManager.reset();
+    }
+}
+
+void VulkanEngine::render_post_processing(VkCommandBuffer cmd) {
+    // Placeholder - will be integrated into main render loop
+    (void)cmd;
+}
+
+void VulkanEngine::init_gbuffer() {
+    // G-Buffer initialization for deferred effects
+    // Normals buffer
+    VkExtent3D extent = { _drawExtent.width, _drawExtent.height, 1 };
+
+    _gBufferNormals = create_image(
+        extent,
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        false
+    );
+
+    _gBufferMetalRough = create_image(
+        extent,
+        VK_FORMAT_R8G8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        false
+    );
+
+    fmt::print("[GBuffer] Created G-buffer targets ({}x{})\n",
+        _drawExtent.width, _drawExtent.height);
+}
+
+// =============================================================================
+// PATH TRACING SYSTEM
+// =============================================================================
+
+void VulkanEngine::init_path_tracer() {
+    fmt::print("[PathTracer] Initializing path tracing system...\n");
+
+    _pathTracer = std::make_unique<Yalaz::Renderer::PathTracer>(this);
+    _pathTracer->init();
+
+    fmt::print("[PathTracer] Path tracing system initialized\n");
+}
+
+void VulkanEngine::cleanup_path_tracer() {
+    if (_pathTracer) {
+        _pathTracer->cleanup();
+        _pathTracer.reset();
+    }
+}
+
+// =============================================================================
+// ENVIRONMENT MAP / SKYBOX SYSTEM
+// =============================================================================
+
+void VulkanEngine::init_environment_map() {
+    fmt::print("[Environment] Initializing environment map system...\n");
+
+    _environmentMap = std::make_unique<Yalaz::Renderer::EnvironmentMap>(this);
+    _environmentMap->init();
+
+    fmt::print("[Environment] Environment map system initialized\n");
+}
+
+void VulkanEngine::cleanup_environment_map() {
+    if (_environmentMap) {
+        _environmentMap->cleanup();
+        _environmentMap.reset();
     }
 }

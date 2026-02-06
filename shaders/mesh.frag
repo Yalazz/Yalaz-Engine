@@ -54,6 +54,13 @@ vec3 calculate_point_lights(vec3 worldPos, vec3 normal, vec3 baseColor, vec3 vie
         float attenuation = 1.0 - (distance / light.radius);
         attenuation = attenuation * attenuation; // Quadratic falloff
 
+        // === POINT LIGHT SHADOW ===
+        float shadow = 1.0;
+        int shadowIndex = get_point_light_shadow_index(i);
+        if (shadowIndex >= 0) {
+            shadow = calculate_point_light_shadow(shadowIndex, worldPos, light.position, light.radius);
+        }
+
         // === DIFFUSE LIGHTING ===
         float NdotL = max(dot(normal, lightDir), 0.0);
         vec3 diffuse = baseColor * light.color * NdotL;
@@ -64,8 +71,8 @@ vec3 calculate_point_lights(vec3 worldPos, vec3 normal, vec3 baseColor, vec3 vie
         float specular = pow(NdotH, SPECULAR_POWER) * SPECULAR_STRENGTH;
         vec3 specularColor = light.color * specular;
 
-        // Combine with intensity and attenuation
-        vec3 lightContribution = (diffuse + specularColor) * light.intensity * attenuation;
+        // Combine with intensity, attenuation, and shadow
+        vec3 lightContribution = (diffuse + specularColor) * light.intensity * attenuation * shadow;
 
         totalLight += lightContribution;
     }
@@ -138,8 +145,12 @@ void main()
     // Calculate shadow factor
     float shadow = calculate_shadow(inWorldPos, N);
 
-    // Fresnel at normal incidence
+    // Fresnel at normal incidence (0.04 for dielectrics like glass, albedo for metals)
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+    // Fresnel-Schlick approximation for view angle
+    float NdotV = max(dot(N, V), 0.0);
+    vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
     // Simple approximation: less diffuse for metals, sharper specular for smooth surfaces
     vec3 diffuse = albedo * (1.0 - metallic) * NdotL;
@@ -160,8 +171,15 @@ void main()
     // === EMISSION ===
     vec3 emission = materialData.extra[0].rgb * materialData.extra[0].w;
 
+    // === ENVIRONMENT REFLECTION (for glass/metallic materials) ===
+    // Simple sky-based reflection (no cubemap yet)
+    vec3 reflectDir = reflect(-V, N);
+    float skyGradient = reflectDir.y * 0.5 + 0.5;
+    vec3 envColor = mix(vec3(0.3, 0.4, 0.5), vec3(0.6, 0.7, 0.9), skyGradient);
+    vec3 reflection = envColor * fresnel * (1.0 - roughness);
+
     // === FINAL COMPOSITION ===
-    vec3 result = ambient + directional + pointLighting + emission;
+    vec3 result = ambient + directional + pointLighting + emission + reflection;
 
     // Reinhard tone mapping
     result = result / (result + vec3(1.0));
@@ -169,8 +187,14 @@ void main()
     // Gamma correction
     result = pow(result, vec3(1.0 / 2.2));
 
-    // Alpha from material
+    // Alpha from material (glass uses low alpha but high reflection)
     float alpha = materialData.colorFactors.a * texColor.a;
+
+    // For transparent materials, increase alpha at grazing angles (Fresnel)
+    if (alpha < 1.0) {
+        float fresnelAlpha = 1.0 - pow(1.0 - NdotV, 3.0);
+        alpha = mix(alpha, 1.0, (1.0 - fresnelAlpha) * 0.5);
+    }
 
     outFragColor = vec4(result, alpha);
 }

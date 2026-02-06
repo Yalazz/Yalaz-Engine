@@ -52,12 +52,21 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
 
     // === Shadow Cascade Split Depths (16 bytes) ===
     vec4 cascadeSplits;                     // offset 2576, size 16 (x,y,z,w = split distances)
+
+    // === Point Light Shadow Data (96 bytes) ===
+    vec4 pointLightShadowData[4];           // offset 2592, xyz = light pos, w = far plane (radius)
+    int pointLightShadowCount;              // offset 2656, size 4
+    int _shadowPad1;                        // offset 2660, padding
+    int _shadowPad2;                        // offset 2664, padding
+    int _shadowPad3;                        // offset 2668, padding
+    ivec4 pointLightShadowIndices;          // offset 2672, size 16 (x,y,z,w = indices into pointLights)
 } sceneData;
 
 // =============================================================================
-// SHADOW MAP BINDING (Set 0, Binding 2)
+// SHADOW MAP BINDINGS
 // =============================================================================
-layout(set = 0, binding = 2) uniform sampler2D shadowMap;
+layout(set = 0, binding = 2) uniform sampler2D shadowMap;              // Directional light cascade shadow map
+layout(set = 0, binding = 3) uniform samplerCube pointLightShadowMaps[4];  // Point light shadow cubemaps
 
 // =============================================================================
 // SHADOW CALCULATION FUNCTIONS
@@ -194,6 +203,85 @@ float calculate_shadow(vec3 worldPos, vec3 normal) {
     }
 
     return shadow;
+}
+
+// =============================================================================
+// POINT LIGHT SHADOW CALCULATION
+// =============================================================================
+// Uses cubemap shadow maps for omnidirectional point light shadows
+
+float calculate_point_light_shadow(int shadowIndex, vec3 worldPos, vec3 lightPos, float lightRadius) {
+    if (sceneData.shadowsEnabled == 0 || shadowIndex < 0 || shadowIndex >= sceneData.pointLightShadowCount) {
+        return 1.0;  // No shadow
+    }
+
+    // Direction from light to fragment (for cubemap sampling)
+    vec3 fragToLight = worldPos - lightPos;
+    float currentDepth = length(fragToLight);
+
+    // Normalize for cubemap direction
+    vec3 sampleDir = normalize(fragToLight);
+
+    // Sample depth from cubemap (stores perspective depth)
+    float sampledDepth;
+    switch (shadowIndex) {
+        case 0: sampledDepth = texture(pointLightShadowMaps[0], sampleDir).r; break;
+        case 1: sampledDepth = texture(pointLightShadowMaps[1], sampleDir).r; break;
+        case 2: sampledDepth = texture(pointLightShadowMaps[2], sampleDir).r; break;
+        case 3: sampledDepth = texture(pointLightShadowMaps[3], sampleDir).r; break;
+        default: return 1.0;
+    }
+
+    // Convert perspective depth to linear depth
+    // Vulkan uses reverse-Z: depth = 1 at near, 0 at far
+    // For perspective projection with near=0.1, far=lightRadius:
+    // linearZ = (near * far) / (far - depth * (far - near))
+    float nearPlane = 0.1;
+    float farPlane = lightRadius;
+    float closestDepth = (nearPlane * farPlane) / (farPlane - sampledDepth * (farPlane - nearPlane));
+
+    // Bias based on distance (further = more bias needed)
+    float bias = sceneData.shadowBias * (1.0 + currentDepth * 0.1);
+
+    // Shadow test
+    float shadow = (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
+
+    // PCF-like soft shadows using offset samples
+    float shadowSum = shadow;
+    float offset = 0.02;
+    vec3 sampleOffsets[6] = vec3[](
+        vec3( offset, 0, 0), vec3(-offset, 0, 0),
+        vec3(0,  offset, 0), vec3(0, -offset, 0),
+        vec3(0, 0,  offset), vec3(0, 0, -offset)
+    );
+
+    for (int i = 0; i < 6; i++) {
+        vec3 offsetDir = normalize(fragToLight + sampleOffsets[i]);
+        float rawSampleDepth;
+        switch (shadowIndex) {
+            case 0: rawSampleDepth = texture(pointLightShadowMaps[0], offsetDir).r; break;
+            case 1: rawSampleDepth = texture(pointLightShadowMaps[1], offsetDir).r; break;
+            case 2: rawSampleDepth = texture(pointLightShadowMaps[2], offsetDir).r; break;
+            case 3: rawSampleDepth = texture(pointLightShadowMaps[3], offsetDir).r; break;
+            default: rawSampleDepth = 1.0;
+        }
+        // Convert perspective depth to linear
+        float sampleLinearDepth = (nearPlane * farPlane) / (farPlane - rawSampleDepth * (farPlane - nearPlane));
+        shadowSum += (currentDepth - bias > sampleLinearDepth) ? 0.0 : 1.0;
+    }
+
+    return shadowSum / 7.0;  // Average of 7 samples
+}
+
+// Helper to get shadow index for a point light (returns -1 if no shadow)
+int get_point_light_shadow_index(int lightIndex) {
+    for (int i = 0; i < sceneData.pointLightShadowCount && i < 4; i++) {
+        int shadowLightIndex = sceneData.pointLightShadowIndices[i];  // ivec4 allows [] indexing
+        if (shadowLightIndex == lightIndex) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 // =============================================================================

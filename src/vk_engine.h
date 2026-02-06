@@ -4,6 +4,7 @@
 #pragma once
 #include <vk_types.h>
 #include <vector>
+#include <memory>
 #include "vk_mem_alloc.h"
 #include <deque>
 #include <functional>
@@ -16,6 +17,9 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include "vk_types.h" // GPUMeshBuffers vs için
+#include "renderer/PostProcess.h"
+#include "renderer/PathTracer.h"
+#include "renderer/EnvironmentMap.h"
 
 struct MeshAsset;
 namespace fastgltf {
@@ -679,9 +683,14 @@ public:
     // Primitive pipeline with face color support
     VkPipeline _primitivePipeline = VK_NULL_HANDLE;
     VkPipelineLayout _primitivePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline _primitiveWireframePipeline = VK_NULL_HANDLE;  // Wireframe mode for primitives
+    VkPipeline _primitiveSolidPipeline = VK_NULL_HANDLE;      // Solid color mode for primitives
     void init_primitive_pipeline();
+    void init_primitive_wireframe_pipeline();
+    void init_primitive_solid_pipeline();
     void draw_primitives(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor);
-    void draw_primitives_with_viewport(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor);
+    void draw_primitives_with_viewport(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor, ViewMode viewMode);
+    VkPipeline select_primitive_pipeline(ViewMode viewMode, ShaderOnlyMaterial materialType);
     void init_point_light_vis_pipeline();
 
     VkPipelineLayout _gridPipelineLayout = VK_NULL_HANDLE;
@@ -700,7 +709,7 @@ public:
     
     void draw_shader_only_static_shapes(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor);
     void init_default_meshes();
-    ViewMode _currentViewMode = ViewMode::Shaded;
+    ViewMode _currentViewMode = ViewMode::Rendered;  // Rendered = full PBR with shadows
     // primitive mesh oluşturucular:
     GPUMeshBuffers generate_cube_mesh();
     GPUMeshBuffers generate_plane_mesh();
@@ -864,6 +873,17 @@ public:
 
     Camera mainCamera;
 
+    // GLTF Camera management
+    std::string currentGLTFCameraScene;  // Scene name that camera belongs to
+    int currentGLTFCameraIndex = -1;     // -1 = using mainCamera, >= 0 = GLTF camera index
+    bool useGLTFCamera = false;
+
+    // Apply a GLTF camera to the main camera
+    void applyGLTFCamera(const std::string& sceneName, int cameraIndex);
+    void resetToFreeCamera();
+    GLTFCamera* getCurrentGLTFCamera();
+    std::vector<std::pair<std::string, GLTFCamera*>> getAllGLTFCameras();
+
     /*DescriptorAllocatorGrowable globalDescriptorAllocator;*/
     DescriptorAllocator globalDescriptorAllocator;
 
@@ -946,11 +966,87 @@ public:
     // Shadow settings (exposed to UI)
     float shadowBias = 0.002f;   // Base bias for shadow acne prevention
     float shadowNormalBias = 0.015f;  // Normal offset bias
+
+    // === Point Light Shadow Cubemaps ===
+    static constexpr uint32_t POINT_LIGHT_SHADOW_SIZE = 512;  // Resolution per face
+    static constexpr uint32_t MAX_SHADOW_POINT_LIGHTS = 4;    // Max lights with shadows
+
+    struct PointLightShadowData {
+        AllocatedImage cubemap;           // Cubemap depth image (6 faces)
+        VkImageView cubemapView = VK_NULL_HANDLE;        // Full cubemap view
+        VkImageView faceViews[6] = {};    // Per-face views for rendering
+        int lightIndex = -1;              // Index into scenePointLights
+    };
+    std::array<PointLightShadowData, MAX_SHADOW_POINT_LIGHTS> _pointLightShadows;
+    VkSampler _pointLightShadowSampler = VK_NULL_HANDLE;
+    VkPipeline _pointLightShadowPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _pointLightShadowPipelineLayout = VK_NULL_HANDLE;
+    bool pointLightShadowsEnabled = true;
+
+    // Point light shadow functions
+    void init_point_light_shadow_maps();
+    void render_point_light_shadows(VkCommandBuffer cmd);
+    void update_point_light_shadow_data();
     bool shadowsEnabled = true;
 
     // Sun/Directional light toggle
     bool sunEnabled = true;
     float savedSunIntensity = 3.0f;  // Store intensity when disabled
+
+    // ==========================================================================
+    // POST-PROCESSING SYSTEM
+    // ==========================================================================
+    std::unique_ptr<Yalaz::Renderer::PostProcessManager> _postProcessManager;
+    Yalaz::Renderer::RenderSettings _renderSettings;
+
+    // G-Buffer for deferred effects (SSAO, SSR)
+    AllocatedImage _gBufferNormals;       // RGB = world normals
+    AllocatedImage _gBufferMetalRough;    // R = metallic, G = roughness
+
+    // HDR render target (before post-processing)
+    AllocatedImage _hdrBuffer;
+
+    // Post-process functions
+    void init_post_processing();
+    void cleanup_post_processing();
+    void render_post_processing(VkCommandBuffer cmd);
+    void init_gbuffer();
+
+    // ==========================================================================
+    // PATH TRACING SYSTEM
+    // ==========================================================================
+    std::unique_ptr<Yalaz::Renderer::PathTracer> _pathTracer;
+    void init_path_tracer();
+    void cleanup_path_tracer();
+
+    // ==========================================================================
+    // ENVIRONMENT MAP / SKYBOX SYSTEM
+    // ==========================================================================
+    std::unique_ptr<Yalaz::Renderer::EnvironmentMap> _environmentMap;
+    void init_environment_map();
+    void cleanup_environment_map();
+
+    // ==========================================================================
+    // SPOT LIGHT SYSTEM
+    // ==========================================================================
+    std::vector<SpotLight> sceneSpotLights;
+    AllocatedBuffer _spotLightBuffer;
+    static constexpr uint32_t SPOT_LIGHT_SHADOW_SIZE = 1024;
+
+    struct SpotLightShadowData {
+        AllocatedImage shadowMap;
+        VkImageView shadowView = VK_NULL_HANDLE;
+        glm::mat4 viewProjMatrix;
+        int lightIndex = -1;
+    };
+    std::array<SpotLightShadowData, MAX_SHADOW_CASTING_SPOT_LIGHTS> _spotLightShadows;
+    VkSampler _spotLightShadowSampler = VK_NULL_HANDLE;
+    VkPipeline _spotLightShadowPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _spotLightShadowPipelineLayout = VK_NULL_HANDLE;
+
+    void init_spot_light_shadows();
+    void render_spot_light_shadows(VkCommandBuffer cmd);
+    void sync_spot_lights();
 
     // ==========================================================================
     // GPU-DRIVEN RENDERING SYSTEM

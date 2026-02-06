@@ -80,12 +80,78 @@ void LightingDebugView::RenderLightList() {
 
     ImGui::Spacing();
 
+    // === Scene Cameras (GLTF) ===
+    SectionHeader("Scene Cameras");
+
+    auto allCameras = m_Engine->getAllGLTFCameras();
+    if (allCameras.empty()) {
+        ImGui::TextDisabled("No GLTF cameras loaded");
+    } else {
+        // Free camera option
+        bool isFreeCam = !m_Engine->useGLTFCamera;
+        if (ImGui::RadioButton("Free Camera (WASD)", isFreeCam)) {
+            m_Engine->resetToFreeCamera();
+        }
+
+        ImGui::Separator();
+
+        // List all GLTF cameras
+        for (auto& [fullName, camera] : allCameras) {
+            bool isSelected = m_Engine->useGLTFCamera &&
+                (fullName == m_Engine->currentGLTFCameraScene + "/" + camera->name);
+
+            if (ImGui::RadioButton(fullName.c_str(), isSelected)) {
+                // Parse scene name from fullName
+                size_t slashPos = fullName.find('/');
+                if (slashPos != std::string::npos) {
+                    std::string sceneName = fullName.substr(0, slashPos);
+                    // Find camera index
+                    auto it = m_Engine->loadedScenes.find(sceneName);
+                    if (it != m_Engine->loadedScenes.end()) {
+                        for (size_t i = 0; i < it->second->cameras.size(); i++) {
+                            if (&it->second->cameras[i] == camera) {
+                                m_Engine->applyGLTFCamera(sceneName, static_cast<int>(i));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Show camera info on hover
+            if (ImGui::IsItemHovered() && camera) {
+                ImGui::BeginTooltip();
+                ImGui::Text("Type: %s", camera->isPerspective ? "Perspective" : "Orthographic");
+                if (camera->isPerspective) {
+                    ImGui::Text("FOV: %.1f degrees", camera->fov);
+                } else {
+                    ImGui::Text("Size: %.1f x %.1f", camera->orthoWidth, camera->orthoHeight);
+                }
+                ImGui::Text("Near: %.3f, Far: %.1f", camera->nearPlane, camera->farPlane);
+                ImGui::Text("Position: (%.2f, %.2f, %.2f)",
+                    camera->position.x, camera->position.y, camera->position.z);
+                ImGui::EndTooltip();
+            }
+        }
+    }
+
+    ImGui::Spacing();
+
     // === Shadow Settings ===
     SectionHeader("Shadow Settings");
     ImGui::Checkbox("Shadows Enabled", &m_Engine->shadowsEnabled);
     if (m_Engine->shadowsEnabled) {
         ImGui::SliderFloat("Shadow Bias", &m_Engine->shadowBias, 0.0001f, 0.01f, "%.5f");
         ImGui::SliderFloat("Normal Bias", &m_Engine->shadowNormalBias, 0.0f, 0.1f, "%.4f");
+        ImGui::Checkbox("Point Light Shadows", &m_Engine->pointLightShadowsEnabled);
+        if (m_Engine->pointLightShadowsEnabled) {
+            // Count shadow-casting lights
+            int shadowCount = 0;
+            for (const auto& light : m_Engine->scenePointLights) {
+                if (light.castsShadow) shadowCount++;
+            }
+            ImGui::TextDisabled("Shadow-casting lights: %d / %d", shadowCount, MAX_SHADOW_CASTING_LIGHTS);
+        }
     }
 
     ImGui::Spacing();
@@ -111,13 +177,14 @@ void LightingDebugView::RenderLightList() {
     ImGui::Separator();
 
     // Light table
-    if (ImGui::BeginTable("LightTable", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+    if (ImGui::BeginTable("LightTable", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                           ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable, ImVec2(0, 200))) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 30);
         ImGui::TableSetupColumn("Color", ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("Position", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Intensity", ImGuiTableColumnFlags_WidthFixed, 65);
         ImGui::TableSetupColumn("Radius", ImGuiTableColumnFlags_WidthFixed, 55);
+        ImGui::TableSetupColumn("Shd", ImGuiTableColumnFlags_WidthFixed, 30);
         ImGui::TableSetupColumn("Act", ImGuiTableColumnFlags_WidthFixed, 60);
         ImGui::TableHeadersRow();
 
@@ -154,6 +221,14 @@ void LightingDebugView::RenderLightList() {
             // Radius
             ImGui::TableNextColumn();
             ImGui::Text("%.1f", light.radius);
+
+            // Shadow indicator
+            ImGui::TableNextColumn();
+            if (light.castsShadow) {
+                ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "Yes");
+            } else {
+                ImGui::TextDisabled("-");
+            }
 
             // Actions
             ImGui::TableNextColumn();
@@ -212,6 +287,28 @@ void LightingDebugView::RenderLightList() {
 
         ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 100.0f);
         ImGui::SliderFloat("Radius", &light.radius, 0.1f, 100.0f);
+
+        // Shadow casting
+        ImGui::Spacing();
+        if (ImGui::Checkbox("Cast Shadow", &light.castsShadow)) {
+            // Count how many lights already cast shadows
+            if (light.castsShadow) {
+                int shadowCount = 0;
+                for (const auto& l : m_Engine->scenePointLights) {
+                    if (&l != &light && l.castsShadow) shadowCount++;
+                }
+                if (shadowCount >= MAX_SHADOW_CASTING_LIGHTS) {
+                    light.castsShadow = false;  // Undo - limit reached
+                }
+            }
+        }
+        if (light.castsShadow) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "(Active)");
+        } else {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(Max %d lights)", MAX_SHADOW_CASTING_LIGHTS);
+        }
 
         // Attenuation preview
         ImGui::Spacing();

@@ -1,0 +1,158 @@
+// =============================================================================
+// SSAO - Screen Space Ambient Occlusion Compute Shader
+// =============================================================================
+// HBAO-style ambient occlusion using hemisphere sampling in view space.
+// Samples are distributed in a hemisphere oriented along the surface normal.
+// Uses a noise texture to randomize sample rotation and reduce banding.
+// =============================================================================
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D depthTexture;
+layout(set = 0, binding = 1) uniform sampler2D normalTexture;
+layout(set = 0, binding = 2) uniform sampler2D noiseTexture;
+
+layout(set = 0, binding = 3) uniform SSAOKernel {
+    vec4 samples[64];
+} kernel;
+
+layout(set = 0, binding = 4, r8) uniform writeonly image2D ssaoOutput;
+
+layout(push_constant) uniform PushConstants {
+    mat4 projection;
+    mat4 invProjection;
+    vec4 params;     // x=radius, y=bias, z=intensity, w=power
+    vec4 params2;    // x=sampleCount, y=maxDistance, z=fadeStart, w=noiseScale
+    vec2 resolution;
+    vec2 invResolution;
+} pc;
+
+// Reconstruct view-space position from depth
+vec3 reconstructViewPos(vec2 uv, float depth) {
+    // Convert UV to NDC
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+
+    // Unproject to view space
+    vec4 viewPos = pc.invProjection * ndc;
+    return viewPos.xyz / viewPos.w;
+}
+
+// Reconstruct normal from depth buffer using cross product of partial derivatives
+vec3 reconstructNormal(vec2 uv) {
+    vec2 texelSize = pc.invResolution;
+
+    float depthC = texture(depthTexture, uv).r;
+    float depthL = texture(depthTexture, uv - vec2(texelSize.x, 0.0)).r;
+    float depthR = texture(depthTexture, uv + vec2(texelSize.x, 0.0)).r;
+    float depthU = texture(depthTexture, uv - vec2(0.0, texelSize.y)).r;
+    float depthD = texture(depthTexture, uv + vec2(0.0, texelSize.y)).r;
+
+    vec3 posC = reconstructViewPos(uv, depthC);
+    vec3 posL = reconstructViewPos(uv - vec2(texelSize.x, 0.0), depthL);
+    vec3 posR = reconstructViewPos(uv + vec2(texelSize.x, 0.0), depthR);
+    vec3 posU = reconstructViewPos(uv - vec2(0.0, texelSize.y), depthU);
+    vec3 posD = reconstructViewPos(uv + vec2(0.0, texelSize.y), depthD);
+
+    // Use the smaller difference to avoid artifacts at edges
+    vec3 ddx = (abs(depthR - depthC) < abs(depthC - depthL)) ?
+               (posR - posC) : (posC - posL);
+    vec3 ddy = (abs(depthD - depthC) < abs(depthC - depthU)) ?
+               (posD - posC) : (posC - posU);
+
+    return normalize(cross(ddy, ddx));
+}
+
+// Create TBN matrix from normal and random rotation
+mat3 createTBN(vec3 normal, vec3 randomVec) {
+    vec3 tangent = normalize(randomVec - normal * dot(randomVec, normal));
+    vec3 bitangent = cross(normal, tangent);
+    return mat3(tangent, bitangent, normal);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outputSize = imageSize(ssaoOutput);
+
+    if (coord.x >= outputSize.x || coord.y >= outputSize.y) return;
+
+    vec2 uv = (vec2(coord) + 0.5) * pc.invResolution;
+
+    // Sample depth
+    float depth = texture(depthTexture, uv).r;
+
+    // Skip skybox/far plane
+    if (depth >= 1.0) {
+        imageStore(ssaoOutput, coord, vec4(1.0));
+        return;
+    }
+
+    // Reconstruct view-space position and normal
+    vec3 viewPos = reconstructViewPos(uv, depth);
+    vec3 viewNormal = reconstructNormal(uv);
+
+    // Get random rotation vector from noise texture
+    vec2 noiseUV = uv * pc.params2.w;  // Tile noise across screen
+    vec3 randomVec = texture(noiseTexture, noiseUV).xyz * 2.0 - 1.0;
+    randomVec.z = 0.0;
+    randomVec = normalize(randomVec);
+
+    // Create TBN matrix for hemisphere sampling
+    mat3 TBN = createTBN(viewNormal, randomVec);
+
+    // Sampling parameters
+    float radius = pc.params.x;
+    float bias = pc.params.y;
+    float intensity = pc.params.z;
+    float power = pc.params.w;
+    int sampleCount = int(pc.params2.x);
+
+    // Distance-based fade
+    float viewDist = -viewPos.z;
+    float distanceFade = 1.0 - smoothstep(pc.params2.z, pc.params2.y, viewDist);
+
+    if (distanceFade <= 0.0) {
+        imageStore(ssaoOutput, coord, vec4(1.0));
+        return;
+    }
+
+    // Accumulate occlusion
+    float occlusion = 0.0;
+
+    for (int i = 0; i < sampleCount; ++i) {
+        // Get sample position in tangent space
+        vec3 sampleOffset = TBN * kernel.samples[i].xyz;
+
+        // Calculate sample position in view space
+        vec3 samplePos = viewPos + sampleOffset * radius;
+
+        // Project sample to screen space
+        vec4 offset = pc.projection * vec4(samplePos, 1.0);
+        offset.xy /= offset.w;
+        offset.xy = offset.xy * 0.5 + 0.5;
+
+        // Check bounds
+        if (offset.x < 0.0 || offset.x > 1.0 || offset.y < 0.0 || offset.y > 1.0) {
+            continue;
+        }
+
+        // Sample depth at projected position
+        float sampleDepth = texture(depthTexture, offset.xy).r;
+        vec3 sampleViewPos = reconstructViewPos(offset.xy, sampleDepth);
+
+        // Range check & accumulate
+        float rangeCheck = smoothstep(0.0, 1.0, radius / abs(viewPos.z - sampleViewPos.z));
+
+        // Occlusion test: is the sample occluded?
+        // Compare actual depth with expected depth
+        occlusion += (sampleViewPos.z >= samplePos.z + bias ? 1.0 : 0.0) * rangeCheck;
+    }
+
+    // Normalize and apply intensity
+    occlusion = 1.0 - (occlusion / float(sampleCount));
+    occlusion = pow(occlusion, power);
+    occlusion = mix(1.0, occlusion, intensity * distanceFade);
+
+    imageStore(ssaoOutput, coord, vec4(occlusion));
+}

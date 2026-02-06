@@ -1,0 +1,58 @@
+// =============================================================================
+// SSR TEMPORAL - Temporal filtering for stable screen space reflections
+// =============================================================================
+// Applies temporal reprojection and filtering to reduce noise and flickering
+// in screen space reflections.
+// =============================================================================
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D currentReflection;
+layout(set = 0, binding = 1) uniform sampler2D previousReflection;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D outputReflection;
+
+layout(push_constant) uniform PushConstants {
+    mat4 prevViewProj;
+    mat4 invViewProj;
+    float temporalWeight;
+    float _pad[3];
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outputSize = imageSize(outputReflection);
+
+    if (coord.x >= outputSize.x || coord.y >= outputSize.y) return;
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(outputSize);
+
+    // Sample current frame
+    vec4 currentColor = texture(currentReflection, uv);
+
+    // For simplicity, use direct blend without motion vectors
+    // A full implementation would use velocity buffer for reprojection
+    vec4 previousColor = texture(previousReflection, uv);
+
+    // Neighborhood clamping to reduce ghosting
+    vec4 nearMin = currentColor;
+    vec4 nearMax = currentColor;
+
+    vec2 texelSize = 1.0 / vec2(outputSize);
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec4 neighbor = texture(currentReflection, uv + vec2(x, y) * texelSize);
+            nearMin = min(nearMin, neighbor);
+            nearMax = max(nearMax, neighbor);
+        }
+    }
+
+    // Clamp history to neighborhood
+    previousColor = clamp(previousColor, nearMin, nearMax);
+
+    // Blend with history
+    vec4 result = mix(currentColor, previousColor, pc.temporalWeight);
+
+    imageStore(outputReflection, coord, result);
+}

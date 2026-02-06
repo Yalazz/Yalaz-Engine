@@ -94,6 +94,7 @@ private:
     bool LoadTextureFromFile(const std::string& texturePath, uint32_t& outTextureID);
     void UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoughTexID);
     void RebuildMaterialDescriptorSet();
+    void ApplyTexturesToPrimitive();  // Apply textures to selected primitive
 
     // Material file save/load
     void RenderSaveLoadUI();

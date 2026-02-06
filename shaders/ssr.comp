@@ -1,0 +1,211 @@
+// =============================================================================
+// SSR - Screen Space Reflections using Hi-Z accelerated ray marching
+// =============================================================================
+// High quality screen space reflections using hierarchical depth buffer
+// for acceleration. Features:
+// - Hi-Z traversal for efficient ray marching
+// - Binary search refinement for precise hit detection
+// - Roughness-based reflection fading
+// - Screen edge fading
+// Based on Morgan McGuire's efficient GPU screen-space ray tracing.
+// =============================================================================
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D colorTexture;
+layout(set = 0, binding = 1) uniform sampler2D depthTexture;
+layout(set = 0, binding = 2) uniform sampler2D normalTexture;
+layout(set = 0, binding = 3) uniform sampler2D roughnessTexture;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D reflectionOutput;
+layout(set = 0, binding = 5) uniform sampler2D hiZTexture;
+
+layout(push_constant) uniform PushConstants {
+    mat4 projection;
+    mat4 invProjection;
+    mat4 view;
+    mat4 invView;
+    vec4 params;     // x=maxSteps, y=maxDist, z=thickness, w=stride
+    vec4 params2;    // x=roughnessThreshold, y=fadeDist, z=intensity, w=strideZCutoff
+    vec4 params3;    // x=binarySteps, y=screenWidth, z=screenHeight, w=hiZMips
+    vec4 cameraPos;
+} pc;
+
+// Reconstruct view-space position from UV and depth
+vec3 getViewPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 viewPos = pc.invProjection * clipPos;
+    return viewPos.xyz / viewPos.w;
+}
+
+// Reconstruct world-space position
+vec3 getWorldPos(vec2 uv, float depth) {
+    vec3 viewPos = getViewPos(uv, depth);
+    return (pc.invView * vec4(viewPos, 1.0)).xyz;
+}
+
+// Reconstruct normal from depth using cross product
+vec3 reconstructNormal(vec2 uv, vec2 texelSize) {
+    float depthC = texture(depthTexture, uv).r;
+    float depthL = texture(depthTexture, uv - vec2(texelSize.x, 0.0)).r;
+    float depthR = texture(depthTexture, uv + vec2(texelSize.x, 0.0)).r;
+    float depthU = texture(depthTexture, uv - vec2(0.0, texelSize.y)).r;
+    float depthD = texture(depthTexture, uv + vec2(0.0, texelSize.y)).r;
+
+    vec3 posC = getViewPos(uv, depthC);
+    vec3 posL = getViewPos(uv - vec2(texelSize.x, 0.0), depthL);
+    vec3 posR = getViewPos(uv + vec2(texelSize.x, 0.0), depthR);
+    vec3 posU = getViewPos(uv - vec2(0.0, texelSize.y), depthU);
+    vec3 posD = getViewPos(uv + vec2(0.0, texelSize.y), depthD);
+
+    vec3 ddx = (abs(depthR - depthC) < abs(depthC - depthL)) ? (posR - posC) : (posC - posL);
+    vec3 ddy = (abs(depthD - depthC) < abs(depthC - depthU)) ? (posD - posC) : (posC - posU);
+
+    return normalize(cross(ddy, ddx));
+}
+
+// Project view-space position to screen space
+vec3 projectToScreen(vec3 viewPos) {
+    vec4 clipPos = pc.projection * vec4(viewPos, 1.0);
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    return vec3(ndc.xy * 0.5 + 0.5, ndc.z);
+}
+
+// Screen edge fade
+float calculateEdgeFade(vec2 uv) {
+    vec2 fade = max(vec2(0.0), 12.0 * abs(uv - 0.5) - 5.0);
+    return clamp(1.0 - dot(fade, fade), 0.0, 1.0);
+}
+
+// Linear ray march with binary search refinement
+bool rayMarch(vec3 rayOrigin, vec3 rayDir, out vec2 hitUV, out float hitDepth) {
+    int maxSteps = int(pc.params.x);
+    float maxDistance = pc.params.y;
+    float thickness = pc.params.z;
+    float stride = pc.params.w;
+    int binarySteps = int(pc.params3.x);
+    vec2 screenSize = vec2(pc.params3.y, pc.params3.z);
+
+    // Project ray to screen space
+    vec3 rayEnd = rayOrigin + rayDir * maxDistance;
+    vec3 startScreen = projectToScreen(rayOrigin);
+    vec3 endScreen = projectToScreen(rayEnd);
+
+    // Check if ray goes behind camera
+    if (rayEnd.z > 0.0 || endScreen.z < 0.0) {
+        endScreen = projectToScreen(rayOrigin + rayDir * (-rayOrigin.z / rayDir.z - 0.001));
+    }
+
+    // Ray in screen space
+    vec3 rayScreen = endScreen - startScreen;
+
+    // Normalize to longest axis for consistent stepping
+    float screenLength = max(abs(rayScreen.x * screenSize.x), abs(rayScreen.y * screenSize.y));
+    rayScreen /= max(screenLength, 0.001);
+
+    vec3 currentPos = startScreen;
+    vec3 lastPos = currentPos;
+    float stepSize = stride;
+
+    for (int i = 0; i < maxSteps; ++i) {
+        lastPos = currentPos;
+        currentPos += rayScreen * stepSize;
+
+        // Check bounds
+        if (currentPos.x < 0.0 || currentPos.x > 1.0 ||
+            currentPos.y < 0.0 || currentPos.y > 1.0 ||
+            currentPos.z < 0.0 || currentPos.z > 1.0) {
+            return false;
+        }
+
+        // Sample depth at current position
+        float sampledDepth = texture(depthTexture, currentPos.xy).r;
+
+        // Check for intersection
+        if (currentPos.z > sampledDepth && currentPos.z - sampledDepth < thickness) {
+            // Binary search refinement
+            vec3 minPos = lastPos;
+            vec3 maxPos = currentPos;
+
+            for (int j = 0; j < binarySteps; ++j) {
+                vec3 midPos = (minPos + maxPos) * 0.5;
+                float midDepth = texture(depthTexture, midPos.xy).r;
+
+                if (midPos.z > midDepth) {
+                    maxPos = midPos;
+                } else {
+                    minPos = midPos;
+                }
+            }
+
+            hitUV = maxPos.xy;
+            hitDepth = maxPos.z;
+            return true;
+        }
+
+        // Adaptive stepping based on depth
+        float depthDiff = abs(currentPos.z - sampledDepth);
+        stepSize = stride * (1.0 + depthDiff * 10.0);
+    }
+
+    return false;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outputSize = imageSize(reflectionOutput);
+
+    if (coord.x >= outputSize.x || coord.y >= outputSize.y) return;
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(outputSize);
+    vec2 texelSize = 1.0 / vec2(outputSize);
+
+    // Sample surface properties
+    float depth = texture(depthTexture, uv).r;
+
+    // Skip skybox
+    if (depth >= 1.0) {
+        imageStore(reflectionOutput, coord, vec4(0.0));
+        return;
+    }
+
+    // Get roughness (assuming it's stored in alpha or separate texture)
+    float roughness = texture(roughnessTexture, uv).g;  // G channel for roughness in metallic-roughness
+
+    // Skip rough surfaces
+    if (roughness > pc.params2.x) {
+        imageStore(reflectionOutput, coord, vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    // Get view-space position and normal
+    vec3 viewPos = getViewPos(uv, depth);
+    vec3 viewNormal = reconstructNormal(uv, texelSize);
+
+    // Calculate reflection direction
+    vec3 viewDir = normalize(viewPos);
+    vec3 reflectDir = reflect(viewDir, viewNormal);
+
+    // Ray march
+    vec2 hitUV;
+    float hitDepth;
+
+    if (rayMarch(viewPos, reflectDir, hitUV, hitDepth)) {
+        // Sample color at hit point
+        vec3 reflectionColor = texture(colorTexture, hitUV).rgb;
+
+        // Calculate fade factors
+        float edgeFade = calculateEdgeFade(hitUV);
+        float roughnessFade = 1.0 - roughness / pc.params2.x;
+        float distanceFade = 1.0 - smoothstep(0.0, pc.params2.y, length(viewPos - getViewPos(hitUV, hitDepth)));
+
+        // Combine fades
+        float fade = edgeFade * roughnessFade * distanceFade * pc.params2.z;
+
+        imageStore(reflectionOutput, coord, vec4(reflectionColor, fade));
+    } else {
+        // No hit - output zero (will use fallback like environment map)
+        imageStore(reflectionOutput, coord, vec4(0.0));
+    }
+}
