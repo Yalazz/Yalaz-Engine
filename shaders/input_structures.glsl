@@ -67,6 +67,7 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
 // =============================================================================
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;              // Directional light cascade shadow map
 layout(set = 0, binding = 3) uniform samplerCube pointLightShadowMaps[4];  // Point light shadow cubemaps
+layout(set = 0, binding = 4) uniform samplerCube envCubemap;              // Environment cubemap for reflections
 
 // =============================================================================
 // SHADOW CALCULATION FUNCTIONS
@@ -289,7 +290,7 @@ int get_point_light_shadow_index(int lightIndex) {
 // =============================================================================
 
 #ifdef USE_BINDLESS
-layout(set = 0, binding = 1) uniform sampler2D allTextures[];
+layout(set = 0, binding = 5) uniform sampler2D allTextures[];
 #else
 layout(set = 1, binding = 1) uniform sampler2D colorTex;
 layout(set = 1, binding = 2) uniform sampler2D metalRoughTex;

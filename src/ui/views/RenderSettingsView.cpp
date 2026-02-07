@@ -3,19 +3,33 @@
 #include "renderer/PathTracer.h"
 #include "renderer/EnvironmentMap.h"
 #include <imgui.h>
+#include <filesystem>
+#include <fmt/core.h>
 
 namespace Yalaz::UI {
 
-RenderSettingsView::RenderSettingsView(VulkanEngine* engine)
-    : _engine(engine) {}
+RenderSettingsView::RenderSettingsView()
+    : EditorView("Render Settings", "[R]", ViewCategory::Rendering) {}
 
-void RenderSettingsView::draw() {
-    if (!_showPanel) return;
+void RenderSettingsView::OnInit(VulkanEngine* engine) {
+    EditorView::OnInit(engine);
+}
 
-    ImGui::Begin("Render Settings", &_showPanel);
+void RenderSettingsView::OnRenderContent() {
+    if (!m_Engine) return;
 
     // Tab bar for different categories
     if (ImGui::BeginTabBar("RenderSettingsTabs")) {
+
+        if (ImGui::BeginTabItem("Path Tracer")) {
+            drawPathTracerSettings();
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Environment")) {
+            drawEnvironmentSettings();
+            ImGui::EndTabItem();
+        }
 
         if (ImGui::BeginTabItem("Post Process")) {
             drawBloomSettings();
@@ -46,16 +60,6 @@ void RenderSettingsView::draw() {
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Environment")) {
-            drawEnvironmentSettings();
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Path Tracer")) {
-            drawPathTracerSettings();
-            ImGui::EndTabItem();
-        }
-
         if (ImGui::BeginTabItem("Performance")) {
             drawPerformanceStats();
             ImGui::EndTabItem();
@@ -63,8 +67,6 @@ void RenderSettingsView::draw() {
 
         ImGui::EndTabBar();
     }
-
-    ImGui::End();
 }
 
 void RenderSettingsView::drawSSAOSettings() {
@@ -261,11 +263,11 @@ void RenderSettingsView::drawSpotLightSettings() {
 void RenderSettingsView::drawPerformanceStats() {
     ImGui::Text("Performance Statistics");
 
-    ImGui::Text("Frame Time: %.3f ms", _engine->stats.frametime * 1000.0f);
-    ImGui::Text("FPS: %.1f", 1.0f / _engine->stats.frametime);
-    ImGui::Text("Draw Calls: %d", _engine->stats.drawcall_count);
-    ImGui::Text("Triangles: %d", _engine->stats.triangle_count);
-    ImGui::Text("Visible Objects: %d", _engine->stats.visible_count);
+    ImGui::Text("Frame Time: %.3f ms", m_Engine->stats.frametime * 1000.0f);
+    ImGui::Text("FPS: %.1f", 1.0f / m_Engine->stats.frametime);
+    ImGui::Text("Draw Calls: %d", m_Engine->stats.drawcall_count);
+    ImGui::Text("Triangles: %d", m_Engine->stats.triangle_count);
+    ImGui::Text("Visible Objects: %d", m_Engine->stats.visible_count);
 
     ImGui::Separator();
 
@@ -289,18 +291,18 @@ void RenderSettingsView::drawPathTracerSettings() {
     ImGui::Text("GPU Path Tracer");
 
     // Check if path tracer is available
-    if (!_engine->_pathTracer) {
+    if (!m_Engine->_pathTracer) {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Path tracer not initialized");
         return;
     }
 
-    auto& settings = _engine->_pathTracer->settings;
-    auto& stats = _engine->_pathTracer->stats;
+    auto& settings = m_Engine->_pathTracer->settings;
+    auto& stats = m_Engine->_pathTracer->stats;
 
     // Mode toggle - directly control view mode
-    bool isPathTracedMode = (_engine->_currentViewMode == VulkanEngine::ViewMode::PathTraced);
+    bool isPathTracedMode = (m_Engine->_currentViewMode == VulkanEngine::ViewMode::PathTraced);
     if (ImGui::Checkbox("Enable Path Tracing", &isPathTracedMode)) {
-        _engine->_currentViewMode = isPathTracedMode
+        m_Engine->_currentViewMode = isPathTracedMode
             ? VulkanEngine::ViewMode::PathTraced
             : VulkanEngine::ViewMode::Rendered;
     }
@@ -316,12 +318,19 @@ void RenderSettingsView::drawPathTracerSettings() {
     ImGui::Text("Triangles: %d", stats.triangleCount);
     ImGui::Text("BVH Nodes: %d", stats.bvhNodeCount);
 
+    // Cubemap status
+    if (m_Engine->_pathTracer->hasCubemap()) {
+        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Cubemap: Connected");
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Cubemap: Not Connected");
+    }
+
     if (ImGui::Button("Reset Accumulation")) {
-        _engine->_pathTracer->resetAccumulation();
+        m_Engine->_pathTracer->resetAccumulation();
     }
     ImGui::SameLine();
     if (ImGui::Button("Rebuild BVH")) {
-        _engine->_pathTracer->buildBVH();
+        m_Engine->_pathTracer->buildBVH();
     }
 
     ImGui::Separator();
@@ -361,14 +370,6 @@ void RenderSettingsView::drawPathTracerSettings() {
 
     ImGui::Separator();
 
-    // Sky Settings
-    if (ImGui::CollapsingHeader("Sky")) {
-        ImGui::ColorEdit3("Sky Color", &settings.skyColor.x);
-        ImGui::SliderFloat("Sky Intensity", &settings.skyIntensity, 0.0f, 5.0f);
-    }
-
-    ImGui::Separator();
-
     // Quality Presets
     if (ImGui::CollapsingHeader("Quality Presets")) {
         if (ImGui::Button("Preview")) {
@@ -377,7 +378,7 @@ void RenderSettingsView::drawPathTracerSettings() {
             settings.maxAccumulatedFrames = 64;
             settings.enableNEE = false;
             settings.enableRussianRoulette = false;
-            _engine->_pathTracer->resetAccumulation();
+            m_Engine->_pathTracer->resetAccumulation();
         }
         ImGui::SameLine();
         if (ImGui::Button("Low")) {
@@ -386,7 +387,7 @@ void RenderSettingsView::drawPathTracerSettings() {
             settings.maxAccumulatedFrames = 256;
             settings.enableNEE = true;
             settings.enableRussianRoulette = true;
-            _engine->_pathTracer->resetAccumulation();
+            m_Engine->_pathTracer->resetAccumulation();
         }
         ImGui::SameLine();
         if (ImGui::Button("Medium")) {
@@ -395,7 +396,7 @@ void RenderSettingsView::drawPathTracerSettings() {
             settings.maxAccumulatedFrames = 512;
             settings.enableNEE = true;
             settings.enableRussianRoulette = true;
-            _engine->_pathTracer->resetAccumulation();
+            m_Engine->_pathTracer->resetAccumulation();
         }
         ImGui::SameLine();
         if (ImGui::Button("High")) {
@@ -404,7 +405,7 @@ void RenderSettingsView::drawPathTracerSettings() {
             settings.maxAccumulatedFrames = 1024;
             settings.enableNEE = true;
             settings.enableRussianRoulette = true;
-            _engine->_pathTracer->resetAccumulation();
+            m_Engine->_pathTracer->resetAccumulation();
         }
         ImGui::SameLine();
         if (ImGui::Button("Final")) {
@@ -413,37 +414,167 @@ void RenderSettingsView::drawPathTracerSettings() {
             settings.maxAccumulatedFrames = 4096;
             settings.enableNEE = true;
             settings.enableRussianRoulette = true;
-            _engine->_pathTracer->resetAccumulation();
+            m_Engine->_pathTracer->resetAccumulation();
         }
     }
 }
 
 void RenderSettingsView::drawEnvironmentSettings() {
+    // === Background Effect Selection ===
+    if (ImGui::CollapsingHeader("Background Effect", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!m_Engine->backgroundEffects.empty()) {
+            bool bgChanged = false;
+
+            for (int i = 0; i < static_cast<int>(m_Engine->backgroundEffects.size()); i++) {
+                bool isSelected = (m_Engine->currentBackgroundEffect == i);
+                if (ImGui::RadioButton(m_Engine->backgroundEffects[i].name, isSelected)) {
+                    m_Engine->currentBackgroundEffect = i;
+                    bgChanged = true;
+                }
+            }
+
+            ImGui::Spacing();
+
+            // Push constants for the current effect
+            auto& effect = m_Engine->backgroundEffects[m_Engine->currentBackgroundEffect];
+
+            if (strcmp(effect.name, "gradient") == 0) {
+                if (ImGui::ColorEdit4("Top Color", &effect.data.data1.x)) bgChanged = true;
+                if (ImGui::ColorEdit4("Bottom Color", &effect.data.data2.x)) bgChanged = true;
+            } else if (strcmp(effect.name, "sky") == 0) {
+                if (ImGui::ColorEdit4("Sky Color", &effect.data.data1.x)) bgChanged = true;
+            }
+
+            // Reset path tracer accumulation when background changes
+            if (bgChanged && m_Engine->_pathTracer) {
+                m_Engine->_pathTracer->resetAccumulation();
+            }
+        } else {
+            ImGui::TextDisabled("No background effects available");
+        }
+    }
+
+    ImGui::Separator();
+
+    // === Environment Map ===
     ImGui::Text("Environment / Skybox");
 
     // Check if environment map is available
-    if (!_engine->_environmentMap) {
+    if (!m_Engine->_environmentMap) {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Environment map not initialized");
         return;
     }
 
-    auto& settings = _engine->_environmentMap->settings;
-    auto& stats = _engine->_environmentMap->stats;
+    auto& settings = m_Engine->_environmentMap->settings;
+    auto& stats = m_Engine->_environmentMap->stats;
+
+    // Load Cubemap from files
+    if (ImGui::CollapsingHeader("Load Cubemap", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Helper lambda to load a cubemap from a folder and switch to skybox background
+        auto loadCubemapFromFolder = [&](const std::string& folderPath) {
+            const char* extensions[] = { ".jpg", ".png", ".bmp", ".tga" };
+            const char* faceNames[] = { "posx", "negx", "posy", "negy", "posz", "negz" };
+
+            for (const char* ext : extensions) {
+                std::string testPath = folderPath + "/" + faceNames[0] + ext;
+                if (std::filesystem::exists(testPath)) {
+                    std::string paths[6];
+                    for (int i = 0; i < 6; i++) {
+                        paths[i] = folderPath + "/" + faceNames[i] + ext;
+                    }
+
+                    vkDeviceWaitIdle(m_Engine->_device);
+
+                    if (m_Engine->_environmentMap->loadCubemapFaces(paths)) {
+                        if (m_Engine->_pathTracer) {
+                            m_Engine->_pathTracer->setEnvironmentCubemap(
+                                m_Engine->_environmentMap->getEnvironmentCubemap(),
+                                m_Engine->_environmentMap->getSampler());
+                            m_Engine->_pathTracer->resetAccumulation();
+                        }
+                        m_Engine->updateSkyboxBgDescriptor();
+
+                        // Auto-switch to skybox background
+                        for (int i = 0; i < static_cast<int>(m_Engine->backgroundEffects.size()); i++) {
+                            if (strcmp(m_Engine->backgroundEffects[i].name, "skybox") == 0) {
+                                m_Engine->currentBackgroundEffect = i;
+                                break;
+                            }
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+            }
+            return false;
+        };
+
+        // Scan assets/skyboxes/ for available cubemap folders
+        const std::string skyboxDir = "../../assets/skyboxes";
+        if (std::filesystem::exists(skyboxDir) && std::filesystem::is_directory(skyboxDir)) {
+            for (auto& entry : std::filesystem::directory_iterator(skyboxDir)) {
+                if (entry.is_directory()) {
+                    std::string name = entry.path().filename().string();
+                    bool isCurrent = (m_Engine->_environmentMap->stats.loadedPath == name);
+
+                    if (isCurrent) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+                    }
+
+                    if (ImGui::Button(name.c_str(), ImVec2(-1, 0))) {
+                        if (loadCubemapFromFolder(entry.path().string())) {
+                            m_Engine->_environmentMap->stats.loadedPath = name;
+                        }
+                    }
+
+                    if (isCurrent) {
+                        ImGui::PopStyleColor();
+                    }
+                }
+            }
+        } else {
+            ImGui::TextDisabled("No skyboxes folder found (assets/skyboxes/)");
+        }
+
+        ImGui::Separator();
+
+        // Custom path input
+        ImGui::Text("Custom folder:");
+        ImGui::InputText("##cubemappath", _cubemapPath, sizeof(_cubemapPath));
+        ImGui::SameLine();
+        if (ImGui::Button("Load")) {
+            if (loadCubemapFromFolder(_cubemapPath)) {
+                m_Engine->_environmentMap->stats.loadedPath = std::filesystem::path(_cubemapPath).filename().string();
+            }
+        }
+
+        // Show current cubemap status
+        if (!m_Engine->_environmentMap->stats.loadedPath.empty()) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Active: %s",
+                m_Engine->_environmentMap->stats.loadedPath.c_str());
+        }
+    }
+
+    ImGui::Separator();
 
     // Sky Colors
     if (ImGui::CollapsingHeader("Sky Colors", ImGuiTreeNodeFlags_DefaultOpen)) {
-        bool changed = false;
+        ImGui::ColorEdit3("Sky Top", &settings.skyColorTop.x);
+        ImGui::ColorEdit3("Horizon", &settings.skyColorHorizon.x);
+        ImGui::ColorEdit3("Ground", &settings.groundColor.x);
+        ImGui::SliderFloat("Sky Intensity", &settings.skyIntensity, 0.1f, 5.0f);
 
-        if (ImGui::ColorEdit3("Sky Top", &settings.skyColorTop.x)) changed = true;
-        if (ImGui::ColorEdit3("Horizon", &settings.skyColorHorizon.x)) changed = true;
-        if (ImGui::ColorEdit3("Ground", &settings.groundColor.x)) changed = true;
-        if (ImGui::SliderFloat("Sky Intensity", &settings.skyIntensity, 0.1f, 5.0f)) changed = true;
-
-        if (changed) {
-            // Regenerate procedural sky with new colors
-            if (ImGui::Button("Regenerate Sky")) {
-                _engine->_environmentMap->generateProceduralSky();
+        if (ImGui::Button("Apply Sky Colors")) {
+            m_Engine->_environmentMap->generateProceduralSky();
+            // Re-connect cubemap to path tracer and reset accumulation
+            if (m_Engine->_pathTracer) {
+                m_Engine->_pathTracer->setEnvironmentCubemap(
+                    m_Engine->_environmentMap->getEnvironmentCubemap(),
+                    m_Engine->_environmentMap->getSampler());
+                m_Engine->_pathTracer->resetAccumulation();
             }
+            // Update skybox background descriptor with new cubemap
+            m_Engine->updateSkyboxBgDescriptor();
         }
     }
 
@@ -477,12 +608,24 @@ void RenderSettingsView::drawEnvironmentSettings() {
 
     // Presets
     if (ImGui::CollapsingHeader("Sky Presets")) {
+        // Helper to apply preset and update path tracer + skybox background
+        auto applyPreset = [&]() {
+            m_Engine->_environmentMap->generateProceduralSky();
+            if (m_Engine->_pathTracer) {
+                m_Engine->_pathTracer->setEnvironmentCubemap(
+                    m_Engine->_environmentMap->getEnvironmentCubemap(),
+                    m_Engine->_environmentMap->getSampler());
+                m_Engine->_pathTracer->resetAccumulation();
+            }
+            m_Engine->updateSkyboxBgDescriptor();
+        };
+
         if (ImGui::Button("Clear Day")) {
             settings.skyColorTop = glm::vec3(0.4f, 0.6f, 1.0f);
             settings.skyColorHorizon = glm::vec3(0.7f, 0.8f, 0.95f);
             settings.groundColor = glm::vec3(0.4f, 0.35f, 0.3f);
             settings.skyIntensity = 1.0f;
-            _engine->_environmentMap->generateProceduralSky();
+            applyPreset();
         }
         ImGui::SameLine();
         if (ImGui::Button("Sunset")) {
@@ -490,7 +633,7 @@ void RenderSettingsView::drawEnvironmentSettings() {
             settings.skyColorHorizon = glm::vec3(1.0f, 0.5f, 0.2f);
             settings.groundColor = glm::vec3(0.15f, 0.1f, 0.1f);
             settings.skyIntensity = 1.2f;
-            _engine->_environmentMap->generateProceduralSky();
+            applyPreset();
         }
         ImGui::SameLine();
         if (ImGui::Button("Overcast")) {
@@ -498,7 +641,7 @@ void RenderSettingsView::drawEnvironmentSettings() {
             settings.skyColorHorizon = glm::vec3(0.6f, 0.62f, 0.65f);
             settings.groundColor = glm::vec3(0.35f, 0.3f, 0.28f);
             settings.skyIntensity = 0.8f;
-            _engine->_environmentMap->generateProceduralSky();
+            applyPreset();
         }
 
         if (ImGui::Button("Night")) {
@@ -506,7 +649,7 @@ void RenderSettingsView::drawEnvironmentSettings() {
             settings.skyColorHorizon = glm::vec3(0.05f, 0.06f, 0.1f);
             settings.groundColor = glm::vec3(0.02f, 0.02f, 0.02f);
             settings.skyIntensity = 0.3f;
-            _engine->_environmentMap->generateProceduralSky();
+            applyPreset();
         }
         ImGui::SameLine();
         if (ImGui::Button("Studio")) {
@@ -514,7 +657,7 @@ void RenderSettingsView::drawEnvironmentSettings() {
             settings.skyColorHorizon = glm::vec3(0.2f, 0.2f, 0.22f);
             settings.groundColor = glm::vec3(0.1f, 0.1f, 0.1f);
             settings.skyIntensity = 0.5f;
-            _engine->_environmentMap->generateProceduralSky();
+            applyPreset();
         }
     }
 }

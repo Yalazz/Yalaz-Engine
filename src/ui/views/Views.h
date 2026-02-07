@@ -33,6 +33,7 @@
 #include "PluginManagerView.h"
 #include "PhysicsDebugView.h"
 #include "CameraSequencerView.h"
+#include "RenderSettingsView.h"
 
 namespace Yalaz::UI {
 
@@ -65,6 +66,9 @@ inline void RegisterAllViewTypes() {
     vm.RegisterViewType<PluginManagerView>("PluginManagerView", "Plugins", "K", true);
     vm.RegisterViewType<PhysicsDebugView>("PhysicsDebugView", "Physics Debug", "P", true);
     vm.RegisterViewType<CameraSequencerView>("CameraSequencerView", "Camera Sequencer", "Q", true);
+
+    // Rendering Views
+    vm.RegisterViewType<RenderSettingsView>("RenderSettingsView", "Render Settings", "R", true);
 }
 
 // =============================================================================

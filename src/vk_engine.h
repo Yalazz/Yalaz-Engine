@@ -20,26 +20,12 @@
 #include "renderer/PostProcess.h"
 #include "renderer/PathTracer.h"
 #include "renderer/EnvironmentMap.h"
+#include "geometry/PrimitiveType.h"
 
 struct MeshAsset;
 namespace fastgltf {
     struct Mesh;
 }
-
-// TextureID, TextureCache, DeletionQueue are now defined in vk_types.h
-
-struct PathTracePushConstants {
-    glm::mat4 invView;          // 64 bytes
-    glm::mat4 invProj;          // 64 bytes
-    glm::vec4 cameraPos;        // 16 bytes (xyz = pos, w = unused) - aligned for GPU
-    glm::vec4 sunlightDir;      // 16 bytes (xyz = direction, w = intensity)
-    glm::vec4 sunlightColor;    // 16 bytes
-    glm::vec4 ambientColor;     // 16 bytes (rgb = color, a = intensity)
-    uint32_t frameIndex;        // 4 bytes
-    uint32_t padding[3];        // 12 bytes for alignment
-};  // Total: 208 bytes
-
-
 
 
 struct ComputePushConstants {
@@ -54,74 +40,6 @@ struct ComputeEffect {
     VkPipelineLayout layout;      // Pipeline layout
     ComputePushConstants data;    // Push Constants verisi
 };
-
-// RenderObject is now defined in vk_types.h
-
-//< meshnode
-
-//struct StaticMeshData {
-//    GPUMeshBuffers mesh;
-//    glm::vec3 position;
-//    glm::vec3 scale;
-//};
-//struct StaticMeshData {
-//    GPUMeshBuffers mesh;
-//    glm::vec3 position{ 0.0f };
-//    glm::vec3 rotation{ 0.0f }; // Euler açıları (radyan)
-//    glm::vec3 scale{ 1.0f };
-//
-//   /* glm::mat4 get_transform() const {
-//        glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
-//        t = glm::rotate(t, rotation.x, glm::vec3(1, 0, 0));
-//        t = glm::rotate(t, rotation.y, glm::vec3(0, 1, 0));
-//        t = glm::rotate(t, rotation.z, glm::vec3(0, 0, 1));
-//        t = glm::scale(t, scale);
-//        return t;
-//    }*/
-//};
-// === HEADER ===
-//struct StaticMeshData {
-//    GPUMeshBuffers mesh;
-//    glm::vec3 position = glm::vec3(0.0f);
-//    glm::vec3 rotation = glm::vec3(0.0f);
-//    glm::vec3 scale = glm::vec3(1.0f);
-//    glm::vec4 color = glm::vec4(1.0f);
-//
-//    glm::mat4 get_transform() const {
-//        glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
-//        t = glm::rotate(t, rotation.x, glm::vec3(1, 0, 0));
-//        t = glm::rotate(t, rotation.y, glm::vec3(0, 1, 0));
-//        t = glm::rotate(t, rotation.z, glm::vec3(0, 0, 1));
-//        t = glm::scale(t, scale);
-//        return t;
-//    }
-//};
-//struct StaticMeshData {
-//    GPUMeshBuffers mesh;
-//    glm::vec3 position = glm::vec3(0.0f);
-//    glm::vec3 rotation = glm::vec3(0.0f);
-//    glm::vec3 scale = glm::vec3(1.0f);
-//    glm::vec4 color = glm::vec4(1.0f);
-//    glm::vec4 faceColors[6] = { // Front, Right, Back, Left, Top, Bottom
-//        glm::vec4(1, 0, 0, 1),
-//        glm::vec4(0, 1, 0, 1),
-//        glm::vec4(0, 0, 1, 1),
-//        glm::vec4(1, 1, 0, 1),
-//        glm::vec4(1, 0, 1, 1),
-//        glm::vec4(0, 1, 1, 1)
-//    };
-//
-//    glm::mat4 get_transform() const {
-//        glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
-//        t = glm::rotate(t, rotation.x, glm::vec3(1, 0, 0));
-//        t = glm::rotate(t, rotation.y, glm::vec3(0, 1, 0));
-//        t = glm::rotate(t, rotation.z, glm::vec3(0, 0, 1));
-//        t = glm::scale(t, scale);
-//        return t;
-//    }
-//};
-
-
 
 struct FrameData {
     VkSemaphore _swapchainSemaphore, _renderSemaphore;
@@ -141,9 +59,6 @@ struct FrameData {
 constexpr unsigned int FRAME_OVERLAP = 3;  // Must match swapchain image count for proper semaphore handling
 
 
-
-
-
 struct MeshNode : public Node {
 
     std::shared_ptr<MeshAsset> mesh;
@@ -152,16 +67,12 @@ struct MeshNode : public Node {
 };
 
 
-
 // vk_engine.h
 struct MeshPushConstants {
     glm::mat4 worldMatrix;
     VkDeviceAddress vertexBuffer;
 };
 
-
-
-// DrawContext is now defined in vk_types.h
 
 struct EngineStats {
     float frametime;
@@ -176,136 +87,6 @@ struct EngineStats {
 
 };
 
-//struct GLTFMetallic_Roughness {
-//    MaterialPipeline opaquePipeline;
-//    MaterialPipeline transparentPipeline;
-//
-//    VkDescriptorSetLayout materialLayout;
-//
-//    struct MaterialConstants {
-//        glm::vec4 colorFactors;
-//        glm::vec4 metal_rough_factors;
-//        //padding, we need it anyway for uniform buffers
-//        glm::vec4 extra[14];
-//    };
-//
-//    struct MaterialResources {
-//        AllocatedImage colorImage;
-//        VkSampler colorSampler;
-//        AllocatedImage metalRoughImage;
-//        VkSampler metalRoughSampler;
-//        VkBuffer dataBuffer;
-//        uint32_t dataBufferOffset;
-//    };
-//
-//    DescriptorWriter writer;
-//
-//    void build_pipelines(VulkanEngine* engine);
-//    void clear_resources(VkDevice device);
-//
-//   MaterialInstance write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
-//};
-enum class PrimitiveType {
-    Cube,
-    Sphere,
-    Capsule,
-    Cylinder,
-    Plane,
-    Cone,
-    Torus,
-    Triangle
-};
-
-//struct StaticMeshData {
-//    GPUMeshBuffers mesh;
-//    glm::vec3 position = glm::vec3(0.0f);
-//    glm::vec3 rotation = glm::vec3(0.0f);
-//    glm::vec3 scale = glm::vec3(1.0f);
-//    glm::vec4 faceColors[6] = {
-//        glm::vec4(1, 0, 0, 1), // front
-//        glm::vec4(0, 1, 0, 1), // right
-//        glm::vec4(0, 0, 1, 1), // back
-//        glm::vec4(1, 1, 0, 1), // left
-//        glm::vec4(1, 0, 1, 1), // top
-//        glm::vec4(0, 1, 1, 1), // bottom
-//    };
-//    PrimitiveType type = PrimitiveType::Cube;
-//
-//
-//
-//    glm::mat4 get_transform() const {
-//        glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
-//        t = glm::rotate(t, rotation.x, glm::vec3(1, 0, 0));
-//        t = glm::rotate(t, rotation.y, glm::vec3(0, 1, 0));
-//        t = glm::rotate(t, rotation.z, glm::vec3(0, 0, 1));
-//        t = glm::scale(t, scale);
-//        return t;
-//    }
-//};
-
-//struct StaticMeshData {
-//    GPUMeshBuffers mesh;
-//    glm::vec3 position = glm::vec3(0.0f);
-//    glm::vec3 rotation = glm::vec3(0.0f);
-//    glm::vec3 scale = glm::vec3(1.0f);
-//    glm::vec4 faceColors[6] = {
-//        glm::vec4(1, 0, 0, 1),
-//        glm::vec4(0, 1, 0, 1),
-//        glm::vec4(0, 0, 1, 1),
-//        glm::vec4(1, 1, 0, 1),
-//        glm::vec4(1, 0, 1, 1),
-//        glm::vec4(0, 1, 1, 1),
-//    };
-//
-//    PrimitiveType type = PrimitiveType::Cube;
-//
-//    // 🔽 Bunları EKLE
-//    ShaderOnlyMaterial materialType = ShaderOnlyMaterial::DEFAULT;
-//    MaterialPass passType = MaterialPass::MainColor;
-//
-//    glm::mat4 get_transform() const {
-//        glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
-//        t = glm::rotate(t, rotation.x, glm::vec3(1, 0, 0));
-//        t = glm::rotate(t, rotation.y, glm::vec3(0, 1, 0));
-//        t = glm::rotate(t, rotation.z, glm::vec3(0, 0, 1));
-//        t = glm::scale(t, scale);
-//        return t;
-//    }
-//};
-
-
-//struct StaticMeshData {
-//    GPUMeshBuffers mesh;
-//    glm::vec3 position = glm::vec3(0.0f);
-//    glm::vec3 rotation = glm::vec3(0.0f);
-//    glm::vec3 scale = glm::vec3(1.0f);
-//
-//    // Artık kullanılmıyor (shader tarafında desteklenmiyor)
-//    glm::vec4 faceColors[6] = {
-//        glm::vec4(1, 0, 0, 1),
-//        glm::vec4(0, 1, 0, 1),
-//        glm::vec4(0, 0, 1, 1),
-//        glm::vec4(1, 1, 0, 1),
-//        glm::vec4(1, 0, 1, 1),
-//        glm::vec4(0, 1, 1, 1),
-//    };
-//
-//    PrimitiveType type = PrimitiveType::Cube;
-//
-//    ShaderOnlyMaterial materialType = ShaderOnlyMaterial::DEFAULT;
-//    MaterialPass passType = MaterialPass::MainColor;
-//
-//    glm::vec4 color = glm::vec4(1.0f); // ✅ Dinamik baseColor gönderimi için eklendi
-//
-//    glm::mat4 get_transform() const {
-//        glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
-//        t = glm::rotate(t, rotation.x, glm::vec3(1, 0, 0));
-//        t = glm::rotate(t, rotation.y, glm::vec3(0, 1, 0));
-//        t = glm::rotate(t, rotation.z, glm::vec3(0, 0, 1));
-//        t = glm::scale(t, scale);
-//        return t;
-//    }
-//};
 // Push constants for primitive rendering - MUST match shader
 // Updated to support PBR material properties
 struct PrimitivePushConstants {
@@ -386,9 +167,6 @@ struct StaticMeshData {
         return pc;
     }
 };
-
-
-
 
 
 // =============================================================================
@@ -514,21 +292,6 @@ struct GLTFMetallic_Roughness {
 
     VkDescriptorSetLayout materialLayout;
 
-    //struct MaterialConstants {
-    //    glm::vec4 colorFactors;
-    //    glm::vec4 metal_rough_factors;
-    //    //padding, we need it anyway for uniform buffers
-    //    glm::vec4 extra[14];
-    //};
-    //struct MaterialConstants {
-    //    glm::vec4 colorFactors;
-    //    glm::vec4 metal_rough_factors;
-    //    uint32_t colorTexID;
-    //    uint32_t metalRoughTexID;
-    //    uint32_t pad1;
-    //    uint32_t pad2;
-    //    glm::vec4 extra[13];
-    //};
     struct MaterialConstants {
         glm::vec4 colorFactors;          // baseColor RGBA
         glm::vec4 metal_rough_factors;   // x = metallic, y = roughness, z,w = boş
@@ -538,7 +301,6 @@ struct GLTFMetallic_Roughness {
         uint32_t pad2;
         glm::vec4 extra[13];             // Genişletilebilir alan (parallax, emissive, occlusion vs için boş yer)
     };
-
 
 
     struct MaterialResources {
@@ -667,11 +429,6 @@ public:
     MeshNode* raycast_scene_objects(const glm::vec3& rayOrigin, const glm::vec3& rayDir);
     // VulkanEngine sınıfına özel:
     std::vector<RenderObject> pickableRenderObjects;
-    void init_pathtrace_present_pipeline();
-    // Path Trace görüntüleme için pipeline ve layout
-    VkPipelineLayout _pathTracePresentPipelineLayout = VK_NULL_HANDLE;
-    VkPipeline _pathTracePresentPipeline = VK_NULL_HANDLE;
-    void draw_present_pathtraced(VkCommandBuffer cmd);
     void draw_background_effect(VkCommandBuffer cmd);
     VkDescriptorSet _drawImageDescriptorSet;
     void allocate_draw_image_descriptor_set();
@@ -700,13 +457,8 @@ public:
     VkPipelineLayout _pointLightVisPipelineLayout = VK_NULL_HANDLE;
 
 
-
-
-
     VkPipeline _outlinePipeline = VK_NULL_HANDLE;
     VkPipelineLayout _outlinePipelineLayout = VK_NULL_HANDLE;
-	//void draw_shader_only_static_shapes(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor);
-    
     void draw_shader_only_static_shapes(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor);
     void init_default_meshes();
     ViewMode _currentViewMode = ViewMode::Rendered;  // Rendered = full PBR with shadows
@@ -764,9 +516,6 @@ public:
     
     void init_plane_pipeline();
     void init_2d_pipeline(bool enableBackfaceCulling);
-    //void draw_outline(VkCommandBuffer cmd, const RenderObject& obj);
-    //void init_grid_pipeline();
-    //void draw_grid(VkCommandBuffer cmd);
     VkShaderModule load_shader_module(const char* filePath);
     VkPipeline gridPipeline = VK_NULL_HANDLE;
     std::unordered_map<PrimitiveType, GPUMeshBuffers> defaultMeshes;
@@ -776,7 +525,6 @@ public:
     void sync_point_light_billboards();
     
     
-
     VkPipeline _2dPipeline_CullOn = VK_NULL_HANDLE;
     VkPipeline _2dPipeline_CullOff = VK_NULL_HANDLE;
 
@@ -802,13 +550,7 @@ public:
     bool resize_requested{ false };
     bool freeze_rendering{ false };
     float renderScale = 1.f;
-    /*VkExtent2D _windowExtent{ 1700 , 900 };*/
-    /*VkExtent2D _windowExtent{ 2560 , 1440 };*/
-    /*VkExtent2D _windowExtent{ 1920 , 1080 };*/
-    /*VkExtent2D _windowExtent{ 1920, 1080 };*/
     VkExtent2D _windowExtent{ 1700, 900 };
-    //VkPipelineLayout outlinePipelineLayout;
-    //VkPipeline outlinePipeline;
     VkDescriptorSet globalDescriptor = VK_NULL_HANDLE;
 
     // Sınıfın public veya protected bölümüne ekleyin:
@@ -829,9 +571,6 @@ public:
     AllocatedBuffer _defaultGLTFMaterialData;
 
     FrameData _frames[FRAME_OVERLAP];
-   /* FrameData& 
-   
-   () { return _frames[_frameNumber % FRAME_OVERLAP]; };*/
 
     FrameData& get_current_frame();
     FrameData& get_last_frame();
@@ -884,7 +623,6 @@ public:
     GLTFCamera* getCurrentGLTFCamera();
     std::vector<std::pair<std::string, GLTFCamera*>> getAllGLTFCameras();
 
-    /*DescriptorAllocatorGrowable globalDescriptorAllocator;*/
     DescriptorAllocator globalDescriptorAllocator;
 
     VkPipeline _2dPipelineGrid = VK_NULL_HANDLE;
@@ -892,10 +630,15 @@ public:
     VkPipeline _gradientPipeline;
     VkPipelineLayout _gradientPipelineLayout;
 
+    // Skybox background effect (needs cubemap descriptor)
+    VkPipelineLayout _skyboxBgPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout _skyboxBgDescriptorLayout = VK_NULL_HANDLE;
+    VkDescriptorSet _skyboxBgDescriptorSet = VK_NULL_HANDLE;
+    void updateSkyboxBgDescriptor();
+
     std::vector<VkFramebuffer> _framebuffers;
     std::vector<VkImage> _swapchainImages;
     std::vector<VkImageView> _swapchainImageViews;
-
 
 
     VkDescriptorSet _drawImageDescriptors;
@@ -906,7 +649,6 @@ public:
     VkFence _immFence;
     VkCommandBuffer _immCommandBuffer;
     VkCommandPool _immCommandPool;
-
 
 
     AllocatedImage _drawImage;
@@ -1107,11 +849,6 @@ public:
     AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
     
 
-
-    VkDescriptorSet _pathTraceDescriptorSet = VK_NULL_HANDLE;
-    VkPipeline _pathTracePipeline = VK_NULL_HANDLE;
-    VkPipelineLayout _pathTracePipelineLayout = VK_NULL_HANDLE;
-    // VulkanEngine class tanımına ekle
     bool lightMeshesAdded = false;
     void init_emissive_pipeline();
 
@@ -1126,14 +863,10 @@ public:
     void draw_material_preview(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor, const std::vector<uint32_t>& opaque_draws);
     void draw_rendered(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor, VkViewport viewport, VkRect2D scissor, const std::vector<uint32_t>& opaque_draws);
 
-    void draw_rendered_pathtraced(VkCommandBuffer cmd);
-	void init_pathtrace_pipeline();
-
     static VulkanEngine& Get();
     void destroy_buffer(const AllocatedBuffer& buffer);
     void draw_scene_light_imgui();
     void init_grid_pipeline();
-    /*void draw_grid(VkCommandBuffer cmd);*/
     void draw_grid(VkCommandBuffer cmd, VkDescriptorSet globalDescriptor);
     GPUMeshBuffers gridMesh;
 	void init_outline_wireframe_pipeline();
@@ -1165,7 +898,6 @@ public:
 
     void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
 
-    //void calculate_bounding_box(const std::shared_ptr<Node>& node, glm::vec3& minBounds, glm::vec3& maxBounds);
     void render_nodes();
 
     void draw_geometry(VkCommandBuffer cmd);
@@ -1173,13 +905,10 @@ public:
 
     void draw_background(VkCommandBuffer cmd);
 
-    //void draw_geometry(VkCommandBuffer cmd);  // **BU UCGENI EKLEMEYE YARIYORDU UNUTMA**
-
     void create_material_constant_buffer(const GLTFMetallic_Roughness::MaterialConstants& data);
     void run();
     
     void update_scene();
-    // void init_triangle_pipeline();
 
 private:
 private:

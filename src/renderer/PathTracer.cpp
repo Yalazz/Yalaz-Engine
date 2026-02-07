@@ -2,9 +2,10 @@
 #include "vk_engine.h"
 #include "vk_initializers.h"
 #include "vk_pipelines.h"
-#include "geometry/PrimitiveGenerator.h"
 #include "vk_loader.h"
+#include "geometry/PrimitiveGenerator.h"
 #include <algorithm>
+#include <functional>
 #include <fmt/core.h>
 
 namespace Yalaz::Renderer {
@@ -28,11 +29,8 @@ void PathTracer::cleanup() {
 
     _imagesInitialized = false;
     _imageExtent = {0, 0};
+    _drawImageView = VK_NULL_HANDLE;
 
-    if (_outputImage.image != VK_NULL_HANDLE) {
-        _engine->destroy_image(_outputImage);
-        _outputImage = {};
-    }
     if (_accumulationImage.image != VK_NULL_HANDLE) {
         _engine->destroy_image(_accumulationImage);
         _accumulationImage = {};
@@ -83,11 +81,7 @@ void PathTracer::ensureImagesReady() {
     // Wait for device to be idle before recreating
     vkDeviceWaitIdle(_engine->_device);
 
-    // Cleanup old images if they exist
-    if (_outputImage.image != VK_NULL_HANDLE) {
-        _engine->destroy_image(_outputImage);
-        _outputImage = {};
-    }
+    // Cleanup old accumulation image if it exists
     if (_accumulationImage.image != VK_NULL_HANDLE) {
         _engine->destroy_image(_accumulationImage);
         _accumulationImage = {};
@@ -97,8 +91,10 @@ void PathTracer::ensureImagesReady() {
     _imageExtent = currentExtent;
     _imagesInitialized = true;
 
-    // Rebuild BVH and update descriptors with new images
-    buildBVH();
+    // Update descriptors with new images (BVH will be built on demand)
+    if (_triangleBuffer.buffer != VK_NULL_HANDLE) {
+        updateDescriptors();
+    }
 
     // Reset accumulation since images changed
     resetAccumulation();
@@ -113,14 +109,7 @@ void PathTracer::createImages() {
         1
     };
 
-    // Output image (RGBA32F for HDR accumulation)
-    _outputImage = _engine->create_image(
-        extent,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-    );
-
-    // Accumulation buffer
+    // Accumulation buffer (RGBA32F for high precision temporal averaging)
     _accumulationImage = _engine->create_image(
         extent,
         VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -130,7 +119,7 @@ void PathTracer::createImages() {
 
 void PathTracer::createPipeline() {
     // Descriptor layout
-    VkDescriptorSetLayoutBinding bindings[5] = {};
+    VkDescriptorSetLayoutBinding bindings[6] = {};
 
     // Output image
     bindings[0].binding = 0;
@@ -162,9 +151,15 @@ void PathTracer::createPipeline() {
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    // Environment cubemap
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 5;
+    layoutInfo.bindingCount = 6;
     layoutInfo.pBindings = bindings;
 
     VK_CHECK(vkCreateDescriptorSetLayout(_engine->_device, &layoutInfo, nullptr, &_descriptorLayout));
@@ -186,7 +181,7 @@ void PathTracer::createPipeline() {
     VK_CHECK(vkCreatePipelineLayout(_engine->_device, &pipelineLayoutInfo, nullptr, &_pipelineLayout));
 
     // Load compute shader
-    VkShaderModule shader = _engine->load_shader_module("shaders/pathtrace_bvh.comp.spv");
+    VkShaderModule shader = _engine->load_shader_module("../../shaders/pathtrace_bvh.comp.spv");
 
     VkComputePipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -258,7 +253,8 @@ void PathTracer::buildBVH() {
 
         // Generate CPU-side mesh data for this primitive type
         auto& generator = Yalaz::Geometry::PrimitiveGenerator::Get();
-        Yalaz::Geometry::MeshData meshData = generator.GenerateData(shape.type);
+        Yalaz::Geometry::MeshData meshData = generator.GenerateData(
+            static_cast<Yalaz::Geometry::PrimitiveType>(shape.type));
 
         // Extract triangles from mesh
         for (size_t i = 0; i + 2 < meshData.indices.size(); i += 3) {
@@ -293,31 +289,73 @@ void PathTracer::buildBVH() {
             if (auto meshNode = dynamic_cast<MeshNode*>(node.get())) {
                 auto meshAsset = meshNode->mesh;
                 if (meshAsset && meshAsset->hasCpuData) {
-                    // Create material
-                    uint32_t matIndex = static_cast<uint32_t>(_materials.size());
-                    GPUPathTraceMaterial mat{};
-                    mat.albedo = glm::vec3(0.8f);  // Default, could extract from GLTF material
-                    mat.metallic = 0.0f;
-                    mat.roughness = 0.5f;
-                    mat.emission = glm::vec3(0.0f);
-                    _materials.push_back(mat);
+                    // Extract per-surface with real GLTF materials
+                    for (auto& surface : meshAsset->surfaces) {
+                        // Create material from GLTF surface material data
+                        uint32_t matIndex = static_cast<uint32_t>(_materials.size());
+                        GPUPathTraceMaterial ptMat{};
+                        ptMat.albedo = glm::vec3(0.8f);
+                        ptMat.metallic = 0.0f;
+                        ptMat.roughness = 0.5f;
+                        ptMat.emission = glm::vec3(0.0f);
+                        ptMat.ior = 1.5f;
+                        ptMat.transmission = 0.0f;
+                        ptMat.albedoTexture = UINT32_MAX;
+                        ptMat.normalTexture = UINT32_MAX;
 
-                    // Extract triangles
-                    for (size_t i = 0; i + 2 < meshAsset->cpuIndices.size(); i += 3) {
-                        uint32_t i0 = meshAsset->cpuIndices[i];
-                        uint32_t i1 = meshAsset->cpuIndices[i + 1];
-                        uint32_t i2 = meshAsset->cpuIndices[i + 2];
+                        // Extract material constants from materialDataBuffer
+                        if (surface.material && scene->materialDataBuffer.buffer != VK_NULL_HANDLE &&
+                            scene->materialDataBuffer.info.pMappedData != nullptr) {
+                            auto* constants = reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+                                reinterpret_cast<uint8_t*>(scene->materialDataBuffer.info.pMappedData) +
+                                surface.material->bufferOffset);
+                            ptMat.albedo = glm::vec3(constants->colorFactors);
+                            ptMat.metallic = constants->metal_rough_factors.x;
+                            ptMat.roughness = constants->metal_rough_factors.y;
+                        }
 
-                        if (i0 < meshAsset->cpuVertices.size() &&
-                            i1 < meshAsset->cpuVertices.size() &&
-                            i2 < meshAsset->cpuVertices.size()) {
-                            addTriangle(
-                                meshAsset->cpuVertices[i0].position,
-                                meshAsset->cpuVertices[i1].position,
-                                meshAsset->cpuVertices[i2].position,
-                                nodeTransform,
-                                matIndex
-                            );
+                        // Compute average vertex color for this surface (many GLTF models
+                        // use vertex colors instead of base color textures)
+                        glm::vec3 avgColor(0.0f);
+                        int colorSamples = 0;
+                        uint32_t startIdx = surface.startIndex;
+                        uint32_t endIdx = startIdx + surface.count;
+                        for (uint32_t i = startIdx; i < endIdx && i < meshAsset->cpuIndices.size(); i++) {
+                            uint32_t vi = meshAsset->cpuIndices[i];
+                            if (vi < meshAsset->cpuVertices.size()) {
+                                avgColor += glm::vec3(meshAsset->cpuVertices[vi].color);
+                                colorSamples++;
+                            }
+                        }
+                        if (colorSamples > 0) {
+                            avgColor /= static_cast<float>(colorSamples);
+                            // Only use vertex color if it's not all white (default)
+                            if (avgColor.x < 0.99f || avgColor.y < 0.99f || avgColor.z < 0.99f) {
+                                ptMat.albedo = avgColor * glm::vec3(ptMat.albedo);
+                            }
+                        }
+
+                        _materials.push_back(ptMat);
+
+                        // Extract triangles for this surface
+                        for (uint32_t i = startIdx; i + 2 < endIdx; i += 3) {
+                            if (i + 2 >= meshAsset->cpuIndices.size()) break;
+
+                            uint32_t i0 = meshAsset->cpuIndices[i];
+                            uint32_t i1 = meshAsset->cpuIndices[i + 1];
+                            uint32_t i2 = meshAsset->cpuIndices[i + 2];
+
+                            if (i0 < meshAsset->cpuVertices.size() &&
+                                i1 < meshAsset->cpuVertices.size() &&
+                                i2 < meshAsset->cpuVertices.size()) {
+                                addTriangle(
+                                    meshAsset->cpuVertices[i0].position,
+                                    meshAsset->cpuVertices[i1].position,
+                                    meshAsset->cpuVertices[i2].position,
+                                    nodeTransform,
+                                    matIndex
+                                );
+                            }
                         }
                     }
                 }
@@ -335,25 +373,20 @@ void PathTracer::buildBVH() {
         }
     }
 
-    // ==========================================================================
-    // Fallback: create ground plane if no geometry found
-    // ==========================================================================
     if (_triangles.empty()) {
-        fmt::print("[PathTracer] No scene geometry found, creating test scene\n");
-
-        // Ground plane
-        GPUTriangle t1{}, t2{};
-        t1.v0 = glm::vec3(-10, 0, -10); t1.v1 = glm::vec3(10, 0, -10); t1.v2 = glm::vec3(10, 0, 10);
-        t1.materialIndex = 0;
-        t2.v0 = glm::vec3(-10, 0, -10); t2.v1 = glm::vec3(10, 0, 10); t2.v2 = glm::vec3(-10, 0, 10);
-        t2.materialIndex = 0;
-        _triangles.push_back(t1);
-        _triangles.push_back(t2);
+        fmt::print("[PathTracer] No scene geometry found\n");
     }
 
     stats.triangleCount = static_cast<uint32_t>(_triangles.size());
     fmt::print("[PathTracer] Extracted {} triangles, {} materials\n",
         stats.triangleCount, _materials.size());
+
+    // Debug: print material colors
+    for (size_t i = 0; i < _materials.size(); i++) {
+        auto& m = _materials[i];
+        fmt::print("[PathTracer]   Mat[{}]: albedo=({:.3f},{:.3f},{:.3f}) metal={:.2f} rough={:.2f}\n",
+            i, m.albedo.x, m.albedo.y, m.albedo.z, m.metallic, m.roughness);
+    }
 
     // Build BVH
     _bvhNodes.clear();
@@ -380,10 +413,28 @@ void PathTracer::buildBVH() {
     stats.bvhNodeCount = static_cast<uint32_t>(_bvhNodes.size());
     fmt::print("[PathTracer] BVH built with {} nodes\n", stats.bvhNodeCount);
 
-    // Upload to GPU
+    // Wait for GPU to finish all commands before touching buffers
+    vkDeviceWaitIdle(_engine->_device);
+
+    // Upload to GPU - save old buffers, create new ones, then destroy old
+    AllocatedBuffer oldTriBuf = _triangleBuffer;
+    AllocatedBuffer oldBvhBuf = _bvhBuffer;
+    AllocatedBuffer oldMatBuf = _materialBuffer;
+    _triangleBuffer = {};
+    _bvhBuffer = {};
+    _materialBuffer = {};
+
     createBuffers();
     uploadSceneData();
     updateDescriptors();
+
+    // Now safe to destroy old buffers (GPU is idle, descriptor points to new ones)
+    if (oldTriBuf.buffer != VK_NULL_HANDLE)
+        _engine->destroy_buffer(oldTriBuf);
+    if (oldBvhBuf.buffer != VK_NULL_HANDLE)
+        _engine->destroy_buffer(oldBvhBuf);
+    if (oldMatBuf.buffer != VK_NULL_HANDLE)
+        _engine->destroy_buffer(oldMatBuf);
 }
 
 void PathTracer::buildBVHRecursive(uint32_t nodeIdx, uint32_t start, uint32_t count) {
@@ -404,11 +455,10 @@ void PathTracer::buildBVHRecursive(uint32_t nodeIdx, uint32_t start, uint32_t co
 
     float splitPos = _bvhNodes[nodeIdx].boundsMin[bestAxis] + extent[bestAxis] * 0.5f;
 
-    // Partition primitives based on centroid
+    // Partition primitives based on centroid (spatial median)
     uint32_t i = start;
     uint32_t j = start + count - 1;
     while (i <= j && j < _primitiveIndices.size()) {
-        // Compute centroid of triangle
         uint32_t triIdx = _primitiveIndices[i];
         const GPUTriangle& tri = _triangles[triIdx];
         glm::vec3 centroid = (tri.v0 + tri.v1 + tri.v2) / 3.0f;
@@ -424,10 +474,15 @@ void PathTracer::buildBVHRecursive(uint32_t nodeIdx, uint32_t start, uint32_t co
 
     uint32_t leftCount = i - start;
     if (leftCount == 0 || leftCount == count) {
-        // Can't split, make leaf
-        _bvhNodes[nodeIdx].leftFirst = start;
-        _bvhNodes[nodeIdx].primCount = count;
-        return;
+        // Spatial median failed - fall back to object median (sort and split in half)
+        int axis = bestAxis;
+        std::sort(_primitiveIndices.begin() + start, _primitiveIndices.begin() + start + count,
+            [&](uint32_t a, uint32_t b) {
+                glm::vec3 ca = (_triangles[a].v0 + _triangles[a].v1 + _triangles[a].v2) / 3.0f;
+                glm::vec3 cb = (_triangles[b].v0 + _triangles[b].v1 + _triangles[b].v2) / 3.0f;
+                return ca[axis] < cb[axis];
+            });
+        leftCount = count / 2;
     }
 
     // Create child nodes
@@ -486,19 +541,8 @@ float PathTracer::evaluateSAH(uint32_t nodeIdx, int axis, float pos) {
 }
 
 void PathTracer::createBuffers() {
-    // Clean up old buffers if they exist
-    if (_triangleBuffer.buffer != VK_NULL_HANDLE) {
-        _engine->destroy_buffer(_triangleBuffer);
-        _triangleBuffer = {};
-    }
-    if (_bvhBuffer.buffer != VK_NULL_HANDLE) {
-        _engine->destroy_buffer(_bvhBuffer);
-        _bvhBuffer = {};
-    }
-    if (_materialBuffer.buffer != VK_NULL_HANDLE) {
-        _engine->destroy_buffer(_materialBuffer);
-        _materialBuffer = {};
-    }
+    // Note: old buffers should be cleared by caller (buildBVH) before calling this.
+    // They are destroyed AFTER updateDescriptors() to avoid invalid descriptor references.
 
     // Triangle buffer
     size_t triangleSize = std::max(size_t(1), _triangles.size()) * sizeof(GPUTriangle);
@@ -610,8 +654,9 @@ void PathTracer::uploadSceneData() {
 }
 
 void PathTracer::updateDescriptors() {
+    // Binding 0: engine's draw image (path tracer writes geometry pixels directly)
     VkDescriptorImageInfo outputInfo{};
-    outputInfo.imageView = _outputImage.imageView;
+    outputInfo.imageView = _drawImageView;
     outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkDescriptorImageInfo accumInfo{};
@@ -633,7 +678,8 @@ void PathTracer::updateDescriptors() {
     materialInfo.offset = 0;
     materialInfo.range = VK_WHOLE_SIZE;
 
-    VkWriteDescriptorSet writes[5] = {};
+    uint32_t writeCount = 5;
+    VkWriteDescriptorSet writes[6] = {};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = _descriptorSet;
@@ -670,15 +716,73 @@ void PathTracer::updateDescriptors() {
     writes[4].descriptorCount = 1;
     writes[4].pBufferInfo = &materialInfo;
 
-    vkUpdateDescriptorSets(_engine->_device, 5, writes, 0, nullptr);
+    // Environment cubemap (binding 5)
+    VkDescriptorImageInfo cubemapInfo{};
+    if (_envCubemapView != VK_NULL_HANDLE && _envCubemapSampler != VK_NULL_HANDLE) {
+        cubemapInfo.imageView = _envCubemapView;
+        cubemapInfo.sampler = _envCubemapSampler;
+        cubemapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[5].dstSet = _descriptorSet;
+        writes[5].dstBinding = 5;
+        writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[5].descriptorCount = 1;
+        writes[5].pImageInfo = &cubemapInfo;
+
+        writeCount = 6;
+    }
+
+    vkUpdateDescriptorSets(_engine->_device, writeCount, writes, 0, nullptr);
+}
+
+void PathTracer::setDrawImage(VkImageView drawImageView) {
+    if (_drawImageView != drawImageView) {
+        _drawImageView = drawImageView;
+        if (_imagesInitialized && _descriptorSet != VK_NULL_HANDLE) {
+            updateDescriptors();
+        }
+    }
+}
+
+void PathTracer::notifySceneChanged() {
+    _needsBVHRebuild = true;
+}
+
+void PathTracer::processPendingRebuild() {
+    if (_needsBVHRebuild) {
+        _needsBVHRebuild = false;
+        buildBVH();
+    }
+}
+
+void PathTracer::setEnvironmentCubemap(VkImageView cubemapView, VkSampler cubemapSampler) {
+    _envCubemapView = cubemapView;
+    _envCubemapSampler = cubemapSampler;
+
+    // Re-update descriptors if images are already initialized
+    if (_imagesInitialized && _descriptorSet != VK_NULL_HANDLE) {
+        updateDescriptors();
+        resetAccumulation();
+    }
 }
 
 void PathTracer::render(VkCommandBuffer cmd) {
-    // Ensure images are created (lazy initialization)
+    // Ensure accumulation image is created (lazy initialization)
     ensureImagesReady();
 
-    // Skip if images aren't ready yet
-    if (!_imagesInitialized || _outputImage.image == VK_NULL_HANDLE) {
+    // Skip if images aren't ready or draw image not set
+    if (!_imagesInitialized || _drawImageView == VK_NULL_HANDLE) {
+        return;
+    }
+
+    // Skip rendering if BVH rebuild is pending (will be done outside command recording)
+    if (_needsBVHRebuild) {
+        return;
+    }
+
+    // Skip if no geometry loaded
+    if (stats.triangleCount == 0) {
         return;
     }
 
@@ -689,10 +793,8 @@ void PathTracer::render(VkCommandBuffer cmd) {
         _lastViewMatrix = currentView;
     }
 
-    // Don't accumulate beyond limit
-    if (stats.accumulatedFrames >= static_cast<uint32_t>(settings.maxAccumulatedFrames)) {
-        return;
-    }
+    // Check if max accumulation reached - switch to display-only mode
+    bool displayOnly = stats.accumulatedFrames >= static_cast<uint32_t>(settings.maxAccumulatedFrames);
 
     // Prepare push constants
     PathTracePushConstants pc{};
@@ -706,33 +808,42 @@ void PathTracer::render(VkCommandBuffer cmd) {
     pc.accumulatedFrames = stats.accumulatedFrames;
     pc.triangleCount = stats.triangleCount;
     pc.maxBounces = settings.maxBounces;
-    pc.samplesPerPixel = settings.samplesPerPixel;
+    // samplesPerPixel=0 tells shader to use display-only mode (read from accumulation, don't trace)
+    pc.samplesPerPixel = displayOnly ? 0 : settings.samplesPerPixel;
     pc.enableNEE = settings.enableNEE ? 1 : 0;
     pc.enableRR = settings.enableRussianRoulette ? 1 : 0;
     pc.rrDepth = settings.russianRouletteDepth;
+    pc.useCubemap = (_envCubemapView != VK_NULL_HANDLE && _envCubemapSampler != VK_NULL_HANDLE) ? 1 : 0;
 
-    // Transition images
-    VkImageMemoryBarrier barriers[2] = {};
+    // Accumulation image barrier: MUST preserve content for temporal accumulation
+    VkImageMemoryBarrier accumBarrier{};
+    accumBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    accumBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    accumBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    accumBarrier.image = _accumulationImage.image;
+    accumBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    accumBarrier.subresourceRange.baseMipLevel = 0;
+    accumBarrier.subresourceRange.levelCount = 1;
+    accumBarrier.subresourceRange.baseArrayLayer = 0;
+    accumBarrier.subresourceRange.layerCount = 1;
 
-    barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barriers[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barriers[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barriers[0].image = _outputImage.image;
-    barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barriers[0].subresourceRange.baseMipLevel = 0;
-    barriers[0].subresourceRange.levelCount = 1;
-    barriers[0].subresourceRange.baseArrayLayer = 0;
-    barriers[0].subresourceRange.layerCount = 1;
-    barriers[0].srcAccessMask = 0;
-    barriers[0].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    if (stats.accumulatedFrames == 0) {
+        accumBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        accumBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        accumBarrier.srcAccessMask = 0;
+        accumBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    } else {
+        accumBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        accumBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        accumBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        accumBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    }
 
-    barriers[1] = barriers[0];
-    barriers[1].image = _accumulationImage.image;
-
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
+    VkPipelineStageFlags srcStage = (stats.accumulatedFrames == 0)
+        ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+        : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    vkCmdPipelineBarrier(cmd, srcStage,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &accumBarrier);
 
     // Bind and dispatch
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _pathTracePipeline);
@@ -743,16 +854,9 @@ void PathTracer::render(VkCommandBuffer cmd) {
     uint32_t groupsY = (_engine->_drawExtent.height + 7) / 8;
     vkCmdDispatch(cmd, groupsX, groupsY, 1);
 
-    // Transition output for sampling
-    barriers[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, barriers);
-
-    stats.accumulatedFrames++;
+    if (!displayOnly) {
+        stats.accumulatedFrames++;
+    }
 }
 
 void PathTracer::resetAccumulation() {

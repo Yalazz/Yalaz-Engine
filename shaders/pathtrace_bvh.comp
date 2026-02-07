@@ -15,8 +15,9 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// Output images
-layout(binding = 0, rgba32f) uniform image2D outputImage;
+// Output: engine's draw image (background already rendered here)
+layout(binding = 0, rgba16f) uniform image2D drawImage;
+// Accumulation buffer for temporal averaging
 layout(binding = 1, rgba32f) uniform image2D accumulationImage;
 
 // Scene data
@@ -59,6 +60,9 @@ layout(std430, binding = 4) readonly buffer MaterialBuffer {
     Material materials[];
 };
 
+// Environment cubemap
+layout(binding = 5) uniform samplerCube envCubemap;
+
 // Push constants
 layout(push_constant) uniform PushConstants {
     mat4 invView;
@@ -75,6 +79,7 @@ layout(push_constant) uniform PushConstants {
     uint enableNEE;
     uint enableRR;
     float rrDepth;
+    uint useCubemap;        // 1 = sample cubemap, 0 = procedural sky
 } pc;
 
 // =============================================================================
@@ -327,8 +332,16 @@ vec3 evaluateBRDF(vec3 V, vec3 L, vec3 N, Material mat) {
 // =============================================================================
 
 vec3 getSkyColor(vec3 dir) {
-    float t = 0.5 * (dir.y + 1.0);
-    vec3 sky = mix(vec3(1.0), pc.skyColor.rgb, t) * pc.skyColor.w;
+    vec3 sky;
+
+    if (pc.useCubemap != 0) {
+        // Sample environment cubemap
+        sky = texture(envCubemap, dir).rgb * pc.skyColor.w;
+    } else {
+        // Procedural sky fallback
+        float t = 0.5 * (dir.y + 1.0);
+        sky = mix(vec3(1.0), pc.skyColor.rgb, t) * pc.skyColor.w;
+    }
 
     // Add sun disk
     vec3 sunDir = normalize(-pc.sunDirection.xyz);
@@ -344,18 +357,21 @@ vec3 getSkyColor(vec3 dir) {
 // PATH TRACING
 // =============================================================================
 
-vec3 tracePath(vec3 rayOrigin, vec3 rayDir, inout uint seed) {
+vec3 tracePath(vec3 rayOrigin, vec3 rayDir, inout uint seed, out bool primaryHit) {
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0);
+    primaryHit = false;
 
     for (uint bounce = 0; bounce < pc.maxBounces; ++bounce) {
         HitInfo hit = traverseBVH(rayOrigin, rayDir);
 
         if (!hit.hit) {
-            // Hit sky
+            // Hit sky - use cubemap for reflections on bounced rays
             radiance += throughput * getSkyColor(rayDir);
             break;
         }
+
+        if (bounce == 0) primaryHit = true;
 
         Material mat = materials[min(hit.materialIndex, 15u)];  // Clamp to valid range
         vec3 hitPos = rayOrigin + rayDir * hit.t;
@@ -434,46 +450,80 @@ vec3 tracePath(vec3 rayOrigin, vec3 rayDir, inout uint seed) {
 
 void main() {
     ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 imageSize = imageSize(outputImage);
+    ivec2 imgSize = imageSize(drawImage);
 
-    if (pixelCoord.x >= imageSize.x || pixelCoord.y >= imageSize.y) return;
+    if (pixelCoord.x >= imgSize.x || pixelCoord.y >= imgSize.y) return;
+
+    // Display-only mode: samplesPerPixel == 0 means max accumulation reached.
+    // Just re-draw geometry pixels from the accumulation buffer.
+    if (pc.samplesPerPixel == 0) {
+        vec4 accum = imageLoad(accumulationImage, pixelCoord);
+        if (accum.a < 0.5) return; // No geometry data - keep background
+        vec3 color = accum.rgb;
+        if (any(isnan(color)) || any(isinf(color))) color = vec3(0.0);
+        vec3 mapped = vec3(1.0) - exp(-color * 1.0);
+        mapped = pow(mapped, vec3(1.0 / 2.2));
+        imageStore(drawImage, pixelCoord, vec4(mapped, 1.0));
+        return;
+    }
 
     // Initialize RNG seed
-    uint seed = pcgHash(pixelCoord.x + pixelCoord.y * imageSize.x + pc.frameIndex * imageSize.x * imageSize.y);
+    uint seed = pcgHash(pixelCoord.x + pixelCoord.y * imgSize.x + pc.frameIndex * imgSize.x * imgSize.y);
 
     vec3 color = vec3(0.0);
+    int hitCount = 0;
 
     for (uint sampleIdx = 0; sampleIdx < pc.samplesPerPixel; ++sampleIdx) {
         // Jittered pixel position for anti-aliasing
         vec2 jitter = randomVec2(seed) - 0.5;
-        vec2 uv = (vec2(pixelCoord) + 0.5 + jitter) / vec2(imageSize) * 2.0 - 1.0;
-        uv.y *= -1.0;
+        vec2 uv = (vec2(pixelCoord) + 0.5 + jitter) / vec2(imgSize) * 2.0 - 1.0;
 
         // Generate camera ray
-        vec4 rayClip = vec4(uv, -1.0, 1.0);
+        vec4 rayClip = vec4(uv, 0.5, 1.0);
         vec4 rayView = pc.invProj * rayClip;
-        rayView = vec4(rayView.xyz / rayView.w, 0.0);
-        vec3 rayDir = normalize((pc.invView * rayView).xyz);
+        vec3 rayDir = normalize((pc.invView * vec4(normalize(rayView.xyz / rayView.w), 0.0)).xyz);
         vec3 rayOrigin = pc.cameraPos.xyz;
 
-        color += tracePath(rayOrigin, rayDir, seed);
+        bool pHit;
+        vec3 sampleColor = tracePath(rayOrigin, rayDir, seed, pHit);
+        if (pHit) {
+            hitCount++;
+            color += sampleColor;
+        }
     }
 
-    color /= float(pc.samplesPerPixel);
+    // If no sample hit geometry, keep background (rendered by background effect)
+    if (hitCount == 0) {
+        if (pc.accumulatedFrames == 0) {
+            imageStore(accumulationImage, pixelCoord, vec4(0.0));
+        }
+        return;
+    }
+
+    color /= float(hitCount);
+
+    // Sanitize: NaN/Inf would permanently corrupt the accumulation buffer
+    if (any(isnan(color)) || any(isinf(color))) {
+        color = vec3(0.0);
+    }
+    color = max(color, vec3(0.0));
 
     // Accumulation
     if (pc.accumulatedFrames > 0) {
         vec3 prevColor = imageLoad(accumulationImage, pixelCoord).rgb;
+        if (any(isnan(prevColor)) || any(isinf(prevColor))) {
+            prevColor = vec3(0.0);
+        }
         float weight = 1.0 / float(pc.accumulatedFrames + 1);
         color = mix(prevColor, color, weight);
     }
 
-    // Store accumulated result
+    // Store accumulated result (alpha=1.0 marks this pixel as geometry)
     imageStore(accumulationImage, pixelCoord, vec4(color, 1.0));
 
     // Tone mapping and gamma for output
-    vec3 mapped = vec3(1.0) - exp(-color * 1.0);  // Simple exposure
-    mapped = pow(mapped, vec3(1.0 / 2.2));  // Gamma
+    vec3 mapped = vec3(1.0) - exp(-color * 1.0);
+    mapped = pow(mapped, vec3(1.0 / 2.2));
 
-    imageStore(outputImage, pixelCoord, vec4(mapped, 1.0));
+    imageStore(drawImage, pixelCoord, vec4(mapped, 1.0));
 }

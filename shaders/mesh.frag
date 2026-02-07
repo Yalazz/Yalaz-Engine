@@ -172,10 +172,9 @@ void main()
     vec3 emission = materialData.extra[0].rgb * materialData.extra[0].w;
 
     // === ENVIRONMENT REFLECTION (for glass/metallic materials) ===
-    // Simple sky-based reflection (no cubemap yet)
+    // Sample environment cubemap for reflections
     vec3 reflectDir = reflect(-V, N);
-    float skyGradient = reflectDir.y * 0.5 + 0.5;
-    vec3 envColor = mix(vec3(0.3, 0.4, 0.5), vec3(0.6, 0.7, 0.9), skyGradient);
+    vec3 envColor = texture(envCubemap, reflectDir).rgb;
     vec3 reflection = envColor * fresnel * (1.0 - roughness);
 
     // === FINAL COMPOSITION ===

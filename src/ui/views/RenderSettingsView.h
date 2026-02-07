@@ -1,33 +1,35 @@
 #pragma once
 
+#include "EditorView.h"
 #include <renderer/PostProcess.h>
 #include <glm/glm.hpp>
-
-// Forward declarations
-class VulkanEngine;
 
 namespace Yalaz::UI {
 
 // =============================================================================
-// RENDER SETTINGS VIEW - UI panel for post-processing and render quality
+// RENDER SETTINGS VIEW - UI panel for post-processing, path tracing, environment
 // =============================================================================
-class RenderSettingsView {
+class RenderSettingsView : public EditorView {
 public:
-    RenderSettingsView(VulkanEngine* engine);
+    RenderSettingsView();
+    ~RenderSettingsView() override = default;
 
-    // Draw the ImGui panel
-    void draw();
+    // EditorView interface
+    const char* GetDisplayName() const override { return "Render Settings"; }
+    ViewCategory GetCategory() const override { return ViewCategory::Rendering; }
+    ViewFlags GetFlags() const override { return ViewFlags::Default; }
+
+    void OnInit(VulkanEngine* engine) override;
 
     // Get current render settings
     Yalaz::Renderer::RenderSettings& getSettings() { return _settings; }
 
-private:
-    VulkanEngine* _engine;
-    Yalaz::Renderer::RenderSettings _settings;
+protected:
+    void OnRenderContent() override;
 
-    // Panel state
-    bool _showPanel = true;
-    int _selectedTab = 0;
+private:
+    Yalaz::Renderer::RenderSettings _settings;
+    char _cubemapPath[512] = "../../assets/cubemapping";
 
     // Draw individual sections
     void drawSSAOSettings();

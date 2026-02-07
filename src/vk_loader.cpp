@@ -1052,6 +1052,11 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         totalVertices += vertices.size();
         totalIndices += indices.size();
 
+        // Retain CPU-side vertex data for path tracing BVH
+        newmesh->cpuVertices = vertices;
+        newmesh->cpuIndices = indices;
+        newmesh->hasCpuData = true;
+
         newmesh->meshBuffers = engine->uploadMesh(indices, vertices);
         meshIndex++;
     }

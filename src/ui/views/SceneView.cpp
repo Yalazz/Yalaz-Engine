@@ -441,34 +441,11 @@ void SceneView::RenderSettingsPopup() {
             }
         }
 
-        // Background Section - Connected to engine's background effects
-        if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
-            // Get available background effects from engine
-            if (m_Engine && !m_Engine->backgroundEffects.empty()) {
-                ImGui::Text("Effect:");
-                for (int i = 0; i < static_cast<int>(m_Engine->backgroundEffects.size()); i++) {
-                    bool isSelected = (m_Engine->currentBackgroundEffect == i);
-                    if (ImGui::RadioButton(m_Engine->backgroundEffects[i].name, isSelected)) {
-                        m_Engine->currentBackgroundEffect = i;
-                    }
-                }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-
-                // Push constants for the current effect
-                auto& effect = m_Engine->backgroundEffects[m_Engine->currentBackgroundEffect];
-                ImGui::Text("Effect Parameters:");
-
-                if (strcmp(effect.name, "gradient") == 0) {
-                    ImGui::ColorEdit4("Top Color", &effect.data.data1.x);
-                    ImGui::ColorEdit4("Bottom Color", &effect.data.data2.x);
-                } else if (strcmp(effect.name, "sky") == 0) {
-                    ImGui::ColorEdit4("Sky Color", &effect.data.data1.x);
-                }
-            } else {
-                ImGui::TextDisabled("No background effects available");
-            }
+        // Background - moved to Render Settings panel (View > Rendering > Render Settings)
+        if (ImGui::CollapsingHeader("Background")) {
+            ImGui::TextDisabled("Background settings moved to:");
+            ImGui::TextDisabled("View > Rendering > Render Settings");
+            ImGui::TextDisabled("Environment tab");
         }
 
         // Snap Section - uses engine settings so all views can access

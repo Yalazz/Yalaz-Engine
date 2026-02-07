@@ -55,7 +55,7 @@ static_assert(sizeof(GPUPathTraceMaterial) == 48, "GPUPathTraceMaterial must be 
 
 // Path tracer settings
 struct PathTracerSettings {
-    int maxBounces = 8;
+    int maxBounces = 4;
     int samplesPerPixel = 1;    // Samples per frame (accumulates over time)
     int maxAccumulatedFrames = 1024;
     bool enableAccumulation = true;
@@ -85,8 +85,20 @@ public:
     // Reset accumulation (call when camera moves)
     void resetAccumulation();
 
-    // Get output image for display
-    AllocatedImage& getOutputImage() { return _outputImage; }
+    // Set the engine's draw image for direct path tracer output
+    void setDrawImage(VkImageView drawImageView);
+
+    // Set environment cubemap for sky sampling
+    void setEnvironmentCubemap(VkImageView cubemapView, VkSampler cubemapSampler);
+
+    // Notify that scene geometry changed (load/unload) - triggers BVH rebuild
+    void notifySceneChanged();
+
+    // Check and perform pending BVH rebuild (call OUTSIDE command recording)
+    void processPendingRebuild();
+
+    // Check if environment cubemap is connected
+    bool hasCubemap() const { return _envCubemapView != VK_NULL_HANDLE && _envCubemapSampler != VK_NULL_HANDLE; }
 
     // Settings
     PathTracerSettings settings;
@@ -103,9 +115,11 @@ public:
 private:
     VulkanEngine* _engine;
 
-    // Output images
-    AllocatedImage _outputImage;        // Final accumulated result
-    AllocatedImage _accumulationImage;  // Running sum for accumulation
+    // Draw image view (owned by engine, writes path traced geometry directly)
+    VkImageView _drawImageView = VK_NULL_HANDLE;
+
+    // Accumulation buffer for temporal averaging
+    AllocatedImage _accumulationImage;
 
     // Scene data buffers
     AllocatedBuffer _triangleBuffer;
@@ -134,11 +148,13 @@ private:
         uint32_t enableNEE;
         uint32_t enableRR;
         float rrDepth;
+        uint32_t useCubemap;
     };
 
     uint32_t _frameIndex = 0;
     glm::mat4 _lastViewMatrix;
     bool _imagesInitialized = false;
+    bool _needsBVHRebuild = true;  // Build on first use
     VkExtent2D _imageExtent = {0, 0};
 
     void createImages();
@@ -147,6 +163,10 @@ private:
     void updateDescriptors();
     void ensureImagesReady();
     void uploadSceneData();
+
+    // Environment cubemap references (owned by EnvironmentMap)
+    VkImageView _envCubemapView = VK_NULL_HANDLE;
+    VkSampler _envCubemapSampler = VK_NULL_HANDLE;
 
     // Scene data (CPU side, used for BVH building)
     std::vector<GPUTriangle> _triangles;

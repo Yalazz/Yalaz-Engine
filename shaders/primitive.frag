@@ -67,6 +67,8 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 // Point light shadow cubemaps
 layout(set = 0, binding = 3) uniform samplerCube pointLightShadowMaps[4];
+// Environment cubemap for reflections
+layout(set = 0, binding = 4) uniform samplerCube envCubemap;
 
 // =============================================================================
 // CASCADE SHADOW MAPPING - Full implementation with PCF soft shadows
@@ -496,10 +498,9 @@ void main()
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
-    // Simple sky-based reflection (no cubemap yet)
+    // Sample environment cubemap for reflections
     vec3 reflectDir = reflect(-V, N);
-    float skyGradient = reflectDir.y * 0.5 + 0.5;
-    vec3 envColor = mix(vec3(0.3, 0.4, 0.5), vec3(0.6, 0.7, 0.9), skyGradient);
+    vec3 envColor = texture(envCubemap, reflectDir).rgb;
     vec3 reflection = envColor * fresnel * (1.0 - roughness);
 
     // === FINAL COMPOSITION ===

@@ -249,6 +249,11 @@ void AssetBrowserView::RenderLoadedScenes() {
         if (m_SelectedScene == sceneToRemove) {
             m_SelectedScene.clear();
         }
+
+        // Notify path tracer that scene geometry changed
+        if (m_Engine->_pathTracer) {
+            m_Engine->_pathTracer->notifySceneChanged();
+        }
     }
 
     ImGui::EndChild();

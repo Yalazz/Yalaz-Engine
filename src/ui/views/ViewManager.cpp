@@ -26,6 +26,7 @@
 #include "PluginManagerView.h"
 #include "PhysicsDebugView.h"
 #include "CameraSequencerView.h"
+#include "RenderSettingsView.h"
 
 namespace Yalaz::UI {
 
@@ -180,6 +181,9 @@ void ViewManager::CreateAllViews() {
     m_Views.push_back(std::make_unique<PluginManagerView>());
     m_Views.push_back(std::make_unique<PhysicsDebugView>());
     m_Views.push_back(std::make_unique<CameraSequencerView>());
+
+    // Rendering
+    m_Views.push_back(std::make_unique<RenderSettingsView>());
 }
 
 void ViewManager::RenderViewMenu() {
@@ -213,6 +217,9 @@ void ViewManager::RenderViewMenu() {
 
     // Animation views
     renderCategoryMenu("Animation", ViewCategory::Animation);
+
+    // Rendering views
+    renderCategoryMenu("Rendering", ViewCategory::Rendering);
 
     // System views
     renderCategoryMenu("System", ViewCategory::System);
