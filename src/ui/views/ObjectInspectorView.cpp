@@ -16,6 +16,7 @@
 #include "ObjectInspectorView.h"
 #include "../EditorTheme.h"
 #include "../../vk_engine.h"
+#include "../../vk_loader.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -959,31 +960,10 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         ImGui::Unindent();
     }
 
-    // Material info for GLTF nodes
+    // Material editing for GLTF nodes
     if (node->mesh && !node->mesh->surfaces.empty() && ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent();
-
-        ImGui::TextDisabled("GLTF materials are edited in the Material View.");
-        ImGui::TextDisabled("Select this node and open Material View to edit.");
-
-        ImGui::Spacing();
-
-        // Show material count
-        ImGui::Text("Materials: %zu surfaces", node->mesh->surfaces.size());
-
-        // List surfaces with their material info
-        for (size_t i = 0; i < node->mesh->surfaces.size() && i < 5; ++i) {
-            auto& surface = node->mesh->surfaces[i];
-            ImGui::BulletText("Surface %zu: %u tris", i, surface.count / 3);
-            if (surface.material) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(has material)");
-            }
-        }
-        if (node->mesh->surfaces.size() > 5) {
-            ImGui::TextDisabled("... and %zu more", node->mesh->surfaces.size() - 5);
-        }
-
+        RenderGLTFMaterialEditor();
         ImGui::Unindent();
     }
 
@@ -1117,6 +1097,210 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         ImGui::TextDisabled("Memory: %p", static_cast<void*>(node));
 
         ImGui::Unindent();
+    }
+}
+
+// =============================================================================
+// GLTF MATERIAL EDITOR - Inline PBR editing for GLTF nodes
+// =============================================================================
+
+void ObjectInspectorView::RenderGLTFMaterialEditor() {
+    auto* node = m_Engine->selectedNode;
+    if (!node || !node->mesh || node->mesh->surfaces.empty()) return;
+
+    auto& surfaces = node->mesh->surfaces;
+
+    // Surface selector if multiple surfaces
+    static int selectedSurface = 0;
+    if (selectedSurface >= static_cast<int>(surfaces.size())) selectedSurface = 0;
+
+    if (surfaces.size() > 1) {
+        ImGui::Text("Surfaces: %zu", surfaces.size());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##SurfaceSelect", ("Surface " + std::to_string(selectedSurface)).c_str())) {
+            for (int i = 0; i < static_cast<int>(surfaces.size()); ++i) {
+                bool isSelected = (i == selectedSurface);
+                char label[64];
+                snprintf(label, sizeof(label), "Surface %d (%u tris)", i, surfaces[i].count / 3);
+                if (ImGui::Selectable(label, isSelected)) {
+                    selectedSurface = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::Spacing();
+    }
+
+    auto& surface = surfaces[selectedSurface];
+    if (!surface.material) {
+        ImGui::TextDisabled("No material assigned");
+        return;
+    }
+
+    // Find the scene that owns this material and read/write its buffer
+    uint32_t bufferOffset = surface.material->bufferOffset;
+    LoadedGLTF* ownerScene = nullptr;
+
+    for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
+        if (!scene) continue;
+        for (auto& [matName, mat] : scene->materials) {
+            if (mat == surface.material) {
+                ownerScene = scene.get();
+                break;
+            }
+        }
+        if (ownerScene) break;
+    }
+
+    if (!ownerScene || ownerScene->materialDataBuffer.buffer == VK_NULL_HANDLE ||
+        ownerScene->materialDataBuffer.allocation == VK_NULL_HANDLE) {
+        ImGui::TextDisabled("Material buffer not available");
+        return;
+    }
+
+    // Map buffer and read current values
+    void* data = nullptr;
+    VkResult result = vmaMapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation, &data);
+    if (result != VK_SUCCESS || !data) {
+        ImGui::TextDisabled("Failed to read material data");
+        return;
+    }
+
+    auto* constants = reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+        static_cast<char*>(data) + bufferOffset);
+
+    // Read current values
+    glm::vec4 baseColor = constants->colorFactors;
+    float metallic = constants->metal_rough_factors.x;
+    float roughness = constants->metal_rough_factors.y;
+    float ao = constants->metal_rough_factors.z;
+    float normalStrength = constants->metal_rough_factors.w;
+    glm::vec3 emission = glm::vec3(constants->extra[0]);
+    float emissionStrength = constants->extra[0].w;
+    float reflectionIntensity = constants->extra[1].x;
+
+    vmaUnmapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation);
+
+    bool changed = false;
+
+    // === BASE COLOR ===
+    ImGui::TextDisabled("Base Color (Albedo)");
+    float col[4] = { baseColor.r, baseColor.g, baseColor.b, baseColor.a };
+    if (ImGui::ColorEdit4("##GLTFBaseColor", col, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_AlphaBar)) {
+        baseColor = glm::vec4(col[0], col[1], col[2], col[3]);
+        changed = true;
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // === PBR PROPERTIES ===
+    ImGui::TextDisabled("PBR Properties");
+
+    ImGui::Text("Metallic");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+    ImGui::TextDisabled("%.0f%%", metallic * 100);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.8f, 0.7f, 0.3f, 1.0f));
+    if (ImGui::SliderFloat("##GLTFMetallic", &metallic, 0.0f, 1.0f, "")) changed = true;
+    ImGui::PopStyleColor();
+
+    ImGui::Text("Roughness");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+    ImGui::TextDisabled("%.0f%%", roughness * 100);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+    if (ImGui::SliderFloat("##GLTFRoughness", &roughness, 0.0f, 1.0f, "")) changed = true;
+    ImGui::PopStyleColor();
+
+    // Reflection
+    ImGui::Spacing();
+    ImGui::Text("Reflection");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+    ImGui::TextDisabled("%.0f%%", reflectionIntensity * 100);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.3f, 0.6f, 0.9f, 1.0f));
+    if (ImGui::SliderFloat("##GLTFReflection", &reflectionIntensity, 0.0f, 1.0f, "")) changed = true;
+    ImGui::PopStyleColor();
+
+    // Quick PBR presets
+    ImGui::Spacing();
+    ImGui::TextDisabled("Quick:");
+    if (ImGui::Button("Shiny##gltf", ImVec2(50, 0))) { roughness = 0.1f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Matte##gltf", ImVec2(50, 0))) { roughness = 0.8f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Metal##gltf", ImVec2(50, 0))) { metallic = 1.0f; roughness = 0.3f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Plastic##gltf", ImVec2(60, 0))) { metallic = 0.0f; roughness = 0.4f; changed = true; }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // === EMISSION ===
+    ImGui::TextDisabled("Emission");
+
+    float emCol[3] = { emission.r, emission.g, emission.b };
+    if (ImGui::ColorEdit3("##GLTFEmColor", emCol, ImGuiColorEditFlags_Float)) {
+        emission = glm::vec3(emCol[0], emCol[1], emCol[2]);
+        changed = true;
+    }
+    if (ImGui::SliderFloat("Strength##GLTFEm", &emissionStrength, 0.0f, 10.0f, "%.2f")) {
+        changed = true;
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // === MATERIAL PRESETS ===
+    ImGui::TextDisabled("Material Presets");
+    if (ImGui::Button("Gold##gltf", ImVec2(55, 0))) {
+        baseColor = glm::vec4(1.0f, 0.766f, 0.336f, 1.0f);
+        metallic = 1.0f; roughness = 0.3f; changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Silver##gltf", ImVec2(55, 0))) {
+        baseColor = glm::vec4(0.972f, 0.960f, 0.915f, 1.0f);
+        metallic = 1.0f; roughness = 0.2f; changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Copper##gltf", ImVec2(55, 0))) {
+        baseColor = glm::vec4(0.955f, 0.637f, 0.538f, 1.0f);
+        metallic = 1.0f; roughness = 0.25f; changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Chrome##gltf", ImVec2(55, 0))) {
+        baseColor = glm::vec4(0.549f, 0.556f, 0.554f, 1.0f);
+        metallic = 1.0f; roughness = 0.1f; changed = true;
+    }
+
+    if (ImGui::Button("Mirror##gltf", ImVec2(55, 0))) {
+        baseColor = glm::vec4(0.95f, 0.95f, 0.95f, 1.0f);
+        metallic = 1.0f; roughness = 0.05f; reflectionIntensity = 1.0f; changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reflect##gltf", ImVec2(55, 0))) { reflectionIntensity = 0.5f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("No Refl##gltf", ImVec2(55, 0))) { reflectionIntensity = 0.0f; changed = true; }
+
+    // === WRITE BACK TO GPU BUFFER ===
+    if (changed) {
+        void* writeData = nullptr;
+        VkResult writeResult = vmaMapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation, &writeData);
+        if (writeResult == VK_SUCCESS && writeData) {
+            auto* writeConstants = reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+                static_cast<char*>(writeData) + bufferOffset);
+
+            writeConstants->colorFactors = baseColor;
+            writeConstants->metal_rough_factors = glm::vec4(metallic, roughness, ao, normalStrength);
+            writeConstants->extra[0] = glm::vec4(emission, emissionStrength);
+            writeConstants->extra[1].x = reflectionIntensity;
+
+            vmaUnmapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation);
+
+            vmaFlushAllocation(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation,
+                bufferOffset, sizeof(GLTFMetallic_Roughness::MaterialConstants));
+        }
     }
 }
 

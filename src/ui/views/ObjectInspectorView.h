@@ -29,6 +29,7 @@ private:
     void RenderPrimitiveInspector(int index);
     void RenderLightInspector(int index);
     void RenderSceneNodeInspector();
+    void RenderGLTFMaterialEditor();
 
     // Editor helpers
     void RenderTransformEditor(glm::vec3& position, glm::vec3& rotation, glm::vec3& scale);

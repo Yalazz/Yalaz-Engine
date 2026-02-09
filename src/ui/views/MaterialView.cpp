@@ -179,35 +179,35 @@ void MaterialView::SyncWithSelection() {
             m_SelectedSurfaceIndex = 0;
             m_LastSelectedMeshNode = meshNode;
             m_LastSelectedPrimitiveIndex = -1;
-
-            // Load material data
-            LoadGLTFMaterialData();
         }
+
+        // Always re-read from GPU buffer to stay in sync with ObjectInspectorView
+        LoadGLTFMaterialData();
     } else if (m_Engine->selectedPrimitiveIndex >= 0 &&
                m_Engine->selectedPrimitiveIndex < static_cast<int>(m_Engine->static_shapes.size())) {
-        // Primitive selected
+        // Primitive selected - always read latest values from engine
+        m_SelectionType = MaterialSelectionType::Primitive;
+
         if (m_Engine->selectedPrimitiveIndex != m_LastSelectedPrimitiveIndex) {
-            m_SelectionType = MaterialSelectionType::Primitive;
             m_SelectedMeshNode = nullptr;
             m_CurrentGLTFMaterial = nullptr;
             m_LastSelectedPrimitiveIndex = m_Engine->selectedPrimitiveIndex;
             m_LastSelectedMeshNode = nullptr;
+        }
 
-            // Load all primitive material properties
-            auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
-            m_BaseColor = shape.mainColor;
-            m_Metallic = shape.metallic;
-            m_Roughness = shape.roughness;
+        // Always sync from the shape's current values (ObjectInspectorView may have changed them)
+        auto& shape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
+        m_BaseColor = shape.mainColor;
+        m_Metallic = shape.metallic;
+        m_Roughness = shape.roughness;
 
-            // Load emission (if non-zero)
-            float emissionLen = glm::length(shape.emission);
-            if (emissionLen > 0.001f) {
-                m_EmissionStrength = emissionLen;
-                m_Emission = shape.emission / emissionLen;
-            } else {
-                m_Emission = glm::vec3(0.0f);
-                m_EmissionStrength = 0.0f;
-            }
+        float emissionLen = glm::length(shape.emission);
+        if (emissionLen > 0.001f) {
+            m_EmissionStrength = emissionLen;
+            m_Emission = shape.emission / emissionLen;
+        } else {
+            m_Emission = glm::vec3(0.0f);
+            m_EmissionStrength = 0.0f;
         }
     } else {
         // Nothing selected
@@ -234,33 +234,50 @@ void MaterialView::LoadGLTFMaterialData() {
 
     if (!m_CurrentGLTFMaterial) return;
 
-    // Read material constants from the material data buffer
-    // The material data is stored in the LoadedGLTF's materialDataBuffer
-    // We need to find which LoadedGLTF owns this material
+    uint32_t bufferOffset = m_CurrentGLTFMaterial->bufferOffset;
 
-    // For now, try to read from the material's descriptor set data
-    // This would require accessing the mapped buffer data
-
-    // Default values if we can't read from buffer
-    m_BaseColor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
-    m_Metallic = 0.0f;
-    m_Roughness = 0.5f;
-
-    // Try to find the material in loaded scenes to get its data
+    // Read actual material constants from the GPU buffer
     for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
         if (!scene) continue;
 
+        bool found = false;
         for (auto& [matName, mat] : scene->materials) {
-            if (mat.get() == m_CurrentGLTFMaterial.get()) {
-                // Found the material - now we need to read its constants
-                // The constants are in scene->materialDataBuffer
+            if (mat == m_CurrentGLTFMaterial) { found = true; break; }
+        }
+        if (!found) continue;
 
-                // For now, we'll use defaults and update them when the user changes values
-                // A full implementation would memory-map the buffer to read current values
-                break;
+        if (scene->materialDataBuffer.buffer != VK_NULL_HANDLE &&
+            scene->materialDataBuffer.allocation != VK_NULL_HANDLE) {
+
+            void* data = nullptr;
+            VkResult result = vmaMapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation, &data);
+
+            if (result == VK_SUCCESS && data) {
+                auto* constants = reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+                    static_cast<char*>(data) + bufferOffset);
+
+                m_BaseColor = constants->colorFactors;
+                m_Metallic = constants->metal_rough_factors.x;
+                m_Roughness = constants->metal_rough_factors.y;
+                m_AO = constants->metal_rough_factors.z;
+                m_NormalStrength = constants->metal_rough_factors.w;
+                m_Emission = glm::vec3(constants->extra[0]);
+                m_EmissionStrength = constants->extra[0].w;
+
+                vmaUnmapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation);
+                return;
             }
         }
     }
+
+    // Fallback defaults if buffer read fails
+    m_BaseColor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+    m_Metallic = 0.0f;
+    m_Roughness = 0.5f;
+    m_AO = 1.0f;
+    m_NormalStrength = 1.0f;
+    m_Emission = glm::vec3(0.0f);
+    m_EmissionStrength = 0.0f;
 }
 
 void MaterialView::RenderGLTFMaterialList() {
@@ -387,21 +404,14 @@ void MaterialView::RenderMaterialProperties() {
         changed = true;
     }
 
-    // Apply button for GLTF materials
-    if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        if (ImGui::Button("Apply to GLTF Material", ImVec2(-1, 30))) {
-            ApplyToGLTFMaterial();
-        }
-        ImGui::TextDisabled("Updates the GPU buffer in real-time");
-    }
-
     // Apply changes
     if (changed) {
         ApplyToSelection();
+
+        // Auto-apply to GLTF material buffer in real-time
+        if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
+            ApplyToGLTFMaterial();
+        }
     }
 
     // Material File section
