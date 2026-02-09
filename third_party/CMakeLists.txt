@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.15)
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
+# All targets created here go under "third_party" folder in IDE
+set(CMAKE_FOLDER "third_party")
+
 # Vulkan should already be found in the parent CMakeLists.txt
 # Only search if Vulkan::Vulkan target doesn't exist
 if(NOT TARGET Vulkan::Vulkan)
@@ -62,6 +65,8 @@ endif()
 FetchContent_Declare(fmt
     GIT_REPOSITORY https://github.com/fmtlib/fmt.git
     GIT_TAG        11.0.2
+    GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
 )
 set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
 set(FMT_DOC OFF CACHE BOOL "" FORCE)
@@ -75,6 +80,8 @@ FetchContent_MakeAvailable(fmt)
 FetchContent_Declare(json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
 )
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 set(JSON_Install OFF CACHE BOOL "" FORCE)
@@ -102,10 +109,12 @@ if (_SDL_VENDOR_OK)
     message(STATUS "Using vendored SDL2")
     add_subdirectory(SDL EXCLUDE_FROM_ALL)
 else()
-    message(STATUS "Vendored SDL2 broken. Fetching SDL2 from GitHub...")
+    message(STATUS "Vendored SDL2 not found. Fetching SDL2 from GitHub...")
     FetchContent_Declare(SDL2
             GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-            GIT_TAG        release-2.30.6
+            GIT_TAG        release-2.30.12
+            GIT_SHALLOW    TRUE
+            EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(SDL2)
 endif()

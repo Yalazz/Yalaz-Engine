@@ -373,7 +373,7 @@ vec3 tracePath(vec3 rayOrigin, vec3 rayDir, inout uint seed, out bool primaryHit
 
         if (bounce == 0) primaryHit = true;
 
-        Material mat = materials[min(hit.materialIndex, 15u)];  // Clamp to valid range
+        Material mat = materials[hit.materialIndex];
         vec3 hitPos = rayOrigin + rayDir * hit.t;
         vec3 N = hit.normal;
 

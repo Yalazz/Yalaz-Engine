@@ -15,6 +15,10 @@ project(Yalaz_Engine
 
 cmake_policy(SET CMP0079 NEW)
 
+# Group targets into folders in IDE (hides third_party from top-level)
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+set(CMAKE_FOLDER "third_party")
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -192,7 +196,9 @@ endforeach()
 # =============================================================
 # SUBDIRECTORIES
 # =============================================================
+set(CMAKE_FOLDER "third_party")
 add_subdirectory(third_party)
+set(CMAKE_FOLDER "")
 add_subdirectory(src)
 
 # =============================================================

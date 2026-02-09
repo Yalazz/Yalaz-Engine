@@ -716,22 +716,26 @@ void PathTracer::updateDescriptors() {
     writes[4].descriptorCount = 1;
     writes[4].pBufferInfo = &materialInfo;
 
-    // Environment cubemap (binding 5)
+    // Environment cubemap (binding 5) - always write with fallback
     VkDescriptorImageInfo cubemapInfo{};
     if (_envCubemapView != VK_NULL_HANDLE && _envCubemapSampler != VK_NULL_HANDLE) {
         cubemapInfo.imageView = _envCubemapView;
         cubemapInfo.sampler = _envCubemapSampler;
-        cubemapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[5].dstSet = _descriptorSet;
-        writes[5].dstBinding = 5;
-        writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[5].descriptorCount = 1;
-        writes[5].pImageInfo = &cubemapInfo;
-
-        writeCount = 6;
+    } else {
+        // Use engine's default black cubemap as fallback
+        cubemapInfo.imageView = _engine->_defaultCubemap.imageView;
+        cubemapInfo.sampler = _engine->_defaultSamplerLinear;
     }
+    cubemapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[5].dstSet = _descriptorSet;
+    writes[5].dstBinding = 5;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[5].descriptorCount = 1;
+    writes[5].pImageInfo = &cubemapInfo;
+
+    writeCount = 6;
 
     vkUpdateDescriptorSets(_engine->_device, writeCount, writes, 0, nullptr);
 }

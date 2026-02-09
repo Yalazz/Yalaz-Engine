@@ -305,7 +305,8 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     uint pad1;
     uint pad2;
     vec4 extra[13];              // extra[0] = emission (xyz=color, w=strength)
-                                 // extra[1-12] = reserved for future use
+                                 // extra[1].x = reflection intensity (0=none, 1=full)
+                                 // extra[2-12] = reserved for future use
 } materialData;
 
 #endif // INPUT_STRUCTURES_GLSL

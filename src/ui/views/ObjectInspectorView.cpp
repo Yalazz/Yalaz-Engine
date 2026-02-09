@@ -238,6 +238,15 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
         ImGui::SliderFloat("##Roughness", &shape.roughness, 0.0f, 1.0f, "");
         ImGui::PopStyleColor();
 
+        // Reflection Intensity (cubemap)
+        ImGui::Spacing();
+        ImGui::Text("Reflection");
+        ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+        ImGui::TextDisabled("%.0f%%", shape.reflectionIntensity * 100);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.3f, 0.6f, 0.9f, 1.0f));
+        ImGui::SliderFloat("##Reflection", &shape.reflectionIntensity, 0.0f, 1.0f, "");
+        ImGui::PopStyleColor();
+
         // Quick PBR presets
         ImGui::Spacing();
         ImGui::TextDisabled("Quick:");
@@ -327,6 +336,21 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
             shape.mainColor = glm::vec4(0.95f, 0.95f, 0.95f, 0.3f);
             shape.metallic = 0.0f; shape.roughness = 0.05f;
             shape.passType = MaterialPass::Transparent;
+        }
+
+        // Reflective materials
+        if (ImGui::Button("Mirror", ImVec2(55, 0))) {
+            shape.mainColor = glm::vec4(0.95f, 0.95f, 0.95f, 1.0f);
+            shape.metallic = 1.0f; shape.roughness = 0.05f;
+            shape.reflectionIntensity = 1.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reflect", ImVec2(55, 0))) {
+            shape.reflectionIntensity = 0.5f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("No Refl", ImVec2(55, 0))) {
+            shape.reflectionIntensity = 0.0f;
         }
 
         ImGui::Spacing();

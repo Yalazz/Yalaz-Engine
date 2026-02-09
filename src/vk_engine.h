@@ -93,7 +93,7 @@ struct PrimitivePushConstants {
     glm::mat4 worldMatrix;      // 64 bytes (offset 0)
     glm::vec4 mainColor;        // 16 bytes (offset 64) - RGBA base color
     glm::vec4 faceColors[6];    // 96 bytes (offset 80) - Per-face colors
-    glm::vec4 pbrParams;        // 16 bytes (offset 176) - x=metallic, y=roughness, z=ao, w=unused
+    glm::vec4 pbrParams;        // 16 bytes (offset 176) - x=metallic, y=roughness, z=ao, w=reflectionIntensity
     glm::vec4 emission;         // 16 bytes (offset 192) - xyz=emission color, w=emission strength
     int useFaceColors;          // 4 bytes (offset 208)
     int padding[3];             // 12 bytes (offset 212) - alignment padding
@@ -123,6 +123,7 @@ struct StaticMeshData {
     float metallic = 0.0f;                      // Metallic factor (0-1)
     float roughness = 0.5f;                     // Roughness factor (0-1)
     glm::vec3 emission = glm::vec3(0.0f);       // Emission color * strength
+    float reflectionIntensity = 0.0f;           // Cubemap reflection (0=none, 1=full)
 
     PrimitiveType type = PrimitiveType::Cube;
     ShaderOnlyMaterial materialType = ShaderOnlyMaterial::DEFAULT;
@@ -156,8 +157,8 @@ struct StaticMeshData {
         for (int i = 0; i < 6; ++i) {
             pc.faceColors[i] = faceColors[i];
         }
-        // PBR parameters: metallic, roughness, AO (fixed at 1.0), unused
-        pc.pbrParams = glm::vec4(metallic, roughness, 1.0f, 0.0f);
+        // PBR parameters: metallic, roughness, AO (fixed at 1.0), reflectionIntensity
+        pc.pbrParams = glm::vec4(metallic, roughness, 1.0f, reflectionIntensity);
         // Emission: RGB color with strength in alpha
         float emissionStrength = glm::length(emission);
         glm::vec3 emissionColor = emissionStrength > 0.001f ? emission / emissionStrength : glm::vec3(0.0f);
@@ -658,6 +659,7 @@ public:
     AllocatedImage _blackImage;
     AllocatedImage _greyImage;
     AllocatedImage _errorCheckerboardImage;
+    AllocatedImage _defaultCubemap; // 1x1 black cubemap for fallback
 
     VkSampler _defaultSamplerLinear;
     VkSampler _defaultSamplerNearest;

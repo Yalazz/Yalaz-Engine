@@ -22,7 +22,7 @@ layout(push_constant) uniform PushConstants {
     mat4 worldMatrix;       // 64 bytes (offset 0)
     vec4 mainColor;         // 16 bytes (offset 64) - RGBA base color
     vec4 faceColors[6];     // 96 bytes (offset 80) - Per-face colors
-    vec4 pbrParams;         // 16 bytes (offset 176) - x=metallic, y=roughness, z=ao, w=unused
+    vec4 pbrParams;         // 16 bytes (offset 176) - x=metallic, y=roughness, z=ao, w=reflectionIntensity
     vec4 emission;          // 16 bytes (offset 192) - xyz=emission color, w=emission strength
     int useFaceColors;      // 4 bytes (offset 208)
     int padding[3];         // 12 bytes (offset 212)
@@ -492,16 +492,18 @@ void main()
     vec3 matEmission = materialData.extra[0].rgb * materialData.extra[0].w;
     vec3 emission = emissionColor * emissionStrength + matEmission;
 
-    // === ENVIRONMENT REFLECTION (for glass/metallic materials) ===
-    // Fresnel at view angle (more reflection at grazing angles)
+    // === ENVIRONMENT REFLECTION (controlled by push.pbrParams.w) ===
     float NdotV = max(dot(N, V), 0.0);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
-    // Sample environment cubemap for reflections
-    vec3 reflectDir = reflect(-V, N);
-    vec3 envColor = texture(envCubemap, reflectDir).rgb;
-    vec3 reflection = envColor * fresnel * (1.0 - roughness);
+    vec3 reflection = vec3(0.0);
+    float reflectionIntensity = push.pbrParams.w; // 0 = no reflection, >0 = reflect
+    if (reflectionIntensity > 0.0) {
+        vec3 reflectDir = reflect(-V, N);
+        vec3 envColor = texture(envCubemap, reflectDir).rgb;
+        reflection = envColor * fresnel * (1.0 - roughness) * reflectionIntensity;
+    }
 
     // === FINAL COMPOSITION ===
     vec3 result = ambient + directional + pointLighting + emission + reflection;

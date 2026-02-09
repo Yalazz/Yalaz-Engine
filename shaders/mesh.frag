@@ -171,11 +171,14 @@ void main()
     // === EMISSION ===
     vec3 emission = materialData.extra[0].rgb * materialData.extra[0].w;
 
-    // === ENVIRONMENT REFLECTION (for glass/metallic materials) ===
-    // Sample environment cubemap for reflections
-    vec3 reflectDir = reflect(-V, N);
-    vec3 envColor = texture(envCubemap, reflectDir).rgb;
-    vec3 reflection = envColor * fresnel * (1.0 - roughness);
+    // === ENVIRONMENT REFLECTION (controlled by material extra[1].x) ===
+    vec3 reflection = vec3(0.0);
+    float reflectionIntensity = materialData.extra[1].x; // 0 = no reflection, >0 = reflect
+    if (reflectionIntensity > 0.0) {
+        vec3 reflectDir = reflect(-V, N);
+        vec3 envColor = texture(envCubemap, reflectDir).rgb;
+        reflection = envColor * fresnel * (1.0 - roughness) * reflectionIntensity;
+    }
 
     // === FINAL COMPOSITION ===
     vec3 result = ambient + directional + pointLighting + emission + reflection;

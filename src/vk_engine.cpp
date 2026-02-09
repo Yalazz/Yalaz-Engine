@@ -304,6 +304,10 @@ void VulkanEngine::cleanup()
             destroy_image(_errorCheckerboardImage);
             _errorCheckerboardImage.image = VK_NULL_HANDLE;
         }
+        if (_defaultCubemap.image != VK_NULL_HANDLE) {
+            destroy_image(_defaultCubemap);
+            _defaultCubemap.image = VK_NULL_HANDLE;
+        }
 
         // Default samplers
         if (_defaultSamplerNearest != VK_NULL_HANDLE) {
@@ -1688,6 +1692,65 @@ void VulkanEngine::init_default_data() {
     }
     _errorCheckerboardImage = create_image(checkerboard.data(), VkExtent3D{ 16, 16, 1 }, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
 
+    // Default 1x1 black cubemap (used as fallback when no environment cubemap is loaded)
+    {
+        VkImageCreateInfo cubemapInfo = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        cubemapInfo.imageType = VK_IMAGE_TYPE_2D;
+        cubemapInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        cubemapInfo.extent = { 1, 1, 1 };
+        cubemapInfo.mipLevels = 1;
+        cubemapInfo.arrayLayers = 6;
+        cubemapInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        cubemapInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        cubemapInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        cubemapInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+
+        VmaAllocationCreateInfo allocInfo = {};
+        allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+        allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+        VK_CHECK(vmaCreateImage(_allocator, &cubemapInfo, &allocInfo, &_defaultCubemap.image, &_defaultCubemap.allocation, nullptr));
+        _defaultCubemap.imageFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        _defaultCubemap.imageExtent = { 1, 1, 1 };
+
+        VkImageViewCreateInfo viewInfo = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        viewInfo.image = _defaultCubemap.image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 6;
+        VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &_defaultCubemap.imageView));
+
+        // Transition to shader read and clear to black
+        immediate_submit([&](VkCommandBuffer cmd) {
+            VkImageMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.image = _defaultCubemap.image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 6;
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            VkClearColorValue clearColor = { {0.0f, 0.0f, 0.0f, 1.0f} };
+            VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+            vkCmdClearColorImage(cmd, _defaultCubemap.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColor, 1, &range);
+
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        });
+    }
+
     // Samplerlar
     VkSamplerCreateInfo samplerInfo = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     samplerInfo.magFilter = VK_FILTER_NEAREST;
@@ -2458,7 +2521,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
     // Environment cubemap binding (binding 4) - always write with fallback
     {
-        VkImageView envView = _errorCheckerboardImage.imageView;  // fallback
+        VkImageView envView = _defaultCubemap.imageView;  // black cubemap fallback
         VkSampler envSampler = _defaultSamplerLinear;
         if (_environmentMap && _environmentMap->getEnvironmentCubemap() != VK_NULL_HANDLE &&
             _environmentMap->getSampler() != VK_NULL_HANDLE) {
@@ -3796,15 +3859,21 @@ GPUMeshBuffers VulkanEngine::generate_cylinder_mesh(int segments) {
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
 
-    // Side vertices with outward-facing normals
-    for (int i = 0; i <= segments; ++i) {
-        float angle = 2.0f * glm::pi<float>() * i / segments;
-        float x = std::cos(angle);
-        float z = std::sin(angle);
-        glm::vec3 sideNormal(x, 0.0f, z);
+    const float radius = 0.5f;
+    const float halfHeight = 0.5f;
 
-        vertices.push_back({ { x, -1, z }, 0, sideNormal, 0, glm::vec4(1) });
-        vertices.push_back({ { x, 1, z }, 0, sideNormal, 0, glm::vec4(1) });
+    // Side vertices with outward-facing normals and proper UVs
+    for (int i = 0; i <= segments; ++i) {
+        float u = (float)i / (float)segments;
+        float angle = 2.0f * glm::pi<float>() * u;
+        float x = std::cos(angle) * radius;
+        float z = std::sin(angle) * radius;
+        glm::vec3 sideNormal = glm::normalize(glm::vec3(std::cos(angle), 0.0f, std::sin(angle)));
+
+        // Bottom vertex
+        vertices.push_back({ { x, -halfHeight, z }, u, sideNormal, 0.0f, glm::vec4(1.0f) });
+        // Top vertex
+        vertices.push_back({ { x,  halfHeight, z }, u, sideNormal, 1.0f, glm::vec4(1.0f) });
     }
 
     // Side triangles
@@ -3825,13 +3894,15 @@ GPUMeshBuffers VulkanEngine::generate_cylinder_mesh(int segments) {
 
     // Top cap
     int topCenterIdx = static_cast<int>(vertices.size());
-    vertices.push_back({ { 0, 1, 0 }, 0, { 0, 1, 0 }, 0, glm::vec4(1) });
+    vertices.push_back({ { 0, halfHeight, 0 }, 0.5f, { 0, 1, 0 }, 0.5f, glm::vec4(1.0f) });
 
     for (int i = 0; i <= segments; ++i) {
         float angle = 2.0f * glm::pi<float>() * i / segments;
-        float x = std::cos(angle);
-        float z = std::sin(angle);
-        vertices.push_back({ { x, 1, z }, 0, { 0, 1, 0 }, 0, glm::vec4(1) });
+        float x = std::cos(angle) * radius;
+        float z = std::sin(angle) * radius;
+        float u = x / (2.0f * radius) + 0.5f;
+        float v = z / (2.0f * radius) + 0.5f;
+        vertices.push_back({ { x, halfHeight, z }, u, { 0, 1, 0 }, v, glm::vec4(1.0f) });
     }
 
     for (int i = 0; i < segments; ++i) {
@@ -3842,13 +3913,15 @@ GPUMeshBuffers VulkanEngine::generate_cylinder_mesh(int segments) {
 
     // Bottom cap
     int bottomCenterIdx = static_cast<int>(vertices.size());
-    vertices.push_back({ { 0, -1, 0 }, 0, { 0, -1, 0 }, 0, glm::vec4(1) });
+    vertices.push_back({ { 0, -halfHeight, 0 }, 0.5f, { 0, -1, 0 }, 0.5f, glm::vec4(1.0f) });
 
     for (int i = 0; i <= segments; ++i) {
         float angle = 2.0f * glm::pi<float>() * i / segments;
-        float x = std::cos(angle);
-        float z = std::sin(angle);
-        vertices.push_back({ { x, -1, z }, 0, { 0, -1, 0 }, 0, glm::vec4(1) });
+        float x = std::cos(angle) * radius;
+        float z = std::sin(angle) * radius;
+        float u = x / (2.0f * radius) + 0.5f;
+        float v = z / (2.0f * radius) + 0.5f;
+        vertices.push_back({ { x, -halfHeight, z }, u, { 0, -1, 0 }, v, glm::vec4(1.0f) });
     }
 
     for (int i = 0; i < segments; ++i) {
@@ -6930,6 +7003,9 @@ void VulkanEngine::draw_primitives(VkCommandBuffer cmd, VkDescriptorSet globalDe
 
     for (auto& shape : static_shapes) {
         if (!shape.visible) continue;
+        if (shape.mesh.vertexBuffer.buffer == VK_NULL_HANDLE ||
+            shape.mesh.indexBuffer.buffer == VK_NULL_HANDLE ||
+            shape.mesh.indexCount == 0) continue;
 
         // Bind material descriptor set (Set 1) - only if different from last
         VkDescriptorSet materialSet = shape.getMaterialDescriptorSet(this);
@@ -7030,6 +7106,9 @@ void VulkanEngine::draw_primitives_with_viewport(VkCommandBuffer cmd, VkDescript
         if (shape.passType != MaterialPass::MainColor && shape.passType != MaterialPass::Transparent) {
             continue;
         }
+        if (shape.mesh.vertexBuffer.buffer == VK_NULL_HANDLE ||
+            shape.mesh.indexBuffer.buffer == VK_NULL_HANDLE ||
+            shape.mesh.indexCount == 0) continue;
 
         // Select pipeline based on view mode AND material type
         VkPipeline pipelineToUse = select_primitive_pipeline(viewMode, shape.materialType);
