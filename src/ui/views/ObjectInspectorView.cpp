@@ -385,36 +385,96 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
     }
 
     // ==========================================================================
-    // TEXTURES SECTION - Texture paths for primitive materials
+    // TEXTURES SECTION - Drag-and-drop texture assignment per primitive
     // ==========================================================================
     if (ImGui::CollapsingHeader("Textures")) {
         ImGui::Indent();
 
-        ImGui::TextDisabled("Assign textures via Material View or drag-drop");
+        ImGui::TextDisabled("Drag textures from Asset Browser onto each slot");
         ImGui::Spacing();
 
-        // Helper lambda to display texture path status
-        auto showTexturePath = [](const char* label, const std::string& path) {
-            if (!path.empty()) {
-                // Extract filename from path
-                size_t lastSlash = path.find_last_of("/\\");
-                std::string filename = (lastSlash != std::string::npos) ?
-                    path.substr(lastSlash + 1) : path;
-                ImGui::Text("%s: %s", label, filename.c_str());
+        bool texturesChanged = false;
+
+        // Drag-and-drop texture slot lambda
+        auto renderTextureDropSlot = [&](const char* label, std::string& texPath) -> bool {
+            bool changed = false;
+            ImGui::PushID(label);
+
+            ImGui::TextDisabled("%s", label);
+
+            // Determine button color based on whether texture is assigned
+            ImVec4 slotColor = !texPath.empty() ?
+                ImVec4(0.2f, 0.4f, 0.3f, 1.0f) :
+                ImVec4(0.2f, 0.2f, 0.25f, 1.0f);
+
+            ImGui::PushStyleColor(ImGuiCol_Button, slotColor);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                ImVec4(slotColor.x + 0.1f, slotColor.y + 0.1f, slotColor.z + 0.1f, 1.0f));
+
+            // Show filename or placeholder
+            std::string buttonLabel;
+            if (!texPath.empty()) {
+                size_t lastSlash = texPath.find_last_of("/\\");
+                buttonLabel = (lastSlash != std::string::npos) ? texPath.substr(lastSlash + 1) : texPath;
             } else {
-                ImGui::TextDisabled("%s: [Default White]", label);
+                buttonLabel = "[Drop Texture Here]";
             }
+
+            ImGui::Button(buttonLabel.c_str(), ImVec2(-30, 35));
+
+            // Drag-drop target
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("TEXTURE_PATH")) {
+                    const char* droppedPath = static_cast<const char*>(payload->Data);
+                    texPath = droppedPath;
+                    changed = true;
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            // Tooltip
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                if (!texPath.empty()) {
+                    ImGui::Text("%s", texPath.c_str());
+                    ImGui::TextDisabled("Click X to remove");
+                } else {
+                    ImGui::Text("Drop a texture from Asset Browser");
+                }
+                ImGui::EndTooltip();
+            }
+
+            ImGui::PopStyleColor(2);
+
+            // Clear button
+            ImGui::SameLine();
+            if (ImGui::Button("X", ImVec2(25, 35)) && !texPath.empty()) {
+                texPath.clear();
+                changed = true;
+            }
+
+            ImGui::PopID();
+            ImGui::Spacing();
+            return changed;
         };
 
-        showTexturePath("Albedo", shape.albedoTexturePath);
-        showTexturePath("Metal/Rough", shape.metalRoughTexturePath);
-        showTexturePath("Emission", shape.emissionTexturePath);
+        // Render the three texture slots
+        if (renderTextureDropSlot("Albedo (Base Color)", shape.albedoTexturePath)) texturesChanged = true;
+        if (renderTextureDropSlot("Metallic/Roughness", shape.metalRoughTexturePath)) texturesChanged = true;
+        if (renderTextureDropSlot("Emission", shape.emissionTexturePath)) texturesChanged = true;
+
+        // Auto-rebuild material when textures change
+        if (texturesChanged) {
+            MaterialInstance newMaterial = m_Engine->create_primitive_material(
+                shape.albedoTexturePath, shape.metalRoughTexturePath, shape.emissionTexturePath);
+            shape.material = std::make_shared<MaterialInstance>(newMaterial);
+        }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Clear textures button
+        // Clear all textures button
         bool hasTextures = !shape.albedoTexturePath.empty() ||
                           !shape.metalRoughTexturePath.empty() ||
                           !shape.emissionTexturePath.empty();
@@ -425,8 +485,6 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
                 shape.metalRoughTexturePath.clear();
                 shape.emissionTexturePath.clear();
             }
-        } else {
-            ImGui::TextDisabled("No custom textures assigned");
         }
 
         ImGui::Unindent();
@@ -960,8 +1018,9 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         ImGui::Unindent();
     }
 
-    // Material editing for GLTF nodes
-    if (node->mesh && !node->mesh->surfaces.empty() && ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // Material editing for GLTF nodes (only for MeshNode with surfaces)
+    MeshNode* meshNode = dynamic_cast<MeshNode*>(node);
+    if (meshNode && meshNode->mesh && !meshNode->mesh->surfaces.empty() && ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent();
         RenderGLTFMaterialEditor();
         ImGui::Unindent();
@@ -970,13 +1029,13 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
     // Mesh info
     if (ImGui::CollapsingHeader("Mesh Info")) {
         ImGui::Indent();
-        ImGui::Text("Has Mesh: %s", node->mesh ? "Yes" : "No");
-        if (node->mesh) {
-            ImGui::Text("Surfaces: %zu", node->mesh->surfaces.size());
+        ImGui::Text("Has Mesh: %s", meshNode && meshNode->mesh ? "Yes" : "No");
+        if (meshNode && meshNode->mesh) {
+            ImGui::Text("Surfaces: %zu", meshNode->mesh->surfaces.size());
 
             // Calculate total triangles
             uint32_t totalIndices = 0;
-            for (const auto& surface : node->mesh->surfaces) {
+            for (const auto& surface : meshNode->mesh->surfaces) {
                 totalIndices += surface.count;
             }
             ImGui::Text("Total Indices: %u", totalIndices);
@@ -984,8 +1043,8 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
 
             // Surface details
             if (ImGui::TreeNode("Surfaces")) {
-                for (size_t i = 0; i < node->mesh->surfaces.size(); ++i) {
-                    auto& surface = node->mesh->surfaces[i];
+                for (size_t i = 0; i < meshNode->mesh->surfaces.size(); ++i) {
+                    auto& surface = meshNode->mesh->surfaces[i];
                     if (ImGui::TreeNode(("Surface " + std::to_string(i)).c_str())) {
                         ImGui::Text("Start Index: %u", surface.startIndex);
                         ImGui::Text("Index Count: %u", surface.count);
@@ -1105,7 +1164,7 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
 // =============================================================================
 
 void ObjectInspectorView::RenderGLTFMaterialEditor() {
-    auto* node = m_Engine->selectedNode;
+    MeshNode* node = dynamic_cast<MeshNode*>(m_Engine->selectedNode);
     if (!node || !node->mesh || node->mesh->surfaces.empty()) return;
 
     auto& surfaces = node->mesh->surfaces;

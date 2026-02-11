@@ -125,6 +125,9 @@ void VulkanEngine::init()
     // Initialize environment map / skybox system
     init_environment_map();
 
+    // Initialize real-time reflection probe
+    init_reflection_probe();
+
     init_renderables();
 
     init_imgui();
@@ -244,8 +247,12 @@ void VulkanEngine::cleanup()
         // Make sure the GPU has stopped doing its things
         vkDeviceWaitIdle(_device);
 
+        // Process any pending scene unloads before cleanup
+        _pendingSceneUnloads.clear();  // Don't need deferred anymore, we'll clear everything
+
         // Cleanup post-processing and path tracing systems
         cleanup_path_tracer();
+        cleanup_reflection_probe();
         cleanup_environment_map();
         cleanup_post_processing();
 
@@ -376,6 +383,26 @@ void VulkanEngine::cleanup()
             _defaultGLTFMaterialData.buffer = VK_NULL_HANDLE;
         }
 
+        // Default primitive material data buffer
+        if (_primitiveMaterialDataBuffer.buffer != VK_NULL_HANDLE) {
+            destroy_buffer(_primitiveMaterialDataBuffer);
+            _primitiveMaterialDataBuffer.buffer = VK_NULL_HANDLE;
+        }
+
+        // Dynamic primitive material resources (images and buffers from create_primitive_material)
+        for (auto& img : _dynamicPrimitiveMaterialImages) {
+            if (img.image != VK_NULL_HANDLE) {
+                destroy_image(img);
+            }
+        }
+        _dynamicPrimitiveMaterialImages.clear();
+        for (auto& buf : _dynamicPrimitiveMaterialBuffers) {
+            if (buf.buffer != VK_NULL_HANDLE) {
+                destroy_buffer(buf);
+            }
+        }
+        _dynamicPrimitiveMaterialBuffers.clear();
+
         // 8. Destroy swapchain
         destroy_swapchain();
 
@@ -425,9 +452,9 @@ void VulkanEngine::init_scene_data() {
     // Note: Scene data buffers are cleaned up explicitly in cleanup()
 
     // === Initial Lighting Setup ===
-    sceneData.ambientColor = glm::vec4(0.1f, 0.1f, 0.1f, 0.5f); // RGB + intensity
+    sceneData.ambientColor = glm::vec4(0.15f, 0.15f, 0.18f, 1.0f); // RGB + intensity (slightly blue-tinted sky ambient)
     glm::vec3 sunDir = glm::normalize(glm::vec3(-1.0f, -3.0f, -1.0f));
-    sceneData.sunlightDirection = glm::vec4(sunDir, 3.0f); // direction + intensity
+    sceneData.sunlightDirection = glm::vec4(sunDir, 2.0f); // direction + intensity
     sceneData.sunlightColor = glm::vec4(1.0f, 0.95f, 0.8f, 1.0f); // warm white
 
     // === Camera Position (will be updated each frame) ===
@@ -444,6 +471,10 @@ void VulkanEngine::init_scene_data() {
     for (int i = 0; i < SHADOW_CASCADE_COUNT; i++) {
         sceneData.shadowMatrices[i] = glm::mat4(1.0f);
     }
+
+    // === Color Grading Defaults ===
+    sceneData.colorGrading = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f); // exposure=1, contrast=1, saturation=1, vibrance=0
+    sceneData.colorTemperature = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f); // temperature=0, tint=0, tonemapOp=0(ACES), unused
 }
 
 // =============================================================================
@@ -1772,6 +1803,11 @@ void VulkanEngine::init_default_data() {
 
 void VulkanEngine::draw_main(VkCommandBuffer cmd)
 {
+    // === REFLECTION PROBE (render scene into cubemap for reflections) ===
+    if (_reflectionCubemap.image != VK_NULL_HANDLE && _currentViewMode != ViewMode::PathTraced) {
+        render_reflection_probe(cmd);
+    }
+
     // === SHADOW PASS (before main rendering) ===
     if (shadowsEnabled && _shadowPipeline != VK_NULL_HANDLE) {
         render_shadow_pass(cmd);
@@ -1877,6 +1913,50 @@ void VulkanEngine::draw_main(VkCommandBuffer cmd)
     draw_viewing(cmd);
 
     vkCmdEndRendering(cmd);
+
+    // === BLOOM POST-PROCESS (operates on HDR linear values) ===
+    if (_bloomPass && _renderSettings.bloomEnabled && _currentViewMode != ViewMode::PathTraced) {
+        // Sync bloom settings from render settings
+        _bloomPass->settings.enabled = _renderSettings.bloomEnabled;
+        _bloomPass->settings.threshold = _renderSettings.bloomThreshold;
+        _bloomPass->settings.intensity = _renderSettings.bloomIntensity;
+        _bloomPass->settings.mipLevels = _renderSettings.bloomMipLevels;
+        _bloomPass->settings.radius = _renderSettings.bloomRadius;
+
+        // Execute bloom pass (reads from _drawImage, writes bloom back to _drawImage)
+        _bloomPass->execute(cmd, _drawImage, _drawImage);
+
+        // Bloom upsample leaves _drawImage in GENERAL layout - perfect for tonemap
+    }
+
+    // === FINAL TONE MAPPING (converts HDR linear -> LDR sRGB) ===
+    // Runs AFTER bloom so emissive surfaces can have values > 1.0 for bloom detection
+    if (_tonemapPipeline != VK_NULL_HANDLE && _currentViewMode != ViewMode::PathTraced) {
+        // Ensure _drawImage is in GENERAL layout for compute imageLoad/imageStore
+        // After bloom it's already GENERAL; if bloom is disabled, rasterize left it in GENERAL too
+        VkMemoryBarrier memBarrier{};
+        memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+        execute_tonemap(cmd);
+
+        // Barrier: ensure tonemap writes complete before swapchain copy
+        VkMemoryBarrier postToneBarrier{};
+        postToneBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        postToneBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        postToneBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 1, &postToneBarrier, 0, nullptr, 0, nullptr);
+    }
 }
 
 void VulkanEngine::update_imgui()
@@ -1919,11 +1999,11 @@ void VulkanEngine::draw_node_recursive_ui(std::shared_ptr<Node> node)
     }
 
     // Bu node seçili mi?
-    bool selected = (selectedNode == meshNode);
+    bool selected = (selectedNode == node.get());
 
     // UI'de selectable olarak göster
     if (ImGui::Selectable(label.c_str(), selected)) {
-        selectedNode = meshNode;  //
+        selectedNode = node.get();  // Assign any Node, not just MeshNode
     }
 
     // Alt node'lar varsa onları da göster (recursive)
@@ -1974,7 +2054,7 @@ void VulkanEngine::draw_node_gizmo()
     static ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
     static ImGuizmo::MODE mode = ImGuizmo::LOCAL;
     static glm::mat4 model = selectedNode->localTransform;
-    static MeshNode* lastNode = nullptr;
+    static Node* lastNode = nullptr;
 
     // Update model when selection changes
     if (lastNode != selectedNode) {
@@ -2104,6 +2184,9 @@ void VulkanEngine::draw()
     update_scene();
     //wait until the gpu has finished rendering the last frame. Timeout of 1 second
     VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+
+    // Process deferred scene unloads AFTER fence wait (GPU done with all references)
+    processPendingSceneUnloads();
 
     get_current_frame()._deletionQueue.flush();
     get_current_frame()._frameDescriptors.clear_pools(_device);
@@ -2519,11 +2602,18 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         writer.writes.push_back(cubemapWrite);
     }
 
-    // Environment cubemap binding (binding 4) - always write with fallback
+    // Environment cubemap binding (binding 4) - use reflection probe if available, else procedural sky
     {
         VkImageView envView = _defaultCubemap.imageView;  // black cubemap fallback
         VkSampler envSampler = _defaultSamplerLinear;
-        if (_environmentMap && _environmentMap->getEnvironmentCubemap() != VK_NULL_HANDLE &&
+
+        // Priority: 1) Real-time reflection probe  2) Environment map  3) Default black
+        if (_reflectionProbeReady && _reflectionCubemap.imageView != VK_NULL_HANDLE) {
+            envView = _reflectionCubemap.imageView;
+            if (_environmentMap && _environmentMap->getSampler() != VK_NULL_HANDLE) {
+                envSampler = _environmentMap->getSampler();
+            }
+        } else if (_environmentMap && _environmentMap->getEnvironmentCubemap() != VK_NULL_HANDLE &&
             _environmentMap->getSampler() != VK_NULL_HANDLE) {
             envView = _environmentMap->getEnvironmentCubemap();
             envSampler = _environmentMap->getSampler();
@@ -2586,7 +2676,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         {
             const RenderObject& obj = drawCommands.OpaqueSurfaces[drawID];
 
-            if (selectedNode && obj.nodePointer == selectedNode)
+            if (selectedNode && obj.nodePointer == dynamic_cast<MeshNode*>(selectedNode))
             {
                 /*fmt::println("Seçili obje çiziliyor (outline): {}", obj.name);*/
                 draw_wireframe_outline(cmd, obj, globalDescriptor, viewport, scissor);
@@ -2952,9 +3042,9 @@ void VulkanEngine::draw_material_preview(VkCommandBuffer cmd, VkDescriptorSet gl
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    for (auto& idx : opaque_draws) {
-        const RenderObject& r = drawCommands.OpaqueSurfaces[idx];
-        if (!r.material || r.material->materialSet == VK_NULL_HANDLE) continue;
+    // Helper lambda to draw a render object
+    auto drawObj = [&](const RenderObject& r) {
+        if (!r.material || r.material->materialSet == VK_NULL_HANDLE) return;
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _materialPreviewPipelineLayout,
             0, 1, &globalDescriptor, 0, nullptr);
@@ -2975,6 +3065,16 @@ void VulkanEngine::draw_material_preview(VkCommandBuffer cmd, VkDescriptorSet gl
         stats.triangle_count += r.indexCount / 3;
 
         vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+    };
+
+    // Draw opaque surfaces first
+    for (auto& idx : opaque_draws) {
+        drawObj(drawCommands.OpaqueSurfaces[idx]);
+    }
+
+    // Draw transparent surfaces after opaque
+    for (auto& r : drawCommands.TransparentSurfaces) {
+        drawObj(r);
     }
 }
 
@@ -5049,6 +5149,45 @@ void VulkanEngine::run()
     cleanup();
 }
 
+void VulkanEngine::processPendingSceneUnloads() {
+    if (_pendingSceneUnloads.empty()) return;
+
+    // At this point the GPU fence has been waited on, so all previous frames
+    // that referenced these scene resources have finished executing.
+    // Safe to destroy now.
+
+    for (auto& sceneName : _pendingSceneUnloads) {
+        auto it = loadedScenes.find(sceneName);
+        if (it == loadedScenes.end()) continue;
+
+        // Clear selection if it belongs to this scene
+        if (selectedNode != nullptr && it->second) {
+            for (const auto& [name, node] : it->second->nodes) {
+                if (node.get() == selectedNode) {
+                    selectedNode = nullptr;
+                    selectedObjectName.clear();
+                    break;
+                }
+            }
+        }
+
+        // Clear draw commands to prevent stale references
+        drawCommands.OpaqueSurfaces.clear();
+        drawCommands.TransparentSurfaces.clear();
+        pickableRenderObjects.clear();
+
+        // Now safe to destroy the scene (shared_ptr → clearAll → destroys GPU resources)
+        loadedScenes.erase(it);
+
+        if (_pathTracer) {
+            _pathTracer->notifySceneChanged();
+        }
+
+        fmt::print("[Engine] Deferred unload completed for scene: {}\n", sceneName);
+    }
+    _pendingSceneUnloads.clear();
+}
+
 void VulkanEngine::update_scene() {
     float dt = stats.frametime / 1000.f; // frametime is in ms, convert to seconds
     if (dt <= 0.f) dt = 1.f / 60.f;     // fallback for first frame
@@ -5086,6 +5225,20 @@ void VulkanEngine::update_scene() {
 
     // === Update Shadow Cascades ===
     update_shadow_cascades();
+
+    // === Color Grading from Render Settings ===
+    sceneData.colorGrading = glm::vec4(
+        _renderSettings.exposure,
+        _renderSettings.contrast,
+        _renderSettings.saturation,
+        0.0f // vibrance (unused for now)
+    );
+    sceneData.colorTemperature = glm::vec4(
+        _renderSettings.temperature,
+        _renderSettings.tint,
+        static_cast<float>(_renderSettings.tonemapOperator),
+        0.0f
+    );
 
     // === GPU SceneData Buffer'ına yaz ===
     AllocatedBuffer& buf = get_current_frame().sceneDataBuffer;
@@ -5541,12 +5694,35 @@ MaterialInstance VulkanEngine::create_primitive_material(
     resources.dataBuffer = materialBuffer.buffer;
     resources.dataBufferOffset = 0;
 
-    return metalRoughMaterial.write_material(
-        _device,
-        MaterialPass::MainColor,
-        resources,
-        get_current_frame()._frameDescriptors
-    );
+    // IMPORTANT: Use globalDescriptorAllocator (persistent) instead of frame descriptors!
+    // Frame descriptors get cleared every frame, which would invalidate the material.
+    MaterialInstance matData;
+    matData.passType = MaterialPass::MainColor;
+    matData.pipeline = &metalRoughMaterial.opaquePipeline;
+    matData.materialSet = globalDescriptorAllocator.allocate(_device, metalRoughMaterial.materialLayout);
+
+    DescriptorWriter descWriter;
+    descWriter.write_buffer(0, resources.dataBuffer,
+        sizeof(GLTFMetallic_Roughness::MaterialConstants), resources.dataBufferOffset,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    descWriter.write_image(1, resources.colorImage.imageView, resources.colorSampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    descWriter.write_image(2, resources.metalRoughImage.imageView, resources.metalRoughSampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    descWriter.update_set(_device, matData.materialSet);
+
+    // Track dynamically created resources for cleanup
+    if (resources.colorImage.image != VK_NULL_HANDLE && resources.colorImage.image != _whiteImage.image) {
+        _dynamicPrimitiveMaterialImages.push_back(resources.colorImage);
+    }
+    if (resources.metalRoughImage.image != VK_NULL_HANDLE && resources.metalRoughImage.image != _whiteImage.image) {
+        _dynamicPrimitiveMaterialImages.push_back(resources.metalRoughImage);
+    }
+    _dynamicPrimitiveMaterialBuffers.push_back(materialBuffer);
+
+    fmt::print("[Material] Created persistent primitive material (albedo={}, metalRough={})\n",
+        albedoPath.empty() ? "default" : albedoPath, metalRoughPath.empty() ? "default" : metalRoughPath);
+    return matData;
 }
 
 void VulkanEngine::init_vulkan()
@@ -5711,6 +5887,7 @@ void VulkanEngine::init_swapchain()
     drawImageUsages |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     drawImageUsages |= VK_IMAGE_USAGE_STORAGE_BIT;
     drawImageUsages |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    drawImageUsages |= VK_IMAGE_USAGE_SAMPLED_BIT;  // For bloom downsample sampling
 
     VkImageCreateInfo rimg_info = vkinit::image_create_info(_drawImage.imageFormat, drawImageUsages, drawImageExtent);
 
@@ -6032,7 +6209,7 @@ void VulkanEngine::resize_swapchain()
 
     // Yenilerini oluştur
     _drawImage = create_image(drawImageExtent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
     _depthImage = create_image(drawImageExtent, VK_FORMAT_D32_SFLOAT,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
@@ -6044,6 +6221,11 @@ void VulkanEngine::resize_swapchain()
 
     // Update skybox bg descriptor with new draw image
     updateSkyboxBgDescriptor();
+
+    // Resize bloom mip chain
+    if (_bloomPass) {
+        _bloomPass->onResize(VkExtent2D{ _windowExtent.width, _windowExtent.height });
+    }
 
     resize_requested = false;
 }
@@ -6385,6 +6567,13 @@ VertexInputDescription Vertex::get_vertex_description() {
     colorAttrib.format = VK_FORMAT_R32G32B32A32_SFLOAT;
     colorAttrib.offset = offsetof(Vertex, color);
     description.attributes.push_back(colorAttrib);
+
+    VkVertexInputAttributeDescription tangentAttrib = {};
+    tangentAttrib.binding = 0;
+    tangentAttrib.location = 5;
+    tangentAttrib.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    tangentAttrib.offset = offsetof(Vertex, tangent);
+    description.attributes.push_back(tangentAttrib);
 
     return description;
 }
@@ -7873,18 +8062,116 @@ void VulkanEngine::init_post_processing() {
     // Initialize with default settings
     _renderSettings = Yalaz::Renderer::RenderSettings{};
 
+    // Create and initialize bloom pass
+    _bloomPass = std::make_unique<Yalaz::Renderer::BloomPass>(this);
+    _bloomPass->init();
+    fmt::print("[PostProcess] Bloom pass initialized\n");
+
+    // Create tonemap compute pipeline (runs after bloom)
+    init_tonemap_pipeline();
+
     fmt::print("[PostProcess] Post-processing system initialized\n");
 }
 
 void VulkanEngine::cleanup_post_processing() {
+    if (_bloomPass) {
+        _bloomPass.reset();
+    }
     if (_postProcessManager) {
         _postProcessManager.reset();
+    }
+    if (_tonemapPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(_device, _tonemapPipeline, nullptr);
+        _tonemapPipeline = VK_NULL_HANDLE;
+    }
+    if (_tonemapPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(_device, _tonemapPipelineLayout, nullptr);
+        _tonemapPipelineLayout = VK_NULL_HANDLE;
     }
 }
 
 void VulkanEngine::render_post_processing(VkCommandBuffer cmd) {
     // Placeholder - will be integrated into main render loop
     (void)cmd;
+}
+
+void VulkanEngine::init_tonemap_pipeline() {
+    // Push constant: matches tonemap_final.comp PushConstants layout
+    struct TonemapPushConstants {
+        float exposure;
+        float contrast;
+        float saturation;
+        float temperature;
+        float tint;
+        int tonemapOperator;
+        int _pad0;
+        int _pad1;
+    };
+
+    // Pipeline layout: uses the drawImage descriptor set (storage image at binding 0)
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(TonemapPushConstants);
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &_drawImageDescriptorLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+
+    VK_CHECK(vkCreatePipelineLayout(_device, &layoutInfo, nullptr, &_tonemapPipelineLayout));
+
+    // Load shader
+    VkShaderModule tonemapShader = load_shader_module("../../shaders/tonemap_final.comp.spv");
+
+    VkComputePipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.layout = _tonemapPipelineLayout;
+    pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = tonemapShader;
+    pipelineInfo.stage.pName = "main";
+
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &_tonemapPipeline));
+
+    vkDestroyShaderModule(_device, tonemapShader, nullptr);
+
+    fmt::print("[PostProcess] Tonemap compute pipeline initialized\n");
+}
+
+void VulkanEngine::execute_tonemap(VkCommandBuffer cmd) {
+    // Push constants matching tonemap_final.comp
+    struct TonemapPushConstants {
+        float exposure;
+        float contrast;
+        float saturation;
+        float temperature;
+        float tint;
+        int tonemapOperator;
+        int _pad0;
+        int _pad1;
+    };
+
+    TonemapPushConstants pc{};
+    pc.exposure = _renderSettings.exposure;
+    pc.contrast = _renderSettings.contrast;
+    pc.saturation = _renderSettings.saturation;
+    pc.temperature = _renderSettings.temperature;
+    pc.tint = _renderSettings.tint;
+    pc.tonemapOperator = _renderSettings.tonemapOperator;
+
+    // _drawImage must be in GENERAL layout for imageLoad/imageStore
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _tonemapPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _tonemapPipelineLayout,
+        0, 1, &_drawImageDescriptors, 0, nullptr);
+    vkCmdPushConstants(cmd, _tonemapPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(TonemapPushConstants), &pc);
+
+    uint32_t groupsX = (_drawExtent.width + 7) / 8;
+    uint32_t groupsY = (_drawExtent.height + 7) / 8;
+    vkCmdDispatch(cmd, groupsX, groupsY, 1);
 }
 
 void VulkanEngine::init_gbuffer() {
@@ -7960,4 +8247,361 @@ void VulkanEngine::cleanup_environment_map() {
         _environmentMap->cleanup();
         _environmentMap.reset();
     }
+}
+
+// =============================================================================
+// REAL-TIME REFLECTION PROBE
+// =============================================================================
+
+void VulkanEngine::init_reflection_probe() {
+    const uint32_t size = REFLECTION_PROBE_SIZE;
+
+    // Create cubemap image (6 faces)
+    VkImageCreateInfo cubemapInfo{};
+    cubemapInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    cubemapInfo.imageType = VK_IMAGE_TYPE_2D;
+    cubemapInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    cubemapInfo.extent = { size, size, 1 };
+    cubemapInfo.mipLevels = 1;
+    cubemapInfo.arrayLayers = 6;
+    cubemapInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    cubemapInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    cubemapInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    cubemapInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    cubemapInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    VK_CHECK(vmaCreateImage(_allocator, &cubemapInfo, &allocInfo,
+        &_reflectionCubemap.image, &_reflectionCubemap.allocation, nullptr));
+    _reflectionCubemap.imageExtent = { size, size, 1 };
+    _reflectionCubemap.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+    // Create cubemap view (all 6 faces)
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = _reflectionCubemap.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    viewInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 6;
+
+    VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &_reflectionCubemap.imageView));
+
+    // Create per-face image views (for rendering to individual faces)
+    for (int face = 0; face < 6; ++face) {
+        VkImageViewCreateInfo faceViewInfo{};
+        faceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        faceViewInfo.image = _reflectionCubemap.image;
+        faceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        faceViewInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        faceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        faceViewInfo.subresourceRange.baseMipLevel = 0;
+        faceViewInfo.subresourceRange.levelCount = 1;
+        faceViewInfo.subresourceRange.baseArrayLayer = face;
+        faceViewInfo.subresourceRange.layerCount = 1;
+
+        VK_CHECK(vkCreateImageView(_device, &faceViewInfo, nullptr, &_reflectionFaceViews[face]));
+    }
+
+    // Create depth image for probe rendering
+    VkExtent3D depthExtent = { size, size, 1 };
+    _reflectionDepth = create_image(depthExtent, VK_FORMAT_D32_SFLOAT,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+
+    // Transition cubemap to shader read layout initially
+    immediate_submit([&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = _reflectionCubemap.image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 6;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, nullptr, 0, nullptr, 1, &barrier);
+    });
+
+    fmt::print("[Reflection] Reflection probe initialized ({}x{} per face)\n", size, size);
+}
+
+void VulkanEngine::cleanup_reflection_probe() {
+    vkDeviceWaitIdle(_device);
+
+    for (int face = 0; face < 6; ++face) {
+        if (_reflectionFaceViews[face] != VK_NULL_HANDLE) {
+            vkDestroyImageView(_device, _reflectionFaceViews[face], nullptr);
+            _reflectionFaceViews[face] = VK_NULL_HANDLE;
+        }
+    }
+
+    if (_reflectionCubemap.imageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(_device, _reflectionCubemap.imageView, nullptr);
+    }
+    if (_reflectionCubemap.image != VK_NULL_HANDLE) {
+        vmaDestroyImage(_allocator, _reflectionCubemap.image, _reflectionCubemap.allocation);
+    }
+    _reflectionCubemap = {};
+
+    if (_reflectionDepth.image != VK_NULL_HANDLE) {
+        destroy_image(_reflectionDepth);
+    }
+    _reflectionDepth = {};
+}
+
+glm::mat4 VulkanEngine::getReflectionFaceViewMatrix(int face, const glm::vec3& probePos) const {
+    // Cubemap face directions (Vulkan/OpenGL convention)
+    // Note: Vulkan Y is flipped compared to OpenGL cubemaps
+    static const glm::vec3 targets[] = {
+        { 1, 0, 0},  // +X
+        {-1, 0, 0},  // -X
+        { 0, 1, 0},  // +Y
+        { 0,-1, 0},  // -Y
+        { 0, 0, 1},  // +Z
+        { 0, 0,-1},  // -Z
+    };
+    static const glm::vec3 ups[] = {
+        { 0,-1, 0},  // +X
+        { 0,-1, 0},  // -X
+        { 0, 0, 1},  // +Y
+        { 0, 0,-1},  // -Y
+        { 0,-1, 0},  // +Z
+        { 0,-1, 0},  // -Z
+    };
+    return glm::lookAt(probePos, probePos + targets[face], ups[face]);
+}
+
+glm::mat4 VulkanEngine::getReflectionProjectionMatrix() const {
+    // 90-degree FOV, 1:1 aspect ratio, covers exactly one cubemap face
+    glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 500.0f);
+    proj[1][1] *= -1; // Vulkan Y-flip
+    return proj;
+}
+
+void VulkanEngine::render_reflection_probe(VkCommandBuffer cmd) {
+    // Only update periodically for performance
+    _reflectionFrameCounter++;
+    if (_reflectionFrameCounter < REFLECTION_UPDATE_INTERVAL && _reflectionProbeReady) return;
+    _reflectionFrameCounter = 0;
+
+    if (_reflectionCubemap.image == VK_NULL_HANDLE) return;
+    if (drawCommands.OpaqueSurfaces.empty() && static_shapes.empty()) return;
+
+    const uint32_t size = REFLECTION_PROBE_SIZE;
+
+    // Probe position: center of the scene (could be made configurable)
+    glm::vec3 probePos = mainCamera.position;
+
+    // Save current scene data
+    glm::mat4 savedView = sceneData.view;
+    glm::mat4 savedProj = sceneData.proj;
+    glm::mat4 savedViewProj = sceneData.viewproj;
+    glm::vec4 savedCamPos = sceneData.cameraPosition;
+
+    glm::mat4 projMatrix = getReflectionProjectionMatrix();
+
+    // Transition cubemap to color attachment for writing
+    VkImageMemoryBarrier toAttach{};
+    toAttach.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toAttach.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toAttach.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toAttach.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAttach.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAttach.image = _reflectionCubemap.image;
+    toAttach.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    toAttach.subresourceRange.baseMipLevel = 0;
+    toAttach.subresourceRange.levelCount = 1;
+    toAttach.subresourceRange.baseArrayLayer = 0;
+    toAttach.subresourceRange.layerCount = 6;
+    toAttach.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toAttach.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+        0, nullptr, 0, nullptr, 1, &toAttach);
+
+    // Render each face
+    for (int face = 0; face < 6; ++face) {
+        glm::mat4 viewMatrix = getReflectionFaceViewMatrix(face, probePos);
+
+        // Update scene data for this face
+        sceneData.view = viewMatrix;
+        sceneData.proj = projMatrix;
+        sceneData.viewproj = projMatrix * viewMatrix;
+        sceneData.cameraPosition = glm::vec4(probePos, 1.0f);
+
+        // Create per-face scene data buffer
+        AllocatedBuffer probeSceneBuffer = create_buffer(sizeof(GPUSceneData),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+        get_current_frame()._deletionQueue.push_function([=, this]() {
+            destroy_buffer(probeSceneBuffer);
+        });
+
+        GPUSceneData* probeData = (GPUSceneData*)probeSceneBuffer.allocation->GetMappedData();
+        *probeData = sceneData;
+
+        // Create descriptor set for this face
+        VkDescriptorSetVariableDescriptorCountAllocateInfo allocArrayInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO
+        };
+        uint32_t descriptorCounts = std::max(1u, static_cast<uint32_t>(texCache.Cache.size()));
+        allocArrayInfo.pDescriptorCounts = &descriptorCounts;
+        allocArrayInfo.descriptorSetCount = 1;
+
+        VkDescriptorSet probeDescriptor = get_current_frame()._frameDescriptors.allocate(
+            _device, _gpuSceneDataDescriptorLayout, &allocArrayInfo);
+
+        DescriptorWriter writer;
+        writer.write_buffer(0, probeSceneBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+
+        // Shadow map binding (binding 2)
+        if (_shadowMapView != VK_NULL_HANDLE && _shadowSampler != VK_NULL_HANDLE) {
+            writer.write_image(2, _shadowMapView, _shadowSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+
+        // Point light shadow cubemaps (binding 3)
+        std::array<VkDescriptorImageInfo, MAX_SHADOW_POINT_LIGHTS> cubemapInfos{};
+        if (_pointLightShadowSampler != VK_NULL_HANDLE) {
+            for (uint32_t i = 0; i < MAX_SHADOW_POINT_LIGHTS; i++) {
+                cubemapInfos[i].sampler = _pointLightShadowSampler;
+                cubemapInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                if (_pointLightShadows[i].cubemapView != VK_NULL_HANDLE) {
+                    cubemapInfos[i].imageView = _pointLightShadows[i].cubemapView;
+                } else if (_pointLightShadows[0].cubemapView != VK_NULL_HANDLE) {
+                    cubemapInfos[i].imageView = _pointLightShadows[0].cubemapView;
+                } else {
+                    cubemapInfos[i].imageView = _errorCheckerboardImage.imageView;
+                }
+            }
+            VkWriteDescriptorSet cubemapWrite{ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            cubemapWrite.dstSet = probeDescriptor;
+            cubemapWrite.dstBinding = 3;
+            cubemapWrite.dstArrayElement = 0;
+            cubemapWrite.descriptorCount = MAX_SHADOW_POINT_LIGHTS;
+            cubemapWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            cubemapWrite.pImageInfo = cubemapInfos.data();
+            writer.writes.push_back(cubemapWrite);
+        }
+
+        // Environment cubemap (binding 4) - use procedural sky (not the reflection cubemap!)
+        {
+            VkImageView envView = _defaultCubemap.imageView;
+            VkSampler envSampler = _defaultSamplerLinear;
+            if (_environmentMap && _environmentMap->getEnvironmentCubemap() != VK_NULL_HANDLE &&
+                _environmentMap->getSampler() != VK_NULL_HANDLE) {
+                envView = _environmentMap->getEnvironmentCubemap();
+                envSampler = _environmentMap->getSampler();
+            }
+            writer.write_image(4, envView, envSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+
+        // Bindless textures (binding 5)
+        if (!texCache.Cache.empty()) {
+            VkWriteDescriptorSet arraySet{ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            arraySet.descriptorCount = descriptorCounts;
+            arraySet.dstArrayElement = 0;
+            arraySet.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            arraySet.dstBinding = 5;
+            arraySet.pImageInfo = texCache.Cache.data();
+            writer.writes.push_back(arraySet);
+        }
+
+        writer.update_set(_device, probeDescriptor);
+
+        // Transition depth to depth attachment
+        vkutil::transition_image(cmd, _reflectionDepth.image,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+
+        // Begin rendering to this cubemap face
+        VkRenderingAttachmentInfo colorAttachment{};
+        colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        colorAttachment.imageView = _reflectionFaceViews[face];
+        colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.clearValue.color = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+        VkRenderingAttachmentInfo depthAttachment{};
+        depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depthAttachment.imageView = _reflectionDepth.imageView;
+        depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.clearValue.depthStencil = { 0.0f, 0 }; // Reverse-Z: 0 = far
+
+        VkRenderingInfo renderInfo{};
+        renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        renderInfo.renderArea = { {0, 0}, {size, size} };
+        renderInfo.layerCount = 1;
+        renderInfo.colorAttachmentCount = 1;
+        renderInfo.pColorAttachments = &colorAttachment;
+        renderInfo.pDepthAttachment = &depthAttachment;
+
+        vkCmdBeginRendering(cmd, &renderInfo);
+
+        VkViewport vp = { 0, 0, (float)size, (float)size, 0.0f, 1.0f };
+        VkRect2D sc = { {0, 0}, {size, size} };
+
+        // Draw GLTF meshes (opaque only)
+        if (!drawCommands.OpaqueSurfaces.empty()) {
+            std::vector<uint32_t> allDraws;
+            allDraws.reserve(drawCommands.OpaqueSurfaces.size());
+            for (uint32_t i = 0; i < drawCommands.OpaqueSurfaces.size(); i++) {
+                allDraws.push_back(i);
+            }
+            draw_rendered(cmd, probeDescriptor, vp, sc, allDraws);
+        }
+
+        // Draw primitives
+        if (!static_shapes.empty() && _primitivePipelineLayout != VK_NULL_HANDLE) {
+            draw_primitives_with_viewport(cmd, probeDescriptor, vp, sc, ViewMode::Rendered);
+        }
+
+        vkCmdEndRendering(cmd);
+    }
+
+    // Transition cubemap back to shader read for sampling
+    VkImageMemoryBarrier toRead{};
+    toRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toRead.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toRead.image = _reflectionCubemap.image;
+    toRead.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    toRead.subresourceRange.baseMipLevel = 0;
+    toRead.subresourceRange.levelCount = 1;
+    toRead.subresourceRange.baseArrayLayer = 0;
+    toRead.subresourceRange.layerCount = 6;
+    toRead.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        0, nullptr, 0, nullptr, 1, &toRead);
+
+    // Restore original scene data
+    sceneData.view = savedView;
+    sceneData.proj = savedProj;
+    sceneData.viewproj = savedViewProj;
+    sceneData.cameraPosition = savedCamPos;
+
+    _reflectionProbeReady = true;
 }

@@ -15,6 +15,7 @@
 #include "../../assets/MaterialFile.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <filesystem>
+#include <algorithm>
 #include <stb_image.h>
 
 namespace fs = std::filesystem;
@@ -54,6 +55,19 @@ void MaterialView::InitPresets() {
     m_Presets.push_back({"Glass", glm::vec4(0.95f, 0.95f, 0.95f, 0.2f), 0.0f, 0.05f, 1.0f, glm::vec3(0)});
     m_Presets.push_back({"Rubber", glm::vec4(0.1f, 0.1f, 0.1f, 1.0f), 0.0f, 0.9f, 1.0f, glm::vec3(0)});
     m_Presets.push_back({"Emissive", glm::vec4(1.0f, 0.5f, 0.2f, 1.0f), 0.0f, 0.5f, 1.0f, glm::vec3(1.0f, 0.5f, 0.2f)});
+
+    // Ceramic & Fabric
+    m_Presets.push_back({"Ceramic", glm::vec4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.15f, 1.0f, glm::vec3(0)});
+    m_Presets.push_back({"Clay", glm::vec4(0.76f, 0.55f, 0.38f, 1.0f), 0.0f, 0.85f, 1.0f, glm::vec3(0)});
+    m_Presets.push_back({"Silk", glm::vec4(0.95f, 0.87f, 0.80f, 1.0f), 0.0f, 0.3f, 1.0f, glm::vec3(0)});
+    m_Presets.push_back({"Velvet", glm::vec4(0.35f, 0.05f, 0.15f, 1.0f), 0.0f, 0.95f, 1.0f, glm::vec3(0)});
+    m_Presets.push_back({"Leather", glm::vec4(0.45f, 0.25f, 0.10f, 1.0f), 0.0f, 0.65f, 1.0f, glm::vec3(0)});
+
+    // Emissive variants
+    m_Presets.push_back({"Neon Red", glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), 0.0f, 0.5f, 1.0f, glm::vec3(1.0f, 0.1f, 0.1f)});
+    m_Presets.push_back({"Neon Blue", glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), 0.0f, 0.5f, 1.0f, glm::vec3(0.1f, 0.3f, 1.0f)});
+    m_Presets.push_back({"Neon Green", glm::vec4(0.1f, 1.0f, 0.3f, 1.0f), 0.0f, 0.5f, 1.0f, glm::vec3(0.1f, 1.0f, 0.3f)});
+    m_Presets.push_back({"Lava", glm::vec4(0.9f, 0.2f, 0.0f, 1.0f), 0.0f, 0.7f, 1.0f, glm::vec3(1.0f, 0.3f, 0.0f)});
 }
 
 void MaterialView::OnRender() {
@@ -169,7 +183,11 @@ void MaterialView::SyncWithSelection() {
     if (!m_Engine) return;
 
     // Check for GLTF MeshNode selection first
-    MeshNode* meshNode = m_Engine->selectedNode;
+    // Use try/catch for dynamic_cast safety since selectedNode could be stale
+    MeshNode* meshNode = nullptr;
+    if (m_Engine->selectedNode) {
+        meshNode = dynamic_cast<MeshNode*>(m_Engine->selectedNode);
+    }
 
     if (meshNode && meshNode->mesh && !meshNode->mesh->surfaces.empty()) {
         // GLTF model selected
@@ -193,6 +211,18 @@ void MaterialView::SyncWithSelection() {
             m_CurrentGLTFMaterial = nullptr;
             m_LastSelectedPrimitiveIndex = m_Engine->selectedPrimitiveIndex;
             m_LastSelectedMeshNode = nullptr;
+
+            // Sync texture slots from the newly selected primitive's paths
+            auto& newShape = m_Engine->static_shapes[m_Engine->selectedPrimitiveIndex];
+            m_AlbedoSlot.path = newShape.albedoTexturePath;
+            m_AlbedoSlot.isLoaded = !newShape.albedoTexturePath.empty();
+            m_MetallicRoughnessSlot.path = newShape.metalRoughTexturePath;
+            m_MetallicRoughnessSlot.isLoaded = !newShape.metalRoughTexturePath.empty();
+            m_EmissionSlot.path = newShape.emissionTexturePath;
+            m_EmissionSlot.isLoaded = !newShape.emissionTexturePath.empty();
+            // Clear slots that don't have per-primitive paths
+            m_NormalSlot = {"Normal", "", false, 0};
+            m_AOSlot = {"Ambient Occlusion", "", false, 0};
         }
 
         // Always sync from the shape's current values (ObjectInspectorView may have changed them)
@@ -220,14 +250,16 @@ void MaterialView::SyncWithSelection() {
 }
 
 void MaterialView::LoadGLTFMaterialData() {
-    if (!m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
+    if (!m_Engine || !m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
 
     auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
+    if (surfaces.empty()) {
+        m_SelectedSurfaceIndex = 0;
+        return;
+    }
     if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) {
         m_SelectedSurfaceIndex = 0;
     }
-
-    if (surfaces.empty()) return;
 
     auto& surface = surfaces[m_SelectedSurfaceIndex];
     m_CurrentGLTFMaterial = surface.material;
@@ -237,12 +269,13 @@ void MaterialView::LoadGLTFMaterialData() {
     uint32_t bufferOffset = m_CurrentGLTFMaterial->bufferOffset;
 
     // Read actual material constants from the GPU buffer
+    // Take a snapshot of loaded scenes to avoid issues with concurrent modification
     for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
         if (!scene) continue;
 
         bool found = false;
         for (auto& [matName, mat] : scene->materials) {
-            if (mat == m_CurrentGLTFMaterial) { found = true; break; }
+            if (mat && mat == m_CurrentGLTFMaterial) { found = true; break; }
         }
         if (!found) continue;
 
@@ -339,12 +372,394 @@ void MaterialView::RenderGLTFMaterialList() {
 void MaterialView::RenderMaterialProperties() {
     bool changed = false;
 
-    // Base Color with alpha
+    // === BASE COLOR (Detailed Color Palette) ===
     SectionHeader("Base Color");
+
     float col[4] = { m_BaseColor.r, m_BaseColor.g, m_BaseColor.b, m_BaseColor.a };
-    if (ImGui::ColorEdit4("##BaseColor", col, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_AlphaBar)) {
-        m_BaseColor = glm::vec4(col[0], col[1], col[2], col[3]);
-        changed = true;
+
+    // Color display bar - shows current color prominently
+    ImVec4 displayColor(col[0], col[1], col[2], col[3]);
+    ImGui::PushStyleColor(ImGuiCol_Button, displayColor);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, displayColor);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, displayColor);
+    ImGui::Button("##ColorDisplay", ImVec2(-1, 25));
+    ImGui::PopStyleColor(3);
+
+    // HSV display
+    float h, s, v;
+    ImGui::ColorConvertRGBtoHSV(col[0], col[1], col[2], h, s, v);
+    ImGui::TextDisabled("RGB: %.0f, %.0f, %.0f  |  HSV: %.0f, %.0f%%, %.0f%%  |  A: %.0f%%",
+        col[0] * 255, col[1] * 255, col[2] * 255,
+        h * 360, s * 100, v * 100, col[3] * 100);
+
+    // Picker mode toggle
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Picker:");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Wheel", m_ColorPickerMode == 0)) m_ColorPickerMode = 0;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Bar", m_ColorPickerMode == 1)) m_ColorPickerMode = 1;
+    ImGui::SameLine();
+    ImGui::Checkbox("Expanded", &m_ShowFullColorPicker);
+
+    // Full color picker widget
+    if (m_ShowFullColorPicker) {
+        ImGuiColorEditFlags pickerFlags =
+            ImGuiColorEditFlags_AlphaBar |
+            ImGuiColorEditFlags_AlphaPreview |
+            ImGuiColorEditFlags_Float |
+            ImGuiColorEditFlags_DisplayRGB |
+            ImGuiColorEditFlags_DisplayHSV |
+            ImGuiColorEditFlags_DisplayHex |
+            ImGuiColorEditFlags_InputRGB;
+
+        if (m_ColorPickerMode == 0) {
+            pickerFlags |= ImGuiColorEditFlags_PickerHueWheel;
+        } else {
+            pickerFlags |= ImGuiColorEditFlags_PickerHueBar;
+        }
+
+        bool wasActive = m_ColorPickerActive;
+        if (ImGui::ColorPicker4("##ColorPicker", col, pickerFlags)) {
+            m_BaseColor = glm::vec4(col[0], col[1], col[2], col[3]);
+            changed = true;
+            m_ColorPickerActive = true;
+        }
+
+        // Save to color history when user releases the picker
+        if (wasActive && !ImGui::IsItemActive()) {
+            m_ColorPickerActive = false;
+            // Add to history if different from last entry
+            bool duplicate = false;
+            if (m_ColorHistoryCount > 0) {
+                auto& last = m_ColorHistory[(m_ColorHistoryCount - 1) % MAX_COLOR_HISTORY];
+                if (glm::abs(last.r - m_BaseColor.r) < 0.01f &&
+                    glm::abs(last.g - m_BaseColor.g) < 0.01f &&
+                    glm::abs(last.b - m_BaseColor.b) < 0.01f) {
+                    duplicate = true;
+                }
+            }
+            if (!duplicate) {
+                int idx = m_ColorHistoryCount % MAX_COLOR_HISTORY;
+                m_ColorHistory[idx] = m_BaseColor;
+                m_ColorHistoryCount++;
+            }
+        }
+    } else {
+        // Compact color edit
+        if (ImGui::ColorEdit4("##BaseColor", col,
+            ImGuiColorEditFlags_Float | ImGuiColorEditFlags_AlphaBar |
+            ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_DisplayHex)) {
+            m_BaseColor = glm::vec4(col[0], col[1], col[2], col[3]);
+            changed = true;
+        }
+    }
+
+    // === COLOR PALETTE SYSTEM ===
+    ImGui::Spacing();
+
+    // Hue spectrum bar - click anywhere for a hue
+    {
+        ImVec2 barPos = ImGui::GetCursorScreenPos();
+        float barWidth = ImGui::GetContentRegionAvail().x;
+        float barHeight = 16.0f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // Draw rainbow gradient
+        int segments = 32;
+        float segW = barWidth / segments;
+        for (int i = 0; i < segments; i++) {
+            float h0 = (float)i / segments;
+            float h1 = (float)(i + 1) / segments;
+            float r0, g0, b0, r1, g1, b1;
+            ImGui::ColorConvertHSVtoRGB(h0, 1.0f, 1.0f, r0, g0, b0);
+            ImGui::ColorConvertHSVtoRGB(h1, 1.0f, 1.0f, r1, g1, b1);
+            dl->AddRectFilledMultiColor(
+                ImVec2(barPos.x + segW * i, barPos.y),
+                ImVec2(barPos.x + segW * (i + 1), barPos.y + barHeight),
+                IM_COL32(r0*255,g0*255,b0*255,255), IM_COL32(r1*255,g1*255,b1*255,255),
+                IM_COL32(r1*255,g1*255,b1*255,255), IM_COL32(r0*255,g0*255,b0*255,255));
+        }
+
+        // Current hue indicator
+        float curH, curS, curV;
+        ImGui::ColorConvertRGBtoHSV(col[0], col[1], col[2], curH, curS, curV);
+        float indicatorX = barPos.x + curH * barWidth;
+        dl->AddTriangleFilled(
+            ImVec2(indicatorX, barPos.y + barHeight),
+            ImVec2(indicatorX - 4, barPos.y + barHeight + 5),
+            ImVec2(indicatorX + 4, barPos.y + barHeight + 5),
+            IM_COL32(255,255,255,255));
+
+        // Invisible button for interaction
+        ImGui::InvisibleButton("##HueBar", ImVec2(barWidth, barHeight + 6));
+        if (ImGui::IsItemActive()) {
+            float mouseX = ImGui::GetIO().MousePos.x - barPos.x;
+            float newH = std::clamp(mouseX / barWidth, 0.0f, 1.0f);
+            float r, g, b;
+            ImGui::ColorConvertHSVtoRGB(newH, std::max(curS, 0.5f), std::max(curV, 0.5f), r, g, b);
+            m_BaseColor = glm::vec4(r, g, b, m_BaseColor.a);
+            col[0] = r; col[1] = g; col[2] = b;
+            changed = true;
+        }
+    }
+
+    ImGui::Spacing();
+
+    // Category filter tabs
+    const char* categories[] = { "All", "Basic", "Pastel", "Earth", "Neon", "Gray", "Skin", "Metal", "Nature" };
+    for (int i = 0; i < 9; i++) {
+        if (i > 0) ImGui::SameLine();
+        bool selected = (m_PaletteCategory == i);
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.7f, 1.0f));
+        if (ImGui::SmallButton(categories[i])) m_PaletteCategory = i;
+        if (selected) ImGui::PopStyleColor();
+    }
+
+    ImGui::Spacing();
+
+    // --- MEGA COLOR PALETTE ---
+    // Basic (16)
+    static const ImVec4 basicColors[] = {
+        {1,1,1,1}, {0.85f,0.85f,0.85f,1}, {0.65f,0.65f,0.65f,1}, {0.45f,0.45f,0.45f,1},
+        {0.25f,0.25f,0.25f,1}, {0.1f,0.1f,0.1f,1}, {0,0,0,1}, {1,0,0,1},
+        {0,0.8f,0,1}, {0,0,1,1}, {1,1,0,1}, {1,0.5f,0,1},
+        {0.5f,0,1,1}, {0,1,1,1}, {1,0,1,1}, {1,0.4f,0.6f,1},
+    };
+    // Pastel (16)
+    static const ImVec4 pastelColors[] = {
+        {1,0.82f,0.86f,1}, {1,0.87f,0.74f,1}, {1,0.97f,0.74f,1}, {0.82f,1,0.74f,1},
+        {0.74f,1,0.89f,1}, {0.74f,0.92f,1,1}, {0.82f,0.74f,1,1}, {1,0.74f,1,1},
+        {0.95f,0.77f,0.77f,1}, {0.95f,0.88f,0.77f,1}, {0.90f,0.95f,0.77f,1}, {0.77f,0.95f,0.82f,1},
+        {0.77f,0.95f,0.95f,1}, {0.77f,0.82f,0.95f,1}, {0.88f,0.77f,0.95f,1}, {0.95f,0.77f,0.88f,1},
+    };
+    // Earth tones (16)
+    static const ImVec4 earthColors[] = {
+        {0.72f,0.53f,0.04f,1}, {0.55f,0.27f,0.07f,1}, {0.40f,0.26f,0.13f,1}, {0.82f,0.71f,0.55f,1},
+        {0.76f,0.60f,0.42f,1}, {0.65f,0.50f,0.39f,1}, {0.87f,0.72f,0.53f,1}, {0.72f,0.60f,0.50f,1},
+        {0.44f,0.37f,0.22f,1}, {0.33f,0.42f,0.18f,1}, {0.55f,0.47f,0.14f,1}, {0.42f,0.32f,0.28f,1},
+        {0.86f,0.80f,0.65f,1}, {0.60f,0.46f,0.33f,1}, {0.70f,0.60f,0.33f,1}, {0.50f,0.40f,0.30f,1},
+    };
+    // Neon (12)
+    static const ImVec4 neonColors[] = {
+        {1,0,0.4f,1}, {1,0.2f,0,1}, {0.9f,1,0,1}, {0,1,0.2f,1},
+        {0,1,0.8f,1}, {0,0.6f,1,1}, {0.4f,0,1,1}, {1,0,0.8f,1},
+        {1,0.6f,0,1}, {0.5f,1,0,1}, {0,0.8f,1,1}, {0.8f,0,1,1},
+    };
+    // Grayscale (12)
+    static const ImVec4 grayColors[] = {
+        {1,1,1,1}, {0.93f,0.93f,0.93f,1}, {0.85f,0.85f,0.85f,1}, {0.75f,0.75f,0.75f,1},
+        {0.65f,0.65f,0.65f,1}, {0.55f,0.55f,0.55f,1}, {0.45f,0.45f,0.45f,1}, {0.35f,0.35f,0.35f,1},
+        {0.25f,0.25f,0.25f,1}, {0.15f,0.15f,0.15f,1}, {0.07f,0.07f,0.07f,1}, {0,0,0,1},
+    };
+    // Skin tones (12)
+    static const ImVec4 skinColors[] = {
+        {0.99f,0.93f,0.88f,1}, {0.97f,0.87f,0.78f,1}, {0.95f,0.80f,0.68f,1}, {0.92f,0.73f,0.58f,1},
+        {0.87f,0.65f,0.47f,1}, {0.80f,0.58f,0.38f,1}, {0.72f,0.49f,0.30f,1}, {0.62f,0.40f,0.24f,1},
+        {0.52f,0.33f,0.19f,1}, {0.43f,0.27f,0.15f,1}, {0.35f,0.22f,0.12f,1}, {0.26f,0.17f,0.10f,1},
+    };
+    // Metallic reference (12)
+    static const ImVec4 metalColors[] = {
+        {1.0f,0.766f,0.336f,1}, {0.972f,0.960f,0.915f,1}, {0.955f,0.637f,0.538f,1}, {0.56f,0.57f,0.58f,1},
+        {0.913f,0.921f,0.925f,1}, {0.549f,0.556f,0.554f,1}, {0.66f,0.66f,0.63f,1}, {0.78f,0.57f,0.11f,1},
+        {0.90f,0.86f,0.80f,1}, {0.68f,0.70f,0.72f,1}, {0.83f,0.69f,0.22f,1}, {0.34f,0.34f,0.34f,1},
+    };
+    // Nature (16)
+    static const ImVec4 natureColors[] = {
+        {0.13f,0.55f,0.13f,1}, {0.0f,0.39f,0.0f,1}, {0.18f,0.31f,0.18f,1}, {0.42f,0.56f,0.14f,1},
+        {0.56f,0.74f,0.56f,1}, {0.53f,0.81f,0.92f,1}, {0.0f,0.75f,1.0f,1}, {0.12f,0.56f,1.0f,1},
+        {0.0f,0.0f,0.55f,1}, {0.28f,0.24f,0.55f,1}, {0.94f,0.90f,0.55f,1}, {0.98f,0.50f,0.45f,1},
+        {0.50f,0.0f,0.0f,1}, {0.85f,0.44f,0.84f,1}, {0.60f,0.80f,0.20f,1}, {0.30f,0.69f,0.31f,1},
+    };
+
+    // Collect pointers and sizes based on category filter
+    struct PaletteGroup { const ImVec4* colors; int count; const char* name; };
+    PaletteGroup allGroups[] = {
+        { basicColors,  16, "Basic" },
+        { pastelColors, 16, "Pastel" },
+        { earthColors,  16, "Earth Tones" },
+        { neonColors,   12, "Neon" },
+        { grayColors,   12, "Grayscale" },
+        { skinColors,   12, "Skin Tones" },
+        { metalColors,  12, "Metallic" },
+        { natureColors, 16, "Nature" },
+    };
+
+    float swatchSize = 22.0f;
+    float availWidth = ImGui::GetContentRegionAvail().x;
+    int colsPerRow = std::max(1, (int)(availWidth / (swatchSize + 3.0f)));
+
+    // Helper lambda for drawing a swatch grid
+    auto drawSwatches = [&](const ImVec4* colors, int count, int idBase) {
+        for (int i = 0; i < count; i++) {
+            if (i > 0 && (i % colsPerRow) != 0) ImGui::SameLine(0, 1);
+            ImGui::PushID(idBase + i);
+            ImGui::PushStyleColor(ImGuiCol_Button, colors[i]);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                ImVec4(std::min(colors[i].x*1.2f,1.0f), std::min(colors[i].y*1.2f,1.0f),
+                       std::min(colors[i].z*1.2f,1.0f), 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors[i]);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+
+            if (ImGui::Button("##s", ImVec2(swatchSize, swatchSize))) {
+                m_BaseColor = glm::vec4(colors[i].x, colors[i].y, colors[i].z, m_BaseColor.a);
+                changed = true;
+            }
+
+            // Right-click to add to favorites
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_FavoriteCount < MAX_FAVORITES) {
+                m_FavoriteColors[m_FavoriteCount++] = glm::vec4(colors[i].x, colors[i].y, colors[i].z, 1.0f);
+            }
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::ColorButton("##tt", colors[i], 0, ImVec2(40,40));
+                ImGui::SameLine();
+                ImGui::Text("R:%.0f G:%.0f B:%.0f\n#%02X%02X%02X\nRight-click: Add to favorites",
+                    colors[i].x*255, colors[i].y*255, colors[i].z*255,
+                    (int)(colors[i].x*255), (int)(colors[i].y*255), (int)(colors[i].z*255));
+                ImGui::EndTooltip();
+            }
+
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+            ImGui::PopID();
+        }
+    };
+
+    // Draw palette based on selected category
+    if (m_PaletteCategory == 0) {
+        // Show all groups with headers
+        int idBase = 1000;
+        for (int g = 0; g < 8; g++) {
+            ImGui::TextDisabled("%s", allGroups[g].name);
+            drawSwatches(allGroups[g].colors, allGroups[g].count, idBase);
+            idBase += allGroups[g].count;
+            ImGui::Spacing();
+        }
+    } else {
+        int groupIdx = m_PaletteCategory - 1;
+        if (groupIdx >= 0 && groupIdx < 8) {
+            drawSwatches(allGroups[groupIdx].colors, allGroups[groupIdx].count, 1000);
+        }
+    }
+
+    // === COLOR HARMONY ===
+    ImGui::Spacing();
+    ImGui::TextDisabled("Harmony:");
+    ImGui::SameLine();
+    const char* harmonyModes[] = { "None", "Complement", "Analogous", "Triadic", "Split" };
+    ImGui::SetNextItemWidth(100);
+    ImGui::Combo("##Harmony", &m_HarmonyMode, harmonyModes, 5);
+
+    if (m_HarmonyMode > 0) {
+        float hh, ss, vv;
+        ImGui::ColorConvertRGBtoHSV(col[0], col[1], col[2], hh, ss, vv);
+
+        ImVec4 harmonies[4];
+        int harmonyCount = 0;
+
+        if (m_HarmonyMode == 1) { // Complementary
+            float r,g,b;
+            ImGui::ColorConvertHSVtoRGB(fmodf(hh+0.5f,1.0f), ss, vv, r, g, b);
+            harmonies[harmonyCount++] = ImVec4(r,g,b,1);
+        } else if (m_HarmonyMode == 2) { // Analogous
+            for (int i = 0; i < 2; i++) {
+                float offset = (i == 0) ? -0.083f : 0.083f;
+                float r,g,b;
+                ImGui::ColorConvertHSVtoRGB(fmodf(hh+offset+1.0f,1.0f), ss, vv, r, g, b);
+                harmonies[harmonyCount++] = ImVec4(r,g,b,1);
+            }
+        } else if (m_HarmonyMode == 3) { // Triadic
+            for (int i = 0; i < 2; i++) {
+                float offset = (i == 0) ? 0.333f : 0.667f;
+                float r,g,b;
+                ImGui::ColorConvertHSVtoRGB(fmodf(hh+offset,1.0f), ss, vv, r, g, b);
+                harmonies[harmonyCount++] = ImVec4(r,g,b,1);
+            }
+        } else if (m_HarmonyMode == 4) { // Split-Complementary
+            for (int i = 0; i < 2; i++) {
+                float offset = (i == 0) ? 0.417f : 0.583f;
+                float r,g,b;
+                ImGui::ColorConvertHSVtoRGB(fmodf(hh+offset,1.0f), ss, vv, r, g, b);
+                harmonies[harmonyCount++] = ImVec4(r,g,b,1);
+            }
+        }
+
+        ImGui::SameLine();
+        for (int i = 0; i < harmonyCount; i++) {
+            ImGui::PushID(5000 + i);
+            ImGui::PushStyleColor(ImGuiCol_Button, harmonies[i]);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, harmonies[i]);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, harmonies[i]);
+            if (ImGui::Button("##harm", ImVec2(28, 20))) {
+                m_BaseColor = glm::vec4(harmonies[i].x, harmonies[i].y, harmonies[i].z, m_BaseColor.a);
+                changed = true;
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::PopID();
+            if (i < harmonyCount - 1) ImGui::SameLine(0, 2);
+        }
+    }
+
+    // === FAVORITES ===
+    if (m_FavoriteCount > 0) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Favorites (right-click swatch to add):");
+        for (int i = 0; i < m_FavoriteCount; i++) {
+            if (i > 0 && (i % colsPerRow) != 0) ImGui::SameLine(0, 1);
+            ImGui::PushID(3000 + i);
+            ImVec4 fc(m_FavoriteColors[i].r, m_FavoriteColors[i].g, m_FavoriteColors[i].b, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, fc);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                ImVec4(std::min(fc.x*1.2f,1.0f), std::min(fc.y*1.2f,1.0f), std::min(fc.z*1.2f,1.0f), 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, fc);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+            if (ImGui::Button("##fav", ImVec2(swatchSize, swatchSize))) {
+                m_BaseColor = glm::vec4(fc.x, fc.y, fc.z, m_BaseColor.a);
+                changed = true;
+            }
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                // Remove from favorites
+                for (int j = i; j < m_FavoriteCount - 1; j++)
+                    m_FavoriteColors[j] = m_FavoriteColors[j+1];
+                m_FavoriteCount--;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::Text("Click: apply | Right-click: remove");
+                ImGui::EndTooltip();
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+            ImGui::PopID();
+        }
+    }
+
+    // === RECENT HISTORY ===
+    if (m_ColorHistoryCount > 0) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Recent:");
+        int histCount = std::min(m_ColorHistoryCount, (int)MAX_COLOR_HISTORY);
+        for (int i = 0; i < histCount; i++) {
+            int idx = (m_ColorHistoryCount - 1 - i) % MAX_COLOR_HISTORY;
+            if (idx < 0) idx += MAX_COLOR_HISTORY;
+            if (i > 0 && (i % colsPerRow) != 0) ImGui::SameLine(0, 1);
+            ImGui::PushID(2000 + i);
+            ImVec4 hc(m_ColorHistory[idx].r, m_ColorHistory[idx].g, m_ColorHistory[idx].b, m_ColorHistory[idx].a);
+            ImGui::PushStyleColor(ImGuiCol_Button, hc);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                ImVec4(std::min(hc.x*1.2f,1.0f), std::min(hc.y*1.2f,1.0f), std::min(hc.z*1.2f,1.0f), 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, hc);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+            if (ImGui::Button("##hist", ImVec2(swatchSize, swatchSize))) {
+                m_BaseColor = m_ColorHistory[idx];
+                changed = true;
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+            ImGui::PopID();
+        }
     }
 
     ImGui::Spacing();
@@ -396,13 +811,31 @@ void MaterialView::RenderMaterialProperties() {
     SectionHeader("Emission");
 
     float emCol[3] = { m_Emission.r, m_Emission.g, m_Emission.b };
-    if (ImGui::ColorEdit3("##EmissionColor", emCol)) {
+    if (ImGui::ColorEdit3("##EmissionColor", emCol,
+        ImGuiColorEditFlags_Float | ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_DisplayHex)) {
         m_Emission = glm::vec3(emCol[0], emCol[1], emCol[2]);
         changed = true;
     }
-    if (ImGui::SliderFloat("Emission Strength", &m_EmissionStrength, 0.0f, 10.0f)) {
+
+    // Emission strength with logarithmic control
+    ImGui::Text("Strength");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 80);
+    ImGui::TextDisabled("%.2f", m_EmissionStrength);
+    if (ImGui::SliderFloat("##EmissionStrength", &m_EmissionStrength, 0.0f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
         changed = true;
     }
+
+    // Emission quick presets
+    ImGui::TextDisabled("Quick:");
+    if (ImGui::Button("Off##em", ImVec2(40, 0))) { m_EmissionStrength = 0.0f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Dim##em", ImVec2(40, 0))) { m_EmissionStrength = 0.5f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Glow##em", ImVec2(40, 0))) { m_EmissionStrength = 2.0f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Bright##em", ImVec2(50, 0))) { m_EmissionStrength = 5.0f; changed = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Max##em", ImVec2(40, 0))) { m_EmissionStrength = 10.0f; changed = true; }
 
     // Apply changes
     if (changed) {
@@ -993,11 +1426,11 @@ void MaterialView::RenderPresets() {
     ImGui::Spacing();
 
     // Group presets by category
-    const char* categories[] = { "Metals", "Plastics", "Natural", "Special" };
-    int categoryStarts[] = { 0, 6, 11, 15 };
-    int categoryEnds[] = { 6, 11, 15, (int)m_Presets.size() };
+    const char* categories[] = { "Metals", "Plastics", "Natural", "Special", "Ceramic & Fabric", "Emissive" };
+    int categoryStarts[] = { 0, 6, 11, 15, 18, 23 };
+    int categoryEnds[] = { 6, 11, 15, 18, 23, (int)m_Presets.size() };
 
-    for (int cat = 0; cat < 4; ++cat) {
+    for (int cat = 0; cat < 6; ++cat) {
         if (ImGui::CollapsingHeader(categories[cat], ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Indent();
 

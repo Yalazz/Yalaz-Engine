@@ -63,7 +63,7 @@ private:
         float threshold;
         float softThreshold;
         float filterRadius;
-        int srcMipLevel;
+        float intensity;
     };
 
     void createMipChain(VkExtent2D baseExtent);

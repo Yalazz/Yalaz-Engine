@@ -19,6 +19,7 @@ struct Vertex {
     vec3 normal;
     float uv_y;
     vec4 color;
+    vec4 tangent;
 };
 
 // Buffer reference for reading vertices

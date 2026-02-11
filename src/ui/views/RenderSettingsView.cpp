@@ -13,10 +13,17 @@ RenderSettingsView::RenderSettingsView()
 
 void RenderSettingsView::OnInit(VulkanEngine* engine) {
     EditorView::OnInit(engine);
+    // Sync local settings with engine's render settings
+    if (engine) {
+        _settings = engine->_renderSettings;
+    }
 }
 
 void RenderSettingsView::OnRenderContent() {
     if (!m_Engine) return;
+
+    // Sync engine render settings with UI settings each frame
+    m_Engine->_renderSettings = _settings;
 
     // Tab bar for different categories
     if (ImGui::BeginTabBar("RenderSettingsTabs")) {

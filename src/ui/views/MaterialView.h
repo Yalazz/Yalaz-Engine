@@ -142,6 +142,25 @@ private:
     int m_LastSelectedPrimitiveIndex = -1;
     MeshNode* m_LastSelectedMeshNode = nullptr;
 
+    // Color picker state
+    bool m_ShowFullColorPicker = true;
+    int m_ColorPickerMode = 0; // 0=Wheel, 1=Bar
+    static constexpr int MAX_COLOR_HISTORY = 24;
+    glm::vec4 m_ColorHistory[MAX_COLOR_HISTORY] = {};
+    int m_ColorHistoryCount = 0;
+    bool m_ColorPickerActive = false; // track if user is currently picking
+
+    // Favorites
+    static constexpr int MAX_FAVORITES = 32;
+    glm::vec4 m_FavoriteColors[MAX_FAVORITES] = {};
+    int m_FavoriteCount = 0;
+
+    // Palette category filter
+    int m_PaletteCategory = 0; // 0=All, 1=Basic, 2=Pastel, 3=Earth, 4=Neon, 5=Gray, 6=Skin, 7=Metal, 8=Nature
+
+    // Color harmony
+    int m_HarmonyMode = 0; // 0=None, 1=Complementary, 2=Analogous, 3=Triadic, 4=Split-Comp
+
     // Material file state
     std::string m_CurrentMaterialPath;
     std::string m_MaterialName = "Unnamed Material";

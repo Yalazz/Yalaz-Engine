@@ -654,6 +654,14 @@ void PathTracer::uploadSceneData() {
 }
 
 void PathTracer::updateDescriptors() {
+    // Skip if images aren't initialized yet (lazy init pattern)
+    if (_drawImageView == VK_NULL_HANDLE || _accumulationImage.imageView == VK_NULL_HANDLE) {
+        return;
+    }
+    if (_descriptorSet == VK_NULL_HANDLE) {
+        return;
+    }
+
     // Binding 0: engine's draw image (path tracer writes geometry pixels directly)
     VkDescriptorImageInfo outputInfo{};
     outputInfo.imageView = _drawImageView;

@@ -1,0 +1,96 @@
+// =============================================================================
+// FINAL TONE MAPPING + COLOR GRADING - Compute Shader
+// =============================================================================
+// Runs AFTER bloom to apply tone mapping, gamma correction, contrast, saturation.
+// Fragment shaders output HDR linear values; this pass converts to LDR display.
+// =============================================================================
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D drawImage;
+
+layout(push_constant) uniform PushConstants {
+    float exposure;
+    float contrast;
+    float saturation;
+    float temperature;
+    float tint;
+    int tonemapOperator;  // 0=ACES, 1=Reinhard, 2=Uncharted2, 3=Linear
+    int _pad0;
+    int _pad1;
+} pc;
+
+// ACES filmic tone mapping
+vec3 ACESFilm(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// Reinhard tone mapping
+vec3 ReinhardTonemap(vec3 x) {
+    return x / (x + vec3(1.0));
+}
+
+// Uncharted 2 tone mapping
+vec3 Uncharted2Helper(vec3 x) {
+    float A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+vec3 Uncharted2Tonemap(vec3 x) {
+    float W = 11.2;
+    vec3 curr = Uncharted2Helper(x * 2.0);
+    vec3 whiteScale = vec3(1.0) / Uncharted2Helper(vec3(W));
+    return curr * whiteScale;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(drawImage);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec4 pixel = imageLoad(drawImage, coord);
+    vec3 color = pixel.rgb;
+
+    // Apply exposure (in linear HDR space, before tone mapping)
+    color *= pc.exposure;
+
+    // Apply color temperature shift (in linear space)
+    // Temperature: negative = cool (blue), positive = warm (orange)
+    color.r *= 1.0 + pc.temperature * 0.1;
+    color.b *= 1.0 - pc.temperature * 0.1;
+    // Tint: negative = green, positive = magenta
+    color.g *= 1.0 - pc.tint * 0.05;
+    color.r *= 1.0 + pc.tint * 0.025;
+    color.b *= 1.0 + pc.tint * 0.025;
+    color = max(color, vec3(0.0));
+
+    // Tone mapping (selectable operator)
+    if (pc.tonemapOperator == 1) {
+        color = ReinhardTonemap(color);
+    } else if (pc.tonemapOperator == 2) {
+        color = Uncharted2Tonemap(color);
+    } else if (pc.tonemapOperator == 3) {
+        color = clamp(color, 0.0, 1.0); // Linear
+    } else {
+        color = ACESFilm(color); // Default: ACES
+    }
+
+    // Gamma correction (linear to sRGB)
+    color = pow(color, vec3(1.0 / 2.2));
+
+    // Contrast (in gamma space for perceptual correctness)
+    vec3 midGray = vec3(0.5);
+    color = clamp(midGray + (color - midGray) * pc.contrast, 0.0, 1.0);
+
+    // Saturation
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = clamp(mix(vec3(luma), color, pc.saturation), 0.0, 1.0);
+
+    imageStore(drawImage, coord, vec4(color, pixel.a));
+}

@@ -218,9 +218,13 @@ struct alignas(16) GPUSceneData {
     int _shadowPad3;                            // offset 2668, padding
     glm::ivec4 pointLightShadowIndices;         // offset 2672, size 16 (x,y,z,w = indices into pointLights)
 
-    // Total: 2688 bytes
+    // === Color Grading (32 bytes) ===
+    glm::vec4 colorGrading;                     // offset 2688, size 16 (x=exposure, y=contrast, z=saturation, w=vibrance)
+    glm::vec4 colorTemperature;                 // offset 2704, size 16 (x=temperature, y=tint, z=tonemapOperator, w=unused)
+
+    // Total: 2720 bytes
 };
-static_assert(sizeof(GPUSceneData) == 2688, "GPUSceneData must be 2688 bytes for GPU alignment");
+static_assert(sizeof(GPUSceneData) == 2720, "GPUSceneData must be 2720 bytes for GPU alignment");
 
 enum class ShaderOnlyMaterial : uint8_t {
     DEFAULT = 0,      // Full PBR primitive pipeline (default)
@@ -276,7 +280,7 @@ struct Vertex {
     glm::vec3 normal;
     float uv_y;
     glm::vec4 color;
-
+    glm::vec4 tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // xyz = tangent dir, w = handedness
 
     static VertexInputDescription get_vertex_description();
 };
@@ -561,6 +565,30 @@ struct TextureCache {
         info.imageView = view;
         info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         return AddTexture(info, name);
+    }
+
+    // Replace all entries referencing any of the given imageViews with a fallback.
+    // This prevents use-after-free when a scene is unloaded and its images destroyed.
+    void InvalidateImageViews(const std::vector<VkImageView>& deadViews,
+                              VkImageView fallbackView, VkSampler fallbackSampler) {
+        for (auto& entry : Cache) {
+            for (auto dv : deadViews) {
+                if (entry.imageView == dv) {
+                    entry.imageView = fallbackView;
+                    entry.sampler = fallbackSampler;
+                    break;
+                }
+            }
+        }
+        // Also remove NameMap entries pointing to invalidated textures
+        for (auto it = NameMap.begin(); it != NameMap.end(); ) {
+            uint32_t idx = it->second.Index;
+            if (idx < Cache.size() && Cache[idx].imageView == fallbackView) {
+                it = NameMap.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 };
 

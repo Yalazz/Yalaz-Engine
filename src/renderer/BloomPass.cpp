@@ -28,7 +28,11 @@ void BloomPass::init() {
 
     createPipelines();
     createDescriptors();
-    createMipChain(_engine->_drawExtent);
+    // Use drawImage's actual extent (drawExtent may be 0 at init time)
+    VkExtent2D initExtent = { _engine->_drawImage.imageExtent.width, _engine->_drawImage.imageExtent.height };
+    if (initExtent.width > 0 && initExtent.height > 0) {
+        createMipChain(initExtent);
+    }
 }
 
 void BloomPass::cleanup() {
@@ -156,9 +160,9 @@ void BloomPass::createPipelines() {
     VK_CHECK(vkCreatePipelineLayout(_engine->_device, &pipelineLayoutInfo, nullptr, &_pipelineLayout));
 
     // Load compute shaders
-    VkShaderModule downsampleShader = _engine->load_shader_module("shaders/bloom_downsample.comp.spv");
-    VkShaderModule downsampleKarisShader = _engine->load_shader_module("shaders/bloom_downsample_karis.comp.spv");
-    VkShaderModule upsampleShader = _engine->load_shader_module("shaders/bloom_upsample.comp.spv");
+    VkShaderModule downsampleShader = _engine->load_shader_module("../../shaders/bloom_downsample.comp.spv");
+    VkShaderModule downsampleKarisShader = _engine->load_shader_module("../../shaders/bloom_downsample_karis.comp.spv");
+    VkShaderModule upsampleShader = _engine->load_shader_module("../../shaders/bloom_upsample.comp.spv");
 
     // Create downsample pipeline
     VkComputePipelineCreateInfo pipelineInfo{};
@@ -269,9 +273,9 @@ void BloomPass::downsample(VkCommandBuffer cmd, AllocatedImage& input) {
     pc.threshold = settings.threshold;
     pc.softThreshold = settings.softThreshold;
     pc.filterRadius = settings.radius;
+    pc.intensity = settings.intensity;
 
     for (int i = 0; i < _actualMipLevels; ++i) {
-        pc.srcMipLevel = i;
 
         // Transition source to shader read
         VkImageMemoryBarrier srcBarrier{};
@@ -288,14 +292,19 @@ void BloomPass::downsample(VkCommandBuffer cmd, AllocatedImage& input) {
 
         if (i == 0) {
             srcBarrier.image = input.image;
+            // First pass: input comes from rasterization (color attachment write)
+            srcBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            srcBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
         } else {
             srcBarrier.image = _mipChain[i - 1].image.image;
+            srcBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            srcBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
         }
-        srcBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        srcBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
 
         // Transition destination to general for storage write
         VkImageMemoryBarrier dstBarrier = srcBarrier;
@@ -324,9 +333,9 @@ void BloomPass::downsample(VkCommandBuffer cmd, AllocatedImage& input) {
 void BloomPass::upsample(VkCommandBuffer cmd, AllocatedImage& output) {
     BloomPushConstants pc{};
     pc.filterRadius = settings.radius;
+    pc.intensity = settings.intensity;
 
     for (int i = _actualMipLevels - 2; i >= 0; --i) {
-        pc.srcMipLevel = i + 1;
 
         // Transition source to shader read
         VkImageMemoryBarrier srcBarrier{};
@@ -354,10 +363,11 @@ void BloomPass::upsample(VkCommandBuffer cmd, AllocatedImage& output) {
         } else {
             dstBarrier.image = _mipChain[i].image.image;
         }
-        dstBarrier.oldLayout = (i == 0) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // After downsample, all images (including output) are in SHADER_READ_ONLY_OPTIMAL
+        dstBarrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         dstBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        dstBarrier.srcAccessMask = (i == 0) ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_SHADER_WRITE_BIT;
-        dstBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        dstBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dstBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &dstBarrier);

@@ -61,6 +61,10 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
     int _shadowPad2;                        // padding
     int _shadowPad3;                        // padding
     ivec4 pointLightShadowIndices;          // x,y,z,w = indices into pointLights array
+
+    // Color Grading
+    vec4 colorGrading;                      // x=exposure, y=contrast, z=saturation, w=vibrance
+    vec4 colorTemperature;                  // x=temperature, y=tint, z=tonemapOperator, w=unused
 } sceneData;
 
 // Shadow map sampler
@@ -452,7 +456,8 @@ void main()
     float ao = push.pbrParams.z;
 
     // === DETERMINE ALBEDO (texture * material factors * face/main color) ===
-    vec3 texAlbedo = texColor.rgb * materialData.colorFactors.rgb;
+    // Linearize sRGB texture (textures loaded as UNORM, not VK_FORMAT_*_SRGB)
+    vec3 texAlbedo = pow(texColor.rgb, vec3(2.2)) * materialData.colorFactors.rgb;
     vec3 albedo;
 
     if (push.useFaceColors != 0 && fragFaceIndex >= 0 && fragFaceIndex < 6) {
@@ -505,14 +510,10 @@ void main()
         reflection = envColor * fresnel * (1.0 - roughness) * reflectionIntensity;
     }
 
-    // === FINAL COMPOSITION ===
+    // === FINAL COMPOSITION (HDR linear output) ===
+    // Tone mapping, gamma, contrast, saturation are applied in tonemap_final.comp
+    // AFTER bloom, so emissive surfaces remain > 1.0 for bloom detection.
     vec3 result = ambient + directional + pointLighting + emission + reflection;
-
-    // Reinhard tone mapping to prevent over-bright areas
-    result = result / (result + vec3(1.0));
-
-    // Gamma correction (linear to sRGB)
-    result = pow(result, vec3(1.0 / 2.2));
 
     // Output with alpha from all sources
     float alpha = push.mainColor.a * texColor.a * materialData.colorFactors.a;

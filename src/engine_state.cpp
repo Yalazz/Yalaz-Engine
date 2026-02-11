@@ -159,6 +159,17 @@ static json serializePrimitives(const std::vector<StaticMeshData>& shapes) {
         j["materialType"]  = static_cast<int>(s.materialType);
         j["passType"]      = static_cast<int>(s.passType);
 
+        // PBR properties
+        j["metallic"]            = s.metallic;
+        j["roughness"]           = s.roughness;
+        j["emission"]            = vec3_to_json(s.emission);
+        j["reflectionIntensity"] = s.reflectionIntensity;
+
+        // Texture paths
+        if (!s.albedoTexturePath.empty())    j["albedoTexturePath"]    = s.albedoTexturePath;
+        if (!s.metalRoughTexturePath.empty()) j["metalRoughTexturePath"] = s.metalRoughTexturePath;
+        if (!s.emissionTexturePath.empty())  j["emissionTexturePath"]  = s.emissionTexturePath;
+
         json fc = json::array();
         for (int i = 0; i < 6; i++) {
             fc.push_back(vec4_to_json(s.faceColors[i]));
@@ -189,6 +200,17 @@ static void deserializePrimitives(VulkanEngine& engine, std::vector<StaticMeshDa
         if (j.contains("materialType"))  s.materialType  = static_cast<ShaderOnlyMaterial>(j["materialType"].get<int>());
         if (j.contains("passType"))      s.passType      = static_cast<MaterialPass>(j["passType"].get<int>());
 
+        // PBR properties
+        if (j.contains("metallic"))            s.metallic            = j["metallic"].get<float>();
+        if (j.contains("roughness"))           s.roughness           = j["roughness"].get<float>();
+        if (j.contains("emission"))            s.emission            = json_to_vec3(j["emission"]);
+        if (j.contains("reflectionIntensity")) s.reflectionIntensity = j["reflectionIntensity"].get<float>();
+
+        // Texture paths
+        if (j.contains("albedoTexturePath"))    s.albedoTexturePath    = j["albedoTexturePath"].get<std::string>();
+        if (j.contains("metalRoughTexturePath")) s.metalRoughTexturePath = j["metalRoughTexturePath"].get<std::string>();
+        if (j.contains("emissionTexturePath"))  s.emissionTexturePath  = j["emissionTexturePath"].get<std::string>();
+
         if (j.contains("faceColors")) {
             const auto& fc = j["faceColors"];
             for (int i = 0; i < 6 && i < static_cast<int>(fc.size()); i++) {
@@ -207,6 +229,143 @@ static void deserializePrimitives(VulkanEngine& engine, std::vector<StaticMeshDa
 
         shapes.push_back(s);
     }
+}
+
+// ================================================================
+// Serialize spot lights
+// ================================================================
+
+static json serializeSpotLights(const std::vector<SpotLight>& lights) {
+    json arr = json::array();
+    for (const auto& l : lights) {
+        json j;
+        j["name"]           = l.name;
+        j["position"]       = vec3_to_json(l.position);
+        j["direction"]      = vec3_to_json(l.direction);
+        j["color"]          = vec3_to_json(l.color);
+        j["intensity"]      = l.intensity;
+        j["range"]          = l.range;
+        j["innerConeAngle"] = l.innerConeAngle;
+        j["outerConeAngle"] = l.outerConeAngle;
+        j["castsShadow"]    = l.castsShadow;
+        arr.push_back(j);
+    }
+    return arr;
+}
+
+static void deserializeSpotLights(std::vector<SpotLight>& lights, const json& arr) {
+    lights.clear();
+    for (const auto& j : arr) {
+        SpotLight l{};
+        if (j.contains("name"))           l.name           = j["name"].get<std::string>();
+        if (j.contains("position"))       l.position       = json_to_vec3(j["position"]);
+        if (j.contains("direction"))      l.direction      = json_to_vec3(j["direction"]);
+        if (j.contains("color"))          l.color          = json_to_vec3(j["color"]);
+        if (j.contains("intensity"))      l.intensity      = j["intensity"].get<float>();
+        if (j.contains("range"))          l.range          = j["range"].get<float>();
+        if (j.contains("innerConeAngle")) l.innerConeAngle = j["innerConeAngle"].get<float>();
+        if (j.contains("outerConeAngle")) l.outerConeAngle = j["outerConeAngle"].get<float>();
+        if (j.contains("castsShadow"))    l.castsShadow    = j["castsShadow"].get<bool>();
+        lights.push_back(l);
+    }
+}
+
+// ================================================================
+// Serialize render settings
+// ================================================================
+
+static json serializeRenderSettings(const Yalaz::Renderer::RenderSettings& rs) {
+    json j;
+    // SSAO
+    j["ssaoEnabled"]    = rs.ssaoEnabled;
+    j["ssaoSamples"]    = rs.ssaoSamples;
+    j["ssaoRadius"]     = rs.ssaoRadius;
+    j["ssaoIntensity"]  = rs.ssaoIntensity;
+    j["ssaoBias"]       = rs.ssaoBias;
+    j["ssaoBlurPasses"] = rs.ssaoBlurPasses;
+    // Bloom
+    j["bloomEnabled"]   = rs.bloomEnabled;
+    j["bloomThreshold"] = rs.bloomThreshold;
+    j["bloomIntensity"] = rs.bloomIntensity;
+    j["bloomMipLevels"] = rs.bloomMipLevels;
+    j["bloomRadius"]    = rs.bloomRadius;
+    // Tone mapping
+    j["tonemappingEnabled"] = rs.tonemappingEnabled;
+    j["tonemapOperator"]    = rs.tonemapOperator;
+    j["exposure"]           = rs.exposure;
+    j["gamma"]              = rs.gamma;
+    // Color grading
+    j["contrast"]    = rs.contrast;
+    j["saturation"]  = rs.saturation;
+    j["temperature"] = rs.temperature;
+    j["tint"]        = rs.tint;
+    // SSR
+    j["ssrEnabled"]            = rs.ssrEnabled;
+    j["ssrMaxSteps"]           = rs.ssrMaxSteps;
+    j["ssrMaxDistance"]        = rs.ssrMaxDistance;
+    j["ssrThickness"]          = rs.ssrThickness;
+    j["ssrRoughnessThreshold"] = rs.ssrRoughnessThreshold;
+    // Shadows
+    j["pcssEnabled"]              = rs.pcssEnabled;
+    j["pcssBlockerSamples"]       = rs.pcssBlockerSamples;
+    j["pcssPCFSamples"]           = rs.pcssPCFSamples;
+    j["pcssLightSize"]            = rs.pcssLightSize;
+    j["pcssMinPenumbra"]          = rs.pcssMinPenumbra;
+    j["contactShadowsEnabled"]    = rs.contactShadowsEnabled;
+    j["contactShadowSteps"]       = rs.contactShadowSteps;
+    j["contactShadowLength"]      = rs.contactShadowLength;
+    j["contactShadowFadeStart"]   = rs.contactShadowFadeStart;
+    // Spot lights
+    j["spotLightsEnabled"]        = rs.spotLightsEnabled;
+    j["maxSpotLights"]            = rs.maxSpotLights;
+    j["spotLightShadowsEnabled"]  = rs.spotLightShadowsEnabled;
+    return j;
+}
+
+static void deserializeRenderSettings(Yalaz::Renderer::RenderSettings& rs, const json& j) {
+    // SSAO
+    if (j.contains("ssaoEnabled"))    rs.ssaoEnabled    = j["ssaoEnabled"].get<bool>();
+    if (j.contains("ssaoSamples"))    rs.ssaoSamples    = j["ssaoSamples"].get<int>();
+    if (j.contains("ssaoRadius"))     rs.ssaoRadius     = j["ssaoRadius"].get<float>();
+    if (j.contains("ssaoIntensity"))  rs.ssaoIntensity  = j["ssaoIntensity"].get<float>();
+    if (j.contains("ssaoBias"))       rs.ssaoBias       = j["ssaoBias"].get<float>();
+    if (j.contains("ssaoBlurPasses")) rs.ssaoBlurPasses = j["ssaoBlurPasses"].get<int>();
+    // Bloom
+    if (j.contains("bloomEnabled"))   rs.bloomEnabled   = j["bloomEnabled"].get<bool>();
+    if (j.contains("bloomThreshold")) rs.bloomThreshold = j["bloomThreshold"].get<float>();
+    if (j.contains("bloomIntensity")) rs.bloomIntensity = j["bloomIntensity"].get<float>();
+    if (j.contains("bloomMipLevels")) rs.bloomMipLevels = j["bloomMipLevels"].get<int>();
+    if (j.contains("bloomRadius"))    rs.bloomRadius    = j["bloomRadius"].get<float>();
+    // Tone mapping
+    if (j.contains("tonemappingEnabled")) rs.tonemappingEnabled = j["tonemappingEnabled"].get<bool>();
+    if (j.contains("tonemapOperator"))    rs.tonemapOperator    = j["tonemapOperator"].get<int>();
+    if (j.contains("exposure"))           rs.exposure           = j["exposure"].get<float>();
+    if (j.contains("gamma"))              rs.gamma              = j["gamma"].get<float>();
+    // Color grading
+    if (j.contains("contrast"))    rs.contrast    = j["contrast"].get<float>();
+    if (j.contains("saturation"))  rs.saturation  = j["saturation"].get<float>();
+    if (j.contains("temperature")) rs.temperature = j["temperature"].get<float>();
+    if (j.contains("tint"))        rs.tint        = j["tint"].get<float>();
+    // SSR
+    if (j.contains("ssrEnabled"))            rs.ssrEnabled            = j["ssrEnabled"].get<bool>();
+    if (j.contains("ssrMaxSteps"))           rs.ssrMaxSteps           = j["ssrMaxSteps"].get<int>();
+    if (j.contains("ssrMaxDistance"))        rs.ssrMaxDistance        = j["ssrMaxDistance"].get<float>();
+    if (j.contains("ssrThickness"))          rs.ssrThickness          = j["ssrThickness"].get<float>();
+    if (j.contains("ssrRoughnessThreshold")) rs.ssrRoughnessThreshold = j["ssrRoughnessThreshold"].get<float>();
+    // Shadows
+    if (j.contains("pcssEnabled"))            rs.pcssEnabled            = j["pcssEnabled"].get<bool>();
+    if (j.contains("pcssBlockerSamples"))     rs.pcssBlockerSamples     = j["pcssBlockerSamples"].get<int>();
+    if (j.contains("pcssPCFSamples"))         rs.pcssPCFSamples         = j["pcssPCFSamples"].get<int>();
+    if (j.contains("pcssLightSize"))          rs.pcssLightSize          = j["pcssLightSize"].get<float>();
+    if (j.contains("pcssMinPenumbra"))        rs.pcssMinPenumbra        = j["pcssMinPenumbra"].get<float>();
+    if (j.contains("contactShadowsEnabled"))  rs.contactShadowsEnabled  = j["contactShadowsEnabled"].get<bool>();
+    if (j.contains("contactShadowSteps"))     rs.contactShadowSteps     = j["contactShadowSteps"].get<int>();
+    if (j.contains("contactShadowLength"))    rs.contactShadowLength    = j["contactShadowLength"].get<float>();
+    if (j.contains("contactShadowFadeStart")) rs.contactShadowFadeStart = j["contactShadowFadeStart"].get<float>();
+    // Spot lights
+    if (j.contains("spotLightsEnabled"))       rs.spotLightsEnabled       = j["spotLightsEnabled"].get<bool>();
+    if (j.contains("maxSpotLights"))           rs.maxSpotLights           = j["maxSpotLights"].get<int>();
+    if (j.contains("spotLightShadowsEnabled")) rs.spotLightShadowsEnabled = j["spotLightShadowsEnabled"].get<bool>();
 }
 
 // ================================================================
@@ -276,14 +435,16 @@ static void deserializeGrid(GridSettings& g, const json& j) {
 void saveEngineState(VulkanEngine& engine, const std::string& filepath) {
     json root;
 
-    root["camera"]      = serializeCamera(engine.mainCamera);
-    root["lighting"]    = serializeLighting(engine.sceneData);
-    root["pointLights"] = serializePointLights(engine.scenePointLights);
-    root["primitives"]  = serializePrimitives(engine.static_shapes);
-    root["grid"]        = serializeGrid(engine._gridSettings);
-    root["viewMode"]    = static_cast<int>(engine._currentViewMode);
-    root["showGrid"]    = engine._showGrid;
-    root["showOutline"]  = engine._showOutline;
+    root["camera"]         = serializeCamera(engine.mainCamera);
+    root["lighting"]       = serializeLighting(engine.sceneData);
+    root["pointLights"]    = serializePointLights(engine.scenePointLights);
+    root["spotLights"]     = serializeSpotLights(engine.sceneSpotLights);
+    root["primitives"]     = serializePrimitives(engine.static_shapes);
+    root["grid"]           = serializeGrid(engine._gridSettings);
+    root["renderSettings"] = serializeRenderSettings(engine._renderSettings);
+    root["viewMode"]       = static_cast<int>(engine._currentViewMode);
+    root["showGrid"]       = engine._showGrid;
+    root["showOutline"]    = engine._showOutline;
 
     // Save loaded scene file paths
     json scenes = json::object();
@@ -342,14 +503,36 @@ void loadEngineState(VulkanEngine& engine, const std::string& filepath) {
         deserializePointLights(engine.scenePointLights, root["pointLights"]);
     }
 
+    // Load spot lights
+    if (root.contains("spotLights")) {
+        deserializeSpotLights(engine.sceneSpotLights, root["spotLights"]);
+    }
+
     // Load primitives
     if (root.contains("primitives")) {
         deserializePrimitives(engine, engine.static_shapes, root["primitives"]);
+
+        // Rebuild materials from texture paths
+        for (auto& shape : engine.static_shapes) {
+            bool hasTextures = !shape.albedoTexturePath.empty() ||
+                              !shape.metalRoughTexturePath.empty() ||
+                              !shape.emissionTexturePath.empty();
+            if (hasTextures) {
+                MaterialInstance mat = engine.create_primitive_material(
+                    shape.albedoTexturePath, shape.metalRoughTexturePath, shape.emissionTexturePath);
+                shape.material = std::make_shared<MaterialInstance>(mat);
+            }
+        }
     }
 
     // Load grid
     if (root.contains("grid")) {
         deserializeGrid(engine._gridSettings, root["grid"]);
+    }
+
+    // Load render settings
+    if (root.contains("renderSettings")) {
+        deserializeRenderSettings(engine._renderSettings, root["renderSettings"]);
     }
 
     // Load view state

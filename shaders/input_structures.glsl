@@ -60,6 +60,10 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
     int _shadowPad2;                        // offset 2664, padding
     int _shadowPad3;                        // offset 2668, padding
     ivec4 pointLightShadowIndices;          // offset 2672, size 16 (x,y,z,w = indices into pointLights)
+
+    // === Color Grading (32 bytes) ===
+    vec4 colorGrading;                      // offset 2688, size 16 (x=exposure, y=contrast, z=saturation, w=vibrance)
+    vec4 colorTemperature;                  // offset 2704, size 16 (x=temperature, y=tint, z=tonemapOperator, w=unused)
 } sceneData;
 
 // =============================================================================
@@ -98,9 +102,28 @@ int selectCascade(float viewDepth) {
     return SHADOW_CASCADE_COUNT - 1;
 }
 
-// Calculate shadow factor with cascade selection and PCF filtering
+// Poisson disk samples for high-quality soft shadow PCF
+const vec2 poissonDisk[16] = vec2[](
+    vec2(-0.94201624, -0.39906216),  vec2( 0.94558609, -0.76890725),
+    vec2(-0.09418410, -0.92938870),  vec2( 0.34495938,  0.29387760),
+    vec2(-0.91588581,  0.45771432),  vec2(-0.81544232, -0.87912464),
+    vec2(-0.38277543,  0.27676845),  vec2( 0.97484398,  0.75648379),
+    vec2( 0.44323325, -0.97511554),  vec2( 0.53742981, -0.47373420),
+    vec2(-0.26496911, -0.41893023),  vec2( 0.79197514,  0.19090188),
+    vec2(-0.24188840,  0.99706507),  vec2(-0.81409955,  0.91437590),
+    vec2( 0.19984126,  0.78641367),  vec2( 0.14383161, -0.14100790)
+);
+
+// Calculate shadow factor with cascade selection, normal offset, and Poisson PCF
 float calculate_shadow(vec3 worldPos, vec3 normal) {
     if (sceneData.shadowsEnabled == 0) return 1.0;
+
+    // Apply normal offset bias BEFORE light-space projection
+    // This pushes the sample point along the surface normal to prevent acne
+    vec3 lightDir = normalize(-sceneData.sunlightDirection.xyz);
+    float NdotL = max(dot(normal, lightDir), 0.0);
+    float normalOffsetScale = sceneData.shadowNormalBias * (1.0 - NdotL);
+    vec3 offsetPos = worldPos + normal * normalOffsetScale;
 
     // Calculate view-space depth for cascade selection
     vec4 viewPos = sceneData.view * vec4(worldPos, 1.0);
@@ -109,8 +132,8 @@ float calculate_shadow(vec3 worldPos, vec3 normal) {
     // Select appropriate cascade based on distance from camera
     int cascadeIndex = selectCascade(viewDepth);
 
-    // Transform to light space using the selected cascade matrix
-    vec4 lightSpacePos = sceneData.shadowMatrices[cascadeIndex] * vec4(worldPos, 1.0);
+    // Transform OFFSET position to light space
+    vec4 lightSpacePos = sceneData.shadowMatrices[cascadeIndex] * vec4(offsetPos, 1.0);
     vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
 
     // Transform to [0,1] range for texture sampling
@@ -127,49 +150,43 @@ float calculate_shadow(vec3 worldPos, vec3 normal) {
     vec2 atlasOffset = getCascadeOffset(cascadeIndex);
     vec2 atlasUV = projCoords.xy * 0.5 + atlasOffset;
 
-    // Calculate slope-based bias to reduce shadow acne
-    // Bias increases with surface angle to light
-    vec3 lightDir = normalize(-sceneData.sunlightDirection.xyz);
-    float NdotL = dot(normal, lightDir);
+    // Calculate slope-based depth bias
     float slopeFactor = sqrt(1.0 - NdotL * NdotL); // sin(angle)
-
-    // Cascade-dependent bias (larger cascades need more bias)
     float cascadeBias = sceneData.shadowBias * (1.0 + float(cascadeIndex) * 0.5);
     float bias = cascadeBias + cascadeBias * slopeFactor * 2.0;
 
-    // PCF 3x3 soft shadow sampling
+    // Poisson disk PCF - 16 samples with variable spread based on cascade
     float shadow = 0.0;
     vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
-
-    // Scale texel size for atlas (each cascade is 0.5 of the texture)
     vec2 sampleStep = texelSize * 0.5;
 
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            vec2 sampleUV = atlasUV + vec2(x, y) * sampleStep;
+    // Spread increases for farther cascades (softer shadows at distance)
+    float spread = 1.5 + float(cascadeIndex) * 0.5;
 
-            // Clamp to cascade bounds to prevent bleeding
-            vec2 cascadeMin = atlasOffset;
-            vec2 cascadeMax = atlasOffset + vec2(0.5);
-            sampleUV = clamp(sampleUV, cascadeMin + sampleStep, cascadeMax - sampleStep);
+    for (int i = 0; i < 16; ++i) {
+        vec2 offset = poissonDisk[i] * sampleStep * spread;
+        vec2 sampleUV = atlasUV + offset;
 
-            float pcfDepth = texture(shadowMap, sampleUV).r;
-            shadow += (projCoords.z - bias > pcfDepth) ? 0.0 : 1.0;
-        }
+        // Clamp to cascade bounds to prevent bleeding
+        vec2 cascadeMin = atlasOffset + sampleStep;
+        vec2 cascadeMax = atlasOffset + vec2(0.5) - sampleStep;
+        sampleUV = clamp(sampleUV, cascadeMin, cascadeMax);
+
+        float pcfDepth = texture(shadowMap, sampleUV).r;
+        shadow += (projCoords.z - bias > pcfDepth) ? 0.0 : 1.0;
     }
-    shadow /= 9.0;
+    shadow /= 16.0;
 
-    // Optional: Smooth cascade transitions (reduce visible seams)
-    // Blend between cascades at the boundary
+    // Smooth cascade transitions (reduce visible seams)
     float cascadeEnd = (cascadeIndex < SHADOW_CASCADE_COUNT - 1) ?
                         sceneData.cascadeSplits[cascadeIndex] :
                         sceneData.cascadeSplits[SHADOW_CASCADE_COUNT - 1];
     float blendStart = cascadeEnd * 0.9;
 
     if (viewDepth > blendStart && cascadeIndex < SHADOW_CASCADE_COUNT - 1) {
-        // Sample next cascade for blending
+        // Sample next cascade for blending (with normal offset)
         int nextCascade = cascadeIndex + 1;
-        vec4 nextLightSpacePos = sceneData.shadowMatrices[nextCascade] * vec4(worldPos, 1.0);
+        vec4 nextLightSpacePos = sceneData.shadowMatrices[nextCascade] * vec4(offsetPos, 1.0);
         vec3 nextProjCoords = nextLightSpacePos.xyz / nextLightSpacePos.w;
         nextProjCoords.xy = nextProjCoords.xy * 0.5 + 0.5;
 
@@ -183,19 +200,19 @@ float calculate_shadow(vec3 worldPos, vec3 normal) {
             float nextCascadeBias = sceneData.shadowBias * (1.0 + float(nextCascade) * 0.5);
             float nextBias = nextCascadeBias + nextCascadeBias * slopeFactor * 2.0;
 
+            float nextSpread = 1.5 + float(nextCascade) * 0.5;
             float nextShadow = 0.0;
-            for (int x = -1; x <= 1; ++x) {
-                for (int y = -1; y <= 1; ++y) {
-                    vec2 sampleUV = nextAtlasUV + vec2(x, y) * sampleStep;
-                    vec2 cascadeMin = nextAtlasOffset;
-                    vec2 cascadeMax = nextAtlasOffset + vec2(0.5);
-                    sampleUV = clamp(sampleUV, cascadeMin + sampleStep, cascadeMax - sampleStep);
+            for (int i = 0; i < 16; ++i) {
+                vec2 offset = poissonDisk[i] * sampleStep * nextSpread;
+                vec2 sUV = nextAtlasUV + offset;
+                vec2 cMin = nextAtlasOffset + sampleStep;
+                vec2 cMax = nextAtlasOffset + vec2(0.5) - sampleStep;
+                sUV = clamp(sUV, cMin, cMax);
 
-                    float pcfDepth = texture(shadowMap, sampleUV).r;
-                    nextShadow += (nextProjCoords.z - nextBias > pcfDepth) ? 0.0 : 1.0;
-                }
+                float pcfDepth = texture(shadowMap, sUV).r;
+                nextShadow += (nextProjCoords.z - nextBias > pcfDepth) ? 0.0 : 1.0;
             }
-            nextShadow /= 9.0;
+            nextShadow /= 16.0;
 
             // Blend factor
             float blendFactor = (viewDepth - blendStart) / (cascadeEnd - blendStart);
@@ -299,14 +316,13 @@ layout(set = 1, binding = 2) uniform sampler2D metalRoughTex;
 // Material data uniform buffer - MUST match C++ MaterialConstants struct
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 colorFactors;           // Base color RGBA
-    vec4 metal_rough_factors;    // x=metallic, y=roughness, z,w=unused
+    vec4 metal_rough_factors;    // x=metallic, y=roughness, z=ao, w=normalStrength
     uint colorTexID;             // Bindless texture ID for base color
     uint metalRoughTexID;        // Bindless texture ID for metallic-roughness
-    uint pad1;
-    uint pad2;
+    uint normalTexID;            // Bindless texture ID for normal map (0 = none)
+    uint emissiveTexID;          // Bindless texture ID for emissive map (0 = none)
     vec4 extra[13];              // extra[0] = emission (xyz=color, w=strength)
                                  // extra[1].x = reflection intensity (0=none, 1=full)
-                                 // extra[2-12] = reserved for future use
 } materialData;
 
 #endif // INPUT_STRUCTURES_GLSL

@@ -537,14 +537,13 @@ void HierarchyView::RenderSceneNodes() {
                     ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanAvailWidth;
 
                     bool isNodeSelected = m_Engine->selectedNode &&
-                        (static_cast<Node*>(m_Engine->selectedNode) == node.get());
+                        (m_Engine->selectedNode == node.get());
                     if (isNodeSelected) nodeFlags |= ImGuiTreeNodeFlags_Selected;
 
                     bool nodeItemOpen = ImGui::TreeNodeEx(nodeName.c_str(), nodeFlags);
 
                     if (ImGui::IsItemClicked()) {
-                        MeshNode* meshNode = dynamic_cast<MeshNode*>(node.get());
-                        m_Engine->selectedNode = meshNode;
+                        m_Engine->selectedNode = node.get();  // Assign any Node, not just MeshNode
                         m_Engine->selectedObjectName = nodeName;
                         m_Engine->selectedPrimitiveIndex = -1;
                         m_Engine->selectedLightIndex = -1;  // Clear light selection

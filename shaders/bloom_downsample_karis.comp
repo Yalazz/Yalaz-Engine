@@ -18,7 +18,7 @@ layout(push_constant) uniform PushConstants {
     float threshold;
     float softThreshold;
     float filterRadius;
-    int srcMipLevel;
+    float intensity;
 } pc;
 
 // Soft threshold curve for smooth bloom transition

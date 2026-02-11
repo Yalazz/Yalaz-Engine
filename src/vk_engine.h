@@ -18,6 +18,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include "vk_types.h" // GPUMeshBuffers vs için
 #include "renderer/PostProcess.h"
+#include "renderer/BloomPass.h"
 #include "renderer/PathTracer.h"
 #include "renderer/EnvironmentMap.h"
 #include "geometry/PrimitiveType.h"
@@ -295,12 +296,13 @@ struct GLTFMetallic_Roughness {
 
     struct MaterialConstants {
         glm::vec4 colorFactors;          // baseColor RGBA
-        glm::vec4 metal_rough_factors;   // x = metallic, y = roughness, z,w = boş
-        uint32_t colorTexID;             // TextureCache'den alınan ID
-        uint32_t metalRoughTexID;        // TextureCache'den alınan ID
-        uint32_t pad1;               // Uniform buffer alignment için padding
-        uint32_t pad2;
-        glm::vec4 extra[13];             // Genişletilebilir alan (parallax, emissive, occlusion vs için boş yer)
+        glm::vec4 metal_rough_factors;   // x = metallic, y = roughness, z = ao, w = normalStrength
+        uint32_t colorTexID;             // Bindless texture ID for base color
+        uint32_t metalRoughTexID;        // Bindless texture ID for metallic-roughness
+        uint32_t normalTexID;            // Bindless texture ID for normal map (0 = none)
+        uint32_t emissiveTexID;          // Bindless texture ID for emissive map (0 = none)
+        glm::vec4 extra[13];             // extra[0] = emission (xyz=color, w=strength)
+                                         // extra[1].x = reflection intensity
     };
 
 
@@ -537,7 +539,7 @@ public:
     void draw_node_gizmo();
     void draw_node_recursive_ui(std::shared_ptr<Node> node);
 
-    MeshNode* selectedNode = nullptr;      // Selected GLTF node
+    Node* selectedNode = nullptr;      // Selected GLTF node (Node* to support both mesh and non-mesh nodes)
     int selectedPrimitiveIndex = -1;       // Selected primitive shape index (-1 = none)
     int selectedLightIndex = -1;           // Selected light index (-1 = none)
 
@@ -668,6 +670,10 @@ public:
     MaterialInstance _defaultPrimitiveMaterial;
     AllocatedBuffer _primitiveMaterialDataBuffer;
 
+    // Track dynamically created primitive material resources for cleanup
+    std::vector<AllocatedImage> _dynamicPrimitiveMaterialImages;
+    std::vector<AllocatedBuffer> _dynamicPrimitiveMaterialBuffers;
+
     // Helper to create primitive material with custom textures
     MaterialInstance create_primitive_material(
         const std::string& albedoPath = "",
@@ -679,7 +685,7 @@ public:
     // ==========================================================================
     // SHADOW MAPPING SYSTEM
     // ==========================================================================
-    static constexpr uint32_t SHADOW_MAP_SIZE = 2048;  // Shadow map resolution
+    static constexpr uint32_t SHADOW_MAP_SIZE = 4096;  // Shadow map resolution (4K atlas, 2K per cascade)
     static constexpr uint32_t SHADOW_CASCADE_COUNT = 4;  // Number of cascade levels
 
     // Shadow map textures (one per cascade)
@@ -712,7 +718,7 @@ public:
     float shadowNormalBias = 0.015f;  // Normal offset bias
 
     // === Point Light Shadow Cubemaps ===
-    static constexpr uint32_t POINT_LIGHT_SHADOW_SIZE = 512;  // Resolution per face
+    static constexpr uint32_t POINT_LIGHT_SHADOW_SIZE = 1024;  // Resolution per face
     static constexpr uint32_t MAX_SHADOW_POINT_LIGHTS = 4;    // Max lights with shadows
 
     struct PointLightShadowData {
@@ -741,7 +747,14 @@ public:
     // POST-PROCESSING SYSTEM
     // ==========================================================================
     std::unique_ptr<Yalaz::Renderer::PostProcessManager> _postProcessManager;
+    std::unique_ptr<Yalaz::Renderer::BloomPass> _bloomPass;
     Yalaz::Renderer::RenderSettings _renderSettings;
+
+    // Final tone mapping compute pass (runs AFTER bloom)
+    VkPipeline _tonemapPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _tonemapPipelineLayout = VK_NULL_HANDLE;
+    void init_tonemap_pipeline();
+    void execute_tonemap(VkCommandBuffer cmd);
 
     // G-Buffer for deferred effects (SSAO, SSR)
     AllocatedImage _gBufferNormals;       // RGB = world normals
@@ -769,6 +782,23 @@ public:
     std::unique_ptr<Yalaz::Renderer::EnvironmentMap> _environmentMap;
     void init_environment_map();
     void cleanup_environment_map();
+
+    // ==========================================================================
+    // REAL-TIME REFLECTION PROBE
+    // ==========================================================================
+    static constexpr uint32_t REFLECTION_PROBE_SIZE = 256;
+    static constexpr int REFLECTION_UPDATE_INTERVAL = 6; // Update every N frames
+    AllocatedImage _reflectionCubemap;         // Cubemap render target
+    VkImageView _reflectionFaceViews[6] = {};  // Per-face image views
+    AllocatedImage _reflectionDepth;           // Depth buffer for probe rendering
+    int _reflectionFrameCounter = 0;           // Frame counter for periodic updates
+    bool _reflectionProbeReady = false;        // Whether the probe has been rendered at least once
+
+    void init_reflection_probe();
+    void cleanup_reflection_probe();
+    void render_reflection_probe(VkCommandBuffer cmd);
+    glm::mat4 getReflectionFaceViewMatrix(int face, const glm::vec3& probePos) const;
+    glm::mat4 getReflectionProjectionMatrix() const;
 
     // ==========================================================================
     // SPOT LIGHT SYSTEM
@@ -886,6 +916,11 @@ public:
 
     std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
     std::unordered_map<std::string, std::string> sceneFilePaths; // name -> file path
+
+    // Deferred scene unload: scenes marked for removal are destroyed at start of next frame
+    // (after GPU fence wait) instead of during ImGui rendering (mid-command-buffer)
+    std::vector<std::string> _pendingSceneUnloads;
+    void processPendingSceneUnloads();
 
     // Engine state save/load/reset
     void saveState(const std::string& filepath);

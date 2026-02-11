@@ -2,13 +2,11 @@
 // YALAZ ENGINE - Asset Browser View Implementation
 // =============================================================================
 // Professional asset browser with:
+// - Thumbnail previews for textures (actual image thumbnails)
+// - Custom vector icons for folders, models, shaders, audio, etc.
 // - Multiple scene loading support
 // - Grid and list view modes
-// - Thumbnail size adjustment
-// - Search filtering
-// - Asset type detection
-// - GLTF/OBJ/texture loading support
-// - Loaded scenes management
+// - Search filtering and asset type detection
 // =============================================================================
 
 #include "AssetBrowserView.h"
@@ -17,6 +15,8 @@
 #include "../../vk_loader.h"
 #include <filesystem>
 #include <algorithm>
+#include <stb_image.h>
+#include <imgui_impl_vulkan.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -26,24 +26,29 @@ namespace fs = std::filesystem;
 
 namespace Yalaz::UI {
 
+// Thumbnail resolution - images are downscaled to this size on CPU before GPU upload
+static constexpr int THUMB_RES = 128;
+
+AssetBrowserView::~AssetBrowserView() {
+    ClearThumbnailCache();
+}
+
 void AssetBrowserView::OnInit(VulkanEngine* engine) {
     EditorView::OnInit(engine);
 
     // Try to find the assets folder by checking multiple possible locations
     std::vector<std::string> possiblePaths = {
-        "assets",                           // Direct (if running from project root)
-        "../assets",                        // One level up
-        "../../assets",                     // Two levels up (from bin/Debug or bin/Release)
-        "../../../assets",                  // Three levels up
-        "../../../../assets",               // Four levels up (from build/bin/Release etc.)
+        "assets",
+        "../assets",
+        "../../assets",
+        "../../../assets",
+        "../../../../assets",
     };
 
-    // Also try absolute paths based on executable location
     #ifdef _WIN32
     char exePath[MAX_PATH];
     if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
         fs::path exeDir = fs::path(exePath).parent_path();
-        // Try going up from executable directory
         for (int i = 0; i < 5; i++) {
             fs::path assetsPath = exeDir / "assets";
             if (fs::exists(assetsPath) && fs::is_directory(assetsPath)) {
@@ -57,7 +62,6 @@ void AssetBrowserView::OnInit(VulkanEngine* engine) {
     }
     #endif
 
-    // Try relative paths
     for (const auto& path : possiblePaths) {
         if (fs::exists(path) && fs::is_directory(path)) {
             m_CurrentPath = fs::absolute(path).string();
@@ -67,7 +71,6 @@ void AssetBrowserView::OnInit(VulkanEngine* engine) {
         }
     }
 
-    // Fallback to current directory
     m_CurrentPath = fs::current_path().string();
     m_RootPath = m_CurrentPath;
     RefreshDirectory();
@@ -81,28 +84,26 @@ void AssetBrowserView::OnRender() {
 
     // Menu bar
     if (ImGui::BeginMenuBar()) {
-        // View toggle
         if (ImGui::Button(m_GridView ? "Grid" : "List")) {
             m_GridView = !m_GridView;
         }
 
         ImGui::SameLine();
         if (ImGui::Button("Refresh")) {
+            ClearThumbnailCache();
             RefreshDirectory();
         }
 
-        // Thumbnail size slider
         if (m_GridView) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(100);
-            ImGui::SliderInt("##Size", &m_ThumbnailSize, 40, 150);
+            ImGui::SliderInt("##Size", &m_ThumbnailSize, 50, 180);
         }
 
         ImGui::SameLine();
         ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
         ImGui::SameLine();
 
-        // Show loaded scenes toggle
         ImGui::Checkbox("Scenes", &m_ShowLoadedScenes);
 
         ImGui::EndMenuBar();
@@ -113,14 +114,9 @@ void AssetBrowserView::OnRender() {
         ImGui::Columns(2, "AssetBrowserColumns", true);
         ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() * 0.7f);
 
-        // Left: File browser
         RenderFileBrowser();
-
         ImGui::NextColumn();
-
-        // Right: Loaded scenes
         RenderLoadedScenes();
-
         ImGui::Columns(1);
     } else {
         RenderFileBrowser();
@@ -130,9 +126,7 @@ void AssetBrowserView::OnRender() {
 }
 
 void AssetBrowserView::RenderFileBrowser() {
-    // Path bar
     RenderPathBar();
-
     ImGui::Separator();
 
     // Search
@@ -143,7 +137,6 @@ void AssetBrowserView::RenderFileBrowser() {
 
     ImGui::Separator();
 
-    // Asset grid/list
     ImGui::BeginChild("AssetContent");
     RenderAssetGrid();
     ImGui::EndChild();
@@ -174,7 +167,6 @@ void AssetBrowserView::RenderLoadedScenes() {
 
         bool isSelected = (m_SelectedScene == sceneName);
 
-        // Scene card
         ImVec4 cardColor = isSelected ?
             ImVec4(0.25f, 0.4f, 0.55f, 1.0f) :
             ImVec4(0.18f, 0.18f, 0.22f, 1.0f);
@@ -183,19 +175,15 @@ void AssetBrowserView::RenderLoadedScenes() {
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 5.0f);
 
         if (ImGui::BeginChild("SceneCard", ImVec2(-1, 70), true)) {
-            // Scene icon and name
             ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "[3D]");
             ImGui::SameLine();
             ImGui::Text("%s", sceneName.c_str());
 
-            // Node count
             if (scene) {
                 ImGui::TextDisabled("%zu nodes", scene->nodes.size());
             }
 
-            // Actions
             if (ImGui::Button("Focus", ImVec2(50, 0))) {
-                // Focus camera on scene - use topNodes for safer access
                 if (scene && !scene->topNodes.empty()) {
                     auto& firstNode = scene->topNodes[0];
                     if (firstNode) {
@@ -209,7 +197,6 @@ void AssetBrowserView::RenderLoadedScenes() {
                 sceneToRemove = sceneName;
             }
 
-            // Selection handling
             if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
                 m_SelectedScene = sceneName;
             }
@@ -219,46 +206,21 @@ void AssetBrowserView::RenderLoadedScenes() {
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
         ImGui::PopID();
-
         ImGui::Spacing();
     }
 
-    // Remove scene outside the loop - must wait for GPU before destroying resources
     if (!sceneToRemove.empty()) {
-        // Wait for GPU to finish using the scene's resources
-        if (m_Engine->_device != VK_NULL_HANDLE) {
-            vkDeviceWaitIdle(m_Engine->_device);
-        }
+        // Defer scene destruction to start of next frame (after GPU fence wait)
+        // This prevents destroying resources while the current command buffer still references them
+        m_Engine->_pendingSceneUnloads.push_back(sceneToRemove);
 
-        // Clear selected node if it belonged to this scene
-        if (m_Engine->selectedNode != nullptr) {
-            // Check if selected node is from this scene
-            auto it = m_Engine->loadedScenes.find(sceneToRemove);
-            if (it != m_Engine->loadedScenes.end() && it->second) {
-                for (const auto& [name, node] : it->second->nodes) {
-                    if (node.get() == m_Engine->selectedNode) {
-                        m_Engine->selectedNode = nullptr;
-                        m_Engine->selectedObjectName.clear();
-                        break;
-                    }
-                }
-            }
-        }
-
-        m_Engine->loadedScenes.erase(sceneToRemove);
         if (m_SelectedScene == sceneToRemove) {
             m_SelectedScene.clear();
-        }
-
-        // Notify path tracer that scene geometry changed
-        if (m_Engine->_pathTracer) {
-            m_Engine->_pathTracer->notifySceneChanged();
         }
     }
 
     ImGui::EndChild();
 
-    // Stats
     ImGui::Separator();
     ImGui::TextDisabled("%zu scenes loaded", m_Engine->loadedScenes.size());
 }
@@ -267,7 +229,6 @@ void AssetBrowserView::RenderPathBar() {
     ImGui::Text("Path:");
     ImGui::SameLine();
 
-    // Up button
     if (ImGui::Button("^")) {
         fs::path p(m_CurrentPath);
         if (p.has_parent_path() && p.parent_path() != p) {
@@ -277,7 +238,6 @@ void AssetBrowserView::RenderPathBar() {
     }
     ImGui::SameLine();
 
-    // Home button - go to root assets folder
     if (ImGui::Button("Home")) {
         if (!m_RootPath.empty() && fs::exists(m_RootPath)) {
             m_CurrentPath = m_RootPath;
@@ -288,7 +248,6 @@ void AssetBrowserView::RenderPathBar() {
     }
     ImGui::SameLine();
 
-    // Path segments
     fs::path current(m_CurrentPath);
     fs::path accumulated;
 
@@ -306,7 +265,7 @@ void AssetBrowserView::RenderPathBar() {
 }
 
 void AssetBrowserView::RenderAssetGrid() {
-    float cellSize = static_cast<float>(m_ThumbnailSize) + 20;
+    float cellSize = static_cast<float>(m_ThumbnailSize) + 24;
     float panelWidth = ImGui::GetContentRegionAvail().x;
     int columns = std::max(1, static_cast<int>(panelWidth / cellSize));
 
@@ -324,65 +283,7 @@ void AssetBrowserView::RenderAssetGrid() {
         }
 
         ImGui::PushID(asset.path.c_str());
-
-        // Icon/thumbnail button with type-based color
-        ImVec4 buttonColor;
-        switch (asset.type) {
-            case AssetType::Folder:  buttonColor = ImVec4(0.3f, 0.3f, 0.5f, 1.0f); break;
-            case AssetType::Model:   buttonColor = ImVec4(0.2f, 0.4f, 0.3f, 1.0f); break;
-            case AssetType::Texture: buttonColor = ImVec4(0.4f, 0.3f, 0.2f, 1.0f); break;
-            case AssetType::Shader:  buttonColor = ImVec4(0.4f, 0.2f, 0.4f, 1.0f); break;
-            case AssetType::Scene:   buttonColor = ImVec4(0.2f, 0.3f, 0.4f, 1.0f); break;
-            default:                 buttonColor = ImVec4(0.2f, 0.2f, 0.25f, 1.0f); break;
-        }
-
-        ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-            ImVec4(buttonColor.x + 0.1f, buttonColor.y + 0.1f, buttonColor.z + 0.1f, 1.0f));
-
-        // Single click to select, double click to open/load
-        if (ImGui::Button(GetAssetIcon(asset.type), ImVec2((float)m_ThumbnailSize, (float)m_ThumbnailSize))) {
-            // Single click - for folders, navigate; for files, just select
-            if (asset.isDirectory) {
-                m_CurrentPath = asset.path;
-                RefreshDirectory();
-            }
-        }
-
-        // Double-click to load models/scenes
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            if (!asset.isDirectory) {
-                HandleAssetClick(asset);  // Load the asset
-            }
-        }
-
-        // Drag source for textures
-        if (asset.type == AssetType::Texture && ImGui::BeginDragDropSource()) {
-            ImGui::SetDragDropPayload("TEXTURE_PATH", asset.path.c_str(), asset.path.size() + 1);
-            ImGui::Text("Texture: %s", asset.name.c_str());
-            ImGui::EndDragDropSource();
-        }
-
-        // Context menu
-        if (ImGui::BeginPopupContextItem()) {
-            RenderAssetContextMenu(asset);
-            ImGui::EndPopup();
-        }
-
-        ImGui::PopStyleColor(2);
-
-        // Tooltip
-        if (ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::Text("%s", asset.name.c_str());
-            ImGui::TextDisabled("Type: %s", GetAssetTypeName(asset.type));
-            ImGui::TextDisabled("Path: %s", asset.path.c_str());
-            ImGui::EndTooltip();
-        }
-
-        // Name label
-        ImGui::TextWrapped("%s", asset.name.c_str());
-
+        RenderAssetCard(asset, static_cast<float>(m_ThumbnailSize));
         ImGui::PopID();
         ImGui::NextColumn();
     }
@@ -390,10 +291,508 @@ void AssetBrowserView::RenderAssetGrid() {
     ImGui::Columns(1);
 }
 
+void AssetBrowserView::RenderAssetCard(const AssetEntry& asset, float size) {
+    ImVec2 cardSize(size, size);
+    ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+    // Background colors per asset type
+    ImU32 bgColor, bgColorHover;
+    switch (asset.type) {
+        case AssetType::Folder:
+            bgColor = IM_COL32(50, 50, 75, 255);
+            bgColorHover = IM_COL32(65, 65, 100, 255);
+            break;
+        case AssetType::Model:
+            bgColor = IM_COL32(35, 70, 55, 255);
+            bgColorHover = IM_COL32(45, 90, 70, 255);
+            break;
+        case AssetType::Texture:
+        case AssetType::HDRI:
+            bgColor = IM_COL32(55, 45, 35, 255);
+            bgColorHover = IM_COL32(75, 60, 45, 255);
+            break;
+        case AssetType::Shader:
+            bgColor = IM_COL32(60, 35, 60, 255);
+            bgColorHover = IM_COL32(80, 45, 80, 255);
+            break;
+        case AssetType::Scene:
+            bgColor = IM_COL32(35, 50, 70, 255);
+            bgColorHover = IM_COL32(45, 65, 90, 255);
+            break;
+        case AssetType::Audio:
+            bgColor = IM_COL32(60, 55, 30, 255);
+            bgColorHover = IM_COL32(80, 75, 40, 255);
+            break;
+        default:
+            bgColor = IM_COL32(40, 40, 48, 255);
+            bgColorHover = IM_COL32(55, 55, 65, 255);
+            break;
+    }
+
+    // Invisible button for interaction
+    bool clicked = ImGui::InvisibleButton("##card", cardSize);
+    bool hovered = ImGui::IsItemHovered();
+    bool doubleClicked = hovered && ImGui::IsMouseDoubleClicked(0);
+
+    // Draw rounded card background
+    float rounding = 6.0f;
+    ImU32 bg = hovered ? bgColorHover : bgColor;
+    drawList->AddRectFilled(cursorPos,
+        ImVec2(cursorPos.x + cardSize.x, cursorPos.y + cardSize.y),
+        bg, rounding);
+
+    // Subtle border
+    ImU32 borderColor = hovered ? IM_COL32(120, 140, 180, 200) : IM_COL32(70, 70, 85, 150);
+    drawList->AddRect(cursorPos,
+        ImVec2(cursorPos.x + cardSize.x, cursorPos.y + cardSize.y),
+        borderColor, rounding, 0, 1.0f);
+
+    // Content area (with padding)
+    float pad = 4.0f;
+    ImVec2 contentPos(cursorPos.x + pad, cursorPos.y + pad);
+    ImVec2 contentSize(cardSize.x - pad * 2, cardSize.y - pad * 2);
+
+    // Draw content based on type
+    bool hasImageThumbnail = false;
+
+    if (asset.type == AssetType::Texture || asset.type == AssetType::HDRI) {
+        // Try to show actual image thumbnail
+        ThumbnailEntry* thumb = GetOrLoadThumbnail(asset);
+        if (thumb && thumb->loaded && thumb->imguiDescriptor != VK_NULL_HANDLE) {
+            // Draw the actual image thumbnail
+            drawList->AddImage(
+                (ImTextureID)thumb->imguiDescriptor,
+                ImVec2(contentPos.x, contentPos.y),
+                ImVec2(contentPos.x + contentSize.x, contentPos.y + contentSize.y),
+                ImVec2(0, 0), ImVec2(1, 1),
+                IM_COL32(255, 255, 255, 255)
+            );
+            hasImageThumbnail = true;
+        }
+    }
+
+    if (!hasImageThumbnail) {
+        // Draw vector icon based on type
+        switch (asset.type) {
+            case AssetType::Folder:
+                RenderFolderIcon(drawList, contentPos, contentSize);
+                break;
+            case AssetType::Model:
+                RenderModelIcon(drawList, contentPos, contentSize);
+                break;
+            case AssetType::Shader:
+                RenderShaderIcon(drawList, contentPos, contentSize);
+                break;
+            case AssetType::Audio:
+                RenderAudioIcon(drawList, contentPos, contentSize);
+                break;
+            case AssetType::Scene:
+                RenderSceneIcon(drawList, contentPos, contentSize);
+                break;
+            default: {
+                std::string ext = fs::path(asset.name).extension().string();
+                RenderFileIcon(drawList, contentPos, contentSize, ext.c_str());
+                break;
+            }
+        }
+    }
+
+    // Type badge (small colored tag in corner)
+    if (!asset.isDirectory) {
+        std::string ext = fs::path(asset.name).extension().string();
+        if (!ext.empty()) {
+            // Remove the dot
+            std::string extLabel = ext.substr(1);
+            std::transform(extLabel.begin(), extLabel.end(), extLabel.begin(), ::toupper);
+
+            ImVec2 textSize = ImGui::CalcTextSize(extLabel.c_str());
+            float badgeW = textSize.x + 6;
+            float badgeH = textSize.y + 2;
+            ImVec2 badgePos(cursorPos.x + cardSize.x - badgeW - 3, cursorPos.y + 3);
+
+            drawList->AddRectFilled(badgePos,
+                ImVec2(badgePos.x + badgeW, badgePos.y + badgeH),
+                IM_COL32(0, 0, 0, 180), 3.0f);
+            drawList->AddText(ImVec2(badgePos.x + 3, badgePos.y + 1),
+                IM_COL32(200, 200, 200, 255), extLabel.c_str());
+        }
+    }
+
+    // Handle click
+    if (clicked) {
+        if (asset.isDirectory) {
+            m_CurrentPath = asset.path;
+            RefreshDirectory();
+        }
+    }
+
+    // Handle double-click
+    if (doubleClicked && !asset.isDirectory) {
+        HandleAssetClick(asset);
+    }
+
+    // Drag source for textures
+    if ((asset.type == AssetType::Texture || asset.type == AssetType::HDRI) && ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload("TEXTURE_PATH", asset.path.c_str(), asset.path.size() + 1);
+        ImGui::Text("Texture: %s", asset.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+
+    // Context menu
+    if (ImGui::BeginPopupContextItem()) {
+        RenderAssetContextMenu(asset);
+        ImGui::EndPopup();
+    }
+
+    // Tooltip
+    if (hovered) {
+        ImGui::BeginTooltip();
+        ImGui::Text("%s", asset.name.c_str());
+        ImGui::TextDisabled("Type: %s", GetAssetTypeName(asset.type));
+        if (asset.fileSize > 0) {
+            ImGui::TextDisabled("Size: %s", FormatFileSize(asset.fileSize).c_str());
+        }
+        ImGui::TextDisabled("Path: %s", asset.path.c_str());
+        ImGui::EndTooltip();
+    }
+
+    // Name label below card
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + size);
+    std::string displayName = asset.name;
+    if (displayName.length() > 16) {
+        displayName = displayName.substr(0, 13) + "...";
+    }
+    ImGui::TextWrapped("%s", displayName.c_str());
+    ImGui::PopTextWrapPos();
+}
+
+// =============================================================================
+// VECTOR ICONS - Custom drawn icons for each asset type
+// =============================================================================
+
+void AssetBrowserView::RenderFolderIcon(ImDrawList* drawList, ImVec2 pos, ImVec2 size) {
+    float cx = pos.x + size.x * 0.5f;
+    float cy = pos.y + size.y * 0.5f;
+    float w = size.x * 0.7f;
+    float h = size.y * 0.5f;
+
+    // Folder tab
+    float tabW = w * 0.4f;
+    float tabH = h * 0.2f;
+    drawList->AddRectFilled(
+        ImVec2(cx - w * 0.5f, cy - h * 0.5f - tabH),
+        ImVec2(cx - w * 0.5f + tabW, cy - h * 0.5f),
+        IM_COL32(180, 160, 80, 255), 3.0f);
+
+    // Folder body
+    drawList->AddRectFilled(
+        ImVec2(cx - w * 0.5f, cy - h * 0.5f),
+        ImVec2(cx + w * 0.5f, cy + h * 0.5f),
+        IM_COL32(200, 180, 90, 255), 4.0f);
+
+    // Folder fold line
+    drawList->AddLine(
+        ImVec2(cx - w * 0.5f + tabW, cy - h * 0.5f),
+        ImVec2(cx - w * 0.5f + tabW + tabH, cy - h * 0.5f + tabH * 0.5f),
+        IM_COL32(170, 150, 70, 255), 1.5f);
+}
+
+void AssetBrowserView::RenderModelIcon(ImDrawList* drawList, ImVec2 pos, ImVec2 size) {
+    float cx = pos.x + size.x * 0.5f;
+    float cy = pos.y + size.y * 0.5f;
+    float s = std::min(size.x, size.y) * 0.35f;
+
+    // 3D cube wireframe
+    ImU32 col = IM_COL32(100, 200, 140, 255);
+    ImU32 colDark = IM_COL32(60, 140, 90, 200);
+
+    // Front face
+    float ox = s * 0.3f;
+    float oy = s * 0.2f;
+
+    ImVec2 fl(cx - s, cy);
+    ImVec2 fr(cx, cy + oy);
+    ImVec2 ft(cx, cy - s + oy);
+    ImVec2 ftl(cx - s, cy - s);
+
+    ImVec2 br(cx + s, cy);
+    ImVec2 bt(cx + s, cy - s);
+
+    // Left face (darker)
+    drawList->AddQuadFilled(fl, ImVec2(cx, cy + oy), ImVec2(cx, cy - s + oy), ftl, colDark);
+    // Right face
+    drawList->AddQuadFilled(fr, br, bt, ft, IM_COL32(80, 170, 110, 200));
+    // Top face
+    drawList->AddQuadFilled(ftl, ft, bt, ImVec2(cx - s + s, cy - s - oy + oy), IM_COL32(120, 220, 160, 200));
+
+    // Edges
+    drawList->AddLine(fl, ftl, col, 1.5f);
+    drawList->AddLine(ftl, ft, col, 1.5f);
+    drawList->AddLine(ft, fr, col, 1.5f);
+    drawList->AddLine(fl, fr, col, 1.5f);
+    drawList->AddLine(fr, br, col, 1.5f);
+    drawList->AddLine(ft, bt, col, 1.5f);
+    drawList->AddLine(br, bt, col, 1.5f);
+}
+
+void AssetBrowserView::RenderShaderIcon(ImDrawList* drawList, ImVec2 pos, ImVec2 size) {
+    float cx = pos.x + size.x * 0.5f;
+    float cy = pos.y + size.y * 0.5f;
+    float s = std::min(size.x, size.y) * 0.3f;
+
+    ImU32 col = IM_COL32(180, 120, 220, 255);
+
+    // Left angle bracket <
+    drawList->AddLine(ImVec2(cx - s * 0.3f, cy - s * 0.6f), ImVec2(cx - s, cy), col, 2.5f);
+    drawList->AddLine(ImVec2(cx - s, cy), ImVec2(cx - s * 0.3f, cy + s * 0.6f), col, 2.5f);
+
+    // Right angle bracket >
+    drawList->AddLine(ImVec2(cx + s * 0.3f, cy - s * 0.6f), ImVec2(cx + s, cy), col, 2.5f);
+    drawList->AddLine(ImVec2(cx + s, cy), ImVec2(cx + s * 0.3f, cy + s * 0.6f), col, 2.5f);
+
+    // Slash /
+    drawList->AddLine(ImVec2(cx + s * 0.15f, cy - s * 0.8f), ImVec2(cx - s * 0.15f, cy + s * 0.8f), IM_COL32(220, 160, 255, 200), 2.0f);
+}
+
+void AssetBrowserView::RenderAudioIcon(ImDrawList* drawList, ImVec2 pos, ImVec2 size) {
+    float cx = pos.x + size.x * 0.5f;
+    float cy = pos.y + size.y * 0.5f;
+    float s = std::min(size.x, size.y) * 0.3f;
+
+    ImU32 col = IM_COL32(220, 200, 80, 255);
+
+    // Speaker shape
+    drawList->AddRectFilled(
+        ImVec2(cx - s * 0.8f, cy - s * 0.3f),
+        ImVec2(cx - s * 0.3f, cy + s * 0.3f),
+        col, 2.0f);
+
+    // Speaker cone
+    drawList->AddTriangleFilled(
+        ImVec2(cx - s * 0.3f, cy - s * 0.3f),
+        ImVec2(cx - s * 0.3f, cy + s * 0.3f),
+        ImVec2(cx + s * 0.2f, cy + s * 0.7f),
+        col);
+    drawList->AddTriangleFilled(
+        ImVec2(cx - s * 0.3f, cy - s * 0.3f),
+        ImVec2(cx + s * 0.2f, cy - s * 0.7f),
+        ImVec2(cx + s * 0.2f, cy + s * 0.7f),
+        col);
+
+    // Sound waves
+    for (int i = 1; i <= 3; i++) {
+        float r = s * 0.3f * i;
+        float alpha = 255 - i * 60;
+        ImU32 waveCol = IM_COL32(220, 200, 80, (int)alpha);
+        drawList->PathArcTo(ImVec2(cx + s * 0.2f, cy), r, -0.6f, 0.6f, 12);
+        drawList->PathStroke(waveCol, 0, 1.5f);
+    }
+}
+
+void AssetBrowserView::RenderSceneIcon(ImDrawList* drawList, ImVec2 pos, ImVec2 size) {
+    float cx = pos.x + size.x * 0.5f;
+    float cy = pos.y + size.y * 0.5f;
+    float s = std::min(size.x, size.y) * 0.35f;
+
+    // Film clapperboard
+    ImU32 col = IM_COL32(100, 160, 220, 255);
+    ImU32 colDark = IM_COL32(60, 100, 150, 255);
+
+    // Board body
+    drawList->AddRectFilled(
+        ImVec2(cx - s, cy - s * 0.4f),
+        ImVec2(cx + s, cy + s * 0.8f),
+        col, 4.0f);
+
+    // Clapper top
+    drawList->AddRectFilled(
+        ImVec2(cx - s, cy - s * 0.8f),
+        ImVec2(cx + s, cy - s * 0.4f),
+        colDark, 4.0f);
+
+    // Diagonal stripes on clapper
+    for (float x = cx - s + s * 0.3f; x < cx + s; x += s * 0.4f) {
+        drawList->AddLine(
+            ImVec2(x, cy - s * 0.8f),
+            ImVec2(x - s * 0.25f, cy - s * 0.4f),
+            IM_COL32(40, 70, 110, 255), 2.0f);
+    }
+
+    // Play triangle
+    float triS = s * 0.25f;
+    drawList->AddTriangleFilled(
+        ImVec2(cx - triS * 0.5f, cy + triS * 0.6f - triS),
+        ImVec2(cx - triS * 0.5f, cy + triS * 0.6f + triS),
+        ImVec2(cx + triS, cy + triS * 0.6f),
+        IM_COL32(255, 255, 255, 200));
+}
+
+void AssetBrowserView::RenderFileIcon(ImDrawList* drawList, ImVec2 pos, ImVec2 size, const char* ext) {
+    float cx = pos.x + size.x * 0.5f;
+    float cy = pos.y + size.y * 0.5f;
+    float w = size.x * 0.5f;
+    float h = size.y * 0.6f;
+
+    // File shape (rectangle with folded corner)
+    float foldSize = w * 0.35f;
+    ImVec2 p1(cx - w * 0.5f, cy - h * 0.5f);
+    ImVec2 p2(cx + w * 0.5f - foldSize, cy - h * 0.5f);
+    ImVec2 p3(cx + w * 0.5f, cy - h * 0.5f + foldSize);
+    ImVec2 p4(cx + w * 0.5f, cy + h * 0.5f);
+    ImVec2 p5(cx - w * 0.5f, cy + h * 0.5f);
+
+    // File body
+    drawList->AddQuadFilled(p1, p2, ImVec2(p2.x, p3.y), p5, IM_COL32(160, 160, 170, 255));
+    drawList->AddTriangleFilled(p2, p3, ImVec2(p2.x, p3.y), IM_COL32(160, 160, 170, 255));
+    drawList->AddRectFilled(ImVec2(p2.x, p3.y), p4, IM_COL32(160, 160, 170, 255));
+
+    // Fold
+    drawList->AddTriangleFilled(p2, p3, ImVec2(p2.x, p3.y), IM_COL32(120, 120, 130, 255));
+
+    // Extension text centered
+    if (ext && ext[0] != '\0') {
+        std::string label = ext;
+        if (label[0] == '.') label = label.substr(1);
+        std::transform(label.begin(), label.end(), label.begin(), ::toupper);
+        ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+        drawList->AddText(
+            ImVec2(cx - textSize.x * 0.5f, cy + h * 0.1f - textSize.y * 0.5f),
+            IM_COL32(60, 60, 70, 255), label.c_str());
+    }
+}
+
+// =============================================================================
+// THUMBNAIL LOADING
+// =============================================================================
+
+ThumbnailEntry* AssetBrowserView::GetOrLoadThumbnail(const AssetEntry& asset) {
+    if (!m_Engine) return nullptr;
+
+    // Check cache
+    auto it = m_ThumbnailCache.find(asset.path);
+    if (it != m_ThumbnailCache.end()) {
+        return &it->second;
+    }
+
+    // Try to load thumbnail
+    ThumbnailEntry entry;
+    entry.loaded = false;
+    entry.failed = false;
+
+    // Only load image thumbnails for supported formats
+    if (asset.type != AssetType::Texture && asset.type != AssetType::HDRI) {
+        entry.failed = true;
+        m_ThumbnailCache[asset.path] = entry;
+        return &m_ThumbnailCache[asset.path];
+    }
+
+    // Load image with stb_image
+    int width, height, channels;
+    unsigned char* data = stbi_load(asset.path.c_str(), &width, &height, &channels, 4);
+    if (!data) {
+        entry.failed = true;
+        m_ThumbnailCache[asset.path] = entry;
+        return &m_ThumbnailCache[asset.path];
+    }
+
+    // Downsample to thumbnail resolution on CPU
+    int thumbW = THUMB_RES;
+    int thumbH = THUMB_RES;
+
+    // Maintain aspect ratio
+    float aspect = (float)width / (float)height;
+    if (aspect > 1.0f) {
+        thumbH = std::max(1, (int)(THUMB_RES / aspect));
+    } else {
+        thumbW = std::max(1, (int)(THUMB_RES * aspect));
+    }
+
+    std::vector<uint8_t> thumbData(thumbW * thumbH * 4);
+
+    float xStep = (float)width / thumbW;
+    float yStep = (float)height / thumbH;
+
+    for (int y = 0; y < thumbH; y++) {
+        for (int x = 0; x < thumbW; x++) {
+            int srcX = std::min((int)(x * xStep), width - 1);
+            int srcY = std::min((int)(y * yStep), height - 1);
+            int srcIdx = (srcY * width + srcX) * 4;
+            int dstIdx = (y * thumbW + x) * 4;
+            thumbData[dstIdx + 0] = data[srcIdx + 0];
+            thumbData[dstIdx + 1] = data[srcIdx + 1];
+            thumbData[dstIdx + 2] = data[srcIdx + 2];
+            thumbData[dstIdx + 3] = data[srcIdx + 3];
+        }
+    }
+
+    stbi_image_free(data);
+
+    // Upload to GPU
+    VkExtent3D imageSize{};
+    imageSize.width = static_cast<uint32_t>(thumbW);
+    imageSize.height = static_cast<uint32_t>(thumbH);
+    imageSize.depth = 1;
+
+    AllocatedImage thumbImage = m_Engine->create_image(
+        thumbData.data(), imageSize,
+        VK_FORMAT_R8G8B8A8_SRGB,
+        VK_IMAGE_USAGE_SAMPLED_BIT,
+        false
+    );
+
+    if (thumbImage.image == VK_NULL_HANDLE) {
+        entry.failed = true;
+        m_ThumbnailCache[asset.path] = entry;
+        return &m_ThumbnailCache[asset.path];
+    }
+
+    // Register with ImGui
+    VkDescriptorSet ds = ImGui_ImplVulkan_AddTexture(
+        m_Engine->_defaultSamplerLinear,
+        thumbImage.imageView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    );
+
+    if (ds == VK_NULL_HANDLE) {
+        // Cleanup
+        m_Engine->destroy_image(thumbImage);
+        entry.failed = true;
+        m_ThumbnailCache[asset.path] = entry;
+        return &m_ThumbnailCache[asset.path];
+    }
+
+    entry.imguiDescriptor = ds;
+    entry.loaded = true;
+    entry.failed = false;
+
+    m_ThumbnailCache[asset.path] = entry;
+    return &m_ThumbnailCache[asset.path];
+}
+
+void AssetBrowserView::ClearThumbnailCache() {
+    for (auto& [path, entry] : m_ThumbnailCache) {
+        if (entry.imguiDescriptor != VK_NULL_HANDLE) {
+            ImGui_ImplVulkan_RemoveTexture(entry.imguiDescriptor);
+        }
+    }
+    m_ThumbnailCache.clear();
+}
+
+std::string AssetBrowserView::FormatFileSize(size_t bytes) {
+    if (bytes < 1024) return std::to_string(bytes) + " B";
+    if (bytes < 1024 * 1024) return std::to_string(bytes / 1024) + " KB";
+    if (bytes < 1024 * 1024 * 1024) return std::to_string(bytes / (1024 * 1024)) + " MB";
+    return std::to_string(bytes / (1024 * 1024 * 1024)) + " GB";
+}
+
+// =============================================================================
+// ASSET HANDLING
+// =============================================================================
+
 void AssetBrowserView::HandleAssetClick(const AssetEntry& asset) {
-    // This is called on double-click for loading files
     if (asset.isDirectory) {
-        return;  // Folders are handled by single-click in RenderAssetGrid
+        return;
     }
 
     if (!m_Engine) return;
@@ -402,12 +801,10 @@ void AssetBrowserView::HandleAssetClick(const AssetEntry& asset) {
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     if (ext == ".gltf" || ext == ".glb") {
-        // Load GLTF model
         auto result = loadGltf(m_Engine, asset.path);
         if (result.has_value()) {
             std::string sceneName = fs::path(asset.name).stem().string();
 
-            // Handle duplicate names
             int counter = 1;
             std::string baseName = sceneName;
             while (m_Engine->loadedScenes.find(sceneName) != m_Engine->loadedScenes.end()) {
@@ -418,8 +815,20 @@ void AssetBrowserView::HandleAssetClick(const AssetEntry& asset) {
             m_SelectedScene = sceneName;
             m_ShowLoadedScenes = true;
         }
-    } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".hdr") {
-        // Store selected texture path for material editor
+    } else if (ext == ".obj") {
+        auto result = loadObj(m_Engine, asset.path);
+        if (result.has_value()) {
+            std::string sceneName = fs::path(asset.name).stem().string();
+            int counter = 1;
+            std::string baseName = sceneName;
+            while (m_Engine->loadedScenes.find(sceneName) != m_Engine->loadedScenes.end()) {
+                sceneName = baseName + "_" + std::to_string(counter++);
+            }
+            m_Engine->loadedScenes[sceneName] = result.value();
+            m_SelectedScene = sceneName;
+            m_ShowLoadedScenes = true;
+        }
+    } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".hdr" || ext == ".bmp") {
         m_LastSelectedTexture = asset.path;
     }
 }
@@ -434,29 +843,21 @@ void AssetBrowserView::RenderAssetContextMenu(const AssetEntry& asset) {
         std::string ext = fs::path(asset.name).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-        if (ext == ".gltf" || ext == ".glb") {
+        if (ext == ".gltf" || ext == ".glb" || ext == ".obj") {
             if (ImGui::MenuItem("Load Scene")) {
-                HandleAssetClick(asset);
-            }
-            if (ImGui::MenuItem("Load as New Instance")) {
-                // Load with unique name
                 HandleAssetClick(asset);
             }
         }
 
-        if (asset.type == AssetType::Texture) {
+        if (asset.type == AssetType::Texture || asset.type == AssetType::HDRI) {
             if (ImGui::MenuItem("Set as Albedo")) {
-                // TODO: Set texture in material system
-            }
-            if (ImGui::MenuItem("Set as Normal")) {
-                // TODO: Set texture in material system
+                m_LastSelectedTexture = asset.path;
             }
         }
 
         ImGui::Separator();
 
         if (ImGui::MenuItem("Show in Explorer")) {
-            // Platform specific file explorer
 #ifdef _WIN32
             std::string cmd = "explorer /select,\"" + asset.path + "\"";
             system(cmd.c_str());
@@ -474,6 +875,12 @@ void AssetBrowserView::RenderAssetContextMenu(const AssetEntry& asset) {
 void AssetBrowserView::RefreshDirectory() {
     m_Assets.clear();
 
+    // Clear thumbnail cache when changing directories
+    if (m_CachedDirectory != m_CurrentPath) {
+        ClearThumbnailCache();
+        m_CachedDirectory = m_CurrentPath;
+    }
+
     if (!fs::exists(m_CurrentPath)) return;
 
     try {
@@ -489,6 +896,12 @@ void AssetBrowserView::RefreshDirectory() {
                 std::string ext = entry.path().extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                 asset.type = GetAssetType(ext);
+
+                try {
+                    asset.fileSize = static_cast<size_t>(entry.file_size());
+                } catch (...) {
+                    asset.fileSize = 0;
+                }
             }
 
             // Skip hidden files
@@ -503,7 +916,7 @@ void AssetBrowserView::RefreshDirectory() {
             return a.name < b.name;
         });
     } catch (...) {
-        // Handle permission errors, etc.
+        // Handle permission errors
     }
 }
 
@@ -511,10 +924,13 @@ AssetType AssetBrowserView::GetAssetType(const std::string& ext) {
     if (ext == ".gltf" || ext == ".glb" || ext == ".obj" || ext == ".fbx") {
         return AssetType::Model;
     }
-    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".hdr" || ext == ".bmp") {
+    if (ext == ".hdr" || ext == ".exr") {
+        return AssetType::HDRI;
+    }
+    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp") {
         return AssetType::Texture;
     }
-    if (ext == ".glsl" || ext == ".vert" || ext == ".frag" || ext == ".comp" || ext == ".spv") {
+    if (ext == ".glsl" || ext == ".vert" || ext == ".frag" || ext == ".comp" || ext == ".spv" || ext == ".hlsl") {
         return AssetType::Shader;
     }
     if (ext == ".scene" || ext == ".json") {
@@ -523,19 +939,10 @@ AssetType AssetBrowserView::GetAssetType(const std::string& ext) {
     if (ext == ".mtl" || ext == ".mat") {
         return AssetType::Material;
     }
-    return AssetType::Unknown;
-}
-
-const char* AssetBrowserView::GetAssetIcon(AssetType type) {
-    switch (type) {
-        case AssetType::Folder:   return "[DIR]";
-        case AssetType::Model:    return "[3D]";
-        case AssetType::Texture:  return "[TEX]";
-        case AssetType::Shader:   return "[SHD]";
-        case AssetType::Scene:    return "[SCN]";
-        case AssetType::Material: return "[MAT]";
-        default:                  return "[?]";
+    if (ext == ".wav" || ext == ".mp3" || ext == ".ogg" || ext == ".flac") {
+        return AssetType::Audio;
     }
+    return AssetType::Unknown;
 }
 
 const char* AssetBrowserView::GetAssetTypeName(AssetType type) {
@@ -543,9 +950,11 @@ const char* AssetBrowserView::GetAssetTypeName(AssetType type) {
         case AssetType::Folder:   return "Folder";
         case AssetType::Model:    return "3D Model";
         case AssetType::Texture:  return "Texture";
+        case AssetType::HDRI:     return "HDR Image";
         case AssetType::Shader:   return "Shader";
         case AssetType::Scene:    return "Scene";
         case AssetType::Material: return "Material";
+        case AssetType::Audio:    return "Audio";
         default:                  return "Unknown";
     }
 }

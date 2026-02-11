@@ -495,6 +495,7 @@
 #include <iostream>
 #include <vk_loader.h>
 #include <fstream>
+#include <algorithm>
 
 #include "vk_engine.h"
 #include "vk_initializers.h"
@@ -510,6 +511,28 @@
 #include "ui/views/ConsoleView.h"
 //> loadimg
 //std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& asset, fastgltf::Image& image)
+
+// URL-decode helper for GLTF URI paths (handles %20, %2F, etc.)
+static std::string urlDecode(const std::string& encoded) {
+    std::string decoded;
+    decoded.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        if (encoded[i] == '%' && i + 2 < encoded.size()) {
+            int high = 0, low = 0;
+            char h = encoded[i + 1], l = encoded[i + 2];
+            high = (h >= '0' && h <= '9') ? h - '0' : (h >= 'a' && h <= 'f') ? h - 'a' + 10 : (h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1;
+            low  = (l >= '0' && l <= '9') ? l - '0' : (l >= 'a' && l <= 'f') ? l - 'a' + 10 : (l >= 'A' && l <= 'F') ? l - 'A' + 10 : -1;
+            if (high >= 0 && low >= 0) {
+                decoded += static_cast<char>(high * 16 + low);
+                i += 2;
+                continue;
+            }
+        }
+        decoded += encoded[i];
+    }
+    return decoded;
+}
+
 std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& asset, fastgltf::Image& image, const std::filesystem::path& basePath)
 
 {
@@ -521,29 +544,47 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
         fastgltf::visitor{
             [](auto& arg) {},
             [&](fastgltf::sources::URI& filePath) {
-                assert(filePath.fileByteOffset == 0); // We don't support offsets with stbi.
-                assert(filePath.uri.isLocalPath()); // We're only capable of loading
-                // local files.
+                assert(filePath.fileByteOffset == 0);
+                assert(filePath.uri.isLocalPath());
 
-//const std::string path(filePath.uri.path().begin(),
-//    filePath.uri.path().end()); // Thanks C++.
-                //const std::string basePath = "C:/YalazEngine/Yalaz-Engine/assets/";
-                //const std::string path = basePath + std::string(filePath.uri.path().begin(), filePath.uri.path().end());
-                std::filesystem::path texPath = basePath / std::string(filePath.uri.path().begin(), filePath.uri.path().end());
-                const std::string path = texPath.string();
+                // URL-decode the URI path and normalize separators
+                std::string rawPath(filePath.uri.path().begin(), filePath.uri.path().end());
+                std::string decodedPath = urlDecode(rawPath);
 
-                fmt::print("Loading texture from file: {}\n", path);
+                // Remove leading ./ if present
+                if (decodedPath.size() > 2 && decodedPath[0] == '.' && (decodedPath[1] == '/' || decodedPath[1] == '\\')) {
+                    decodedPath = decodedPath.substr(2);
+                }
 
-                // Dosya yolunu kontrol et
-                std::ifstream file(path);
-                if (!file.good()) {
-                    fmt::print("File does not exist or cannot be accessed: {}\n", path);
-                    return;
+                // Build full path
+                std::filesystem::path texPath = basePath / decodedPath;
+                std::string path = texPath.string();
+
+                // Try the path directly first
+                if (!std::filesystem::exists(texPath)) {
+                    // Try with normalized separators
+                    std::replace(decodedPath.begin(), decodedPath.end(), '/', '\\');
+                    texPath = basePath / decodedPath;
+                    path = texPath.string();
+
+                    if (!std::filesystem::exists(texPath)) {
+                        fmt::print("[Texture] NOT FOUND: {} (base: {})\n", rawPath, basePath.string());
+                        // List what's in the directory for debugging
+                        auto parentDir = texPath.parent_path();
+                        if (std::filesystem::exists(parentDir)) {
+                            fmt::print("[Texture] Files in {}:\n", parentDir.string());
+                            int count = 0;
+                            for (auto& entry : std::filesystem::directory_iterator(parentDir)) {
+                                fmt::print("  - {}\n", entry.path().filename().string());
+                                if (++count > 10) { fmt::print("  ... (more files)\n"); break; }
+                            }
+                        }
+                        return;
+                    }
                 }
 
                 unsigned char* data = stbi_load(path.c_str(), &width, &height, &nrChannels, 4);
                 if (data) {
-                    fmt::print("Loaded texture: {} ({}x{}, {} channels)\n", path, width, height, nrChannels);
                     VkExtent3D imagesize;
                     imagesize.width = width;
                     imagesize.height = height;
@@ -554,8 +595,8 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
                     stbi_image_free(data);
                 }
                 else {
-                    fmt::print("Failed to load texture from file: {}\n", path);
-                    newImage = engine->_whiteImage; // Alternatif doku kullan
+                    fmt::print("[Texture] stbi_load failed: {}\n", path);
+                    newImage = engine->_whiteImage;
                 }
         },
             [&](fastgltf::sources::Vector& vector) {
@@ -676,7 +717,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         scene->creator = engine;
         LoadedGLTF& file = *scene.get();
 
-        fastgltf::Parser parser{};
+        fastgltf::Parser parser(fastgltf::Extensions::KHR_lights_punctual);
 
         constexpr auto gltfOptions = fastgltf::Options::DontRequireValidAssetMember | fastgltf::Options::AllowDouble | fastgltf::Options::LoadGLBBuffers | fastgltf::Options::LoadExternalBuffers;
         // fastgltf::Options::LoadExternalImages;
@@ -863,7 +904,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         materials.push_back(newMat);
         file.materials[mat.name.c_str()] = newMat;
 
-        GLTFMetallic_Roughness::MaterialConstants constants;
+        GLTFMetallic_Roughness::MaterialConstants constants{};
         constants.colorFactors.x = mat.pbrData.baseColorFactor[0];
         constants.colorFactors.y = mat.pbrData.baseColorFactor[1];
         constants.colorFactors.z = mat.pbrData.baseColorFactor[2];
@@ -871,11 +912,19 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
         constants.metal_rough_factors.x = mat.pbrData.metallicFactor;
         constants.metal_rough_factors.y = mat.pbrData.roughnessFactor;
-        // write material parameters to buffer
-        sceneMaterialConstants[data_index] = constants;
+        constants.metal_rough_factors.z = 1.0f; // AO default
+        constants.metal_rough_factors.w = 1.0f; // Normal strength default
+        constants.normalTexID = 0;
+        constants.emissiveTexID = 0;
 
         MaterialPass passType = MaterialPass::MainColor;
         if (mat.alphaMode == fastgltf::AlphaMode::Blend) {
+            passType = MaterialPass::Transparent;
+        }
+        // Store alpha cutoff for Mask mode (extra[1].y)
+        // Also use transparent pipeline for Mask materials so alpha test + blending works
+        if (mat.alphaMode == fastgltf::AlphaMode::Mask) {
+            constants.extra[1].y = mat.alphaCutoff;
             passType = MaterialPass::Transparent;
         }
 
@@ -897,6 +946,15 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
             materialResources.colorImage = images[img];
             materialResources.colorSampler = file.samplers[sampler];
+
+            // Add to bindless texture cache so the shader can sample it
+            auto& colorImg = images[img];
+            if (colorImg.image != VK_NULL_HANDLE && colorImg.image != engine->_whiteImage.image) {
+                TextureID colorTexID = engine->texCache.AddTexture(
+                    colorImg.imageView, file.samplers[sampler],
+                    std::string("color_") + std::to_string(data_index));
+                constants.colorTexID = colorTexID.Index;
+            }
         }
 
         // Load metallic-roughness texture
@@ -906,6 +964,15 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
             materialResources.metalRoughImage = images[img];
             materialResources.metalRoughSampler = file.samplers[sampler];
+
+            // Add to bindless texture cache for shader sampling
+            auto& mrImg = images[img];
+            if (mrImg.image != VK_NULL_HANDLE && mrImg.image != engine->_whiteImage.image) {
+                TextureID mrTexID = engine->texCache.AddTexture(
+                    mrImg.imageView, file.samplers[sampler],
+                    std::string("metalrough_") + std::to_string(data_index));
+                constants.metalRoughTexID = mrTexID.Index;
+            }
         }
 
         // Load emissive factor into material constants (works with or without texture)
@@ -922,13 +989,47 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                 mat.emissiveFactor[2],
                 1.0f  // Emissive strength multiplier
             );
-            // Update the buffer with emissive data
-            sceneMaterialConstants[data_index] = constants;
         }
 
-        // Load normal map texture (if needed later)
-        // Note: Normal maps require additional shader support
-        // if (mat.normalTexture.has_value()) { ... }
+        // Load normal map texture
+        if (mat.normalTexture.has_value()) {
+            size_t img = gltf.textures[mat.normalTexture.value().textureIndex].imageIndex.value();
+            // Store normal texture in the texture cache and set the ID
+            auto& normalImage = images[img];
+            if (normalImage.image != VK_NULL_HANDLE && normalImage.image != engine->_whiteImage.image &&
+                normalImage.image != engine->_errorCheckerboardImage.image) {
+                TextureID normalTexID = engine->texCache.AddTexture(
+                    normalImage.imageView, engine->_defaultSamplerLinear,
+                    std::string("normal_") + std::to_string(data_index));
+                constants.normalTexID = normalTexID.Index;
+                constants.metal_rough_factors.w = mat.normalTexture.value().scale; // normal strength
+            }
+        }
+
+        // Load emissive texture
+        if (mat.emissiveTexture.has_value()) {
+            size_t img = gltf.textures[mat.emissiveTexture.value().textureIndex].imageIndex.value();
+            auto& emissiveImage = images[img];
+            if (emissiveImage.image != VK_NULL_HANDLE && emissiveImage.image != engine->_whiteImage.image &&
+                emissiveImage.image != engine->_errorCheckerboardImage.image) {
+                TextureID emissiveTexID = engine->texCache.AddTexture(
+                    emissiveImage.imageView, engine->_defaultSamplerLinear,
+                    std::string("emissive_") + std::to_string(data_index));
+                constants.emissiveTexID = emissiveTexID.Index;
+                // If no emissive factor was set, default to white so the texture shows
+                if (!hasEmissive) {
+                    constants.extra[0] = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                }
+            }
+        }
+
+        // Load occlusion texture (stored in metalRough R channel or extra field)
+        if (mat.occlusionTexture.has_value()) {
+            constants.metal_rough_factors.z = mat.occlusionTexture.value().strength; // AO strength
+        }
+
+        // Write final material constants to GPU buffer (after all textures loaded)
+        sceneMaterialConstants[data_index] = constants;
 
         // build material
         newMat->data = engine->metalRoughMaterial.write_material(engine->_device, passType, materialResources, file.descriptorPool);
@@ -1026,6 +1127,15 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                 fastgltf::iterateAccessorWithIndex<glm::vec4>(gltf, gltf.accessors[(*colors).second],
                     [&](glm::vec4 v, size_t index) {
                         vertices[initial_vtx + index].color = v;
+                    });
+            }
+
+            // load tangents (needed for normal mapping)
+            auto tangents = p.findAttribute("TANGENT");
+            if (tangents != p.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<glm::vec4>(gltf, gltf.accessors[(*tangents).second],
+                    [&](glm::vec4 v, size_t index) {
+                        vertices[initial_vtx + index].tangent = v;
                     });
             }
 
@@ -1188,8 +1298,84 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
     }
     //< load_cameras
 
-        fmt::print("GLTF loaded successfully: {} nodes, {} meshes, {} materials, {} cameras\n",
-            scene->nodes.size(), scene->meshes.size(), scene->materials.size(), scene->cameras.size());
+    //> load_lights
+    // Load lights from KHR_lights_punctual extension
+    if (!gltf.lights.empty()) {
+        fmt::print("  Loading {} lights from GLTF...\n", gltf.lights.size());
+
+        // Find nodes that reference lights and extract their world transforms
+        for (size_t nodeIdx = 0; nodeIdx < gltf.nodes.size(); nodeIdx++) {
+            const fastgltf::Node& gltfNode = gltf.nodes[nodeIdx];
+
+            if (gltfNode.lightIndex.has_value()) {
+                size_t lightIdx = gltfNode.lightIndex.value();
+                if (lightIdx >= gltf.lights.size()) continue;
+
+                const fastgltf::Light& gltfLight = gltf.lights[lightIdx];
+                glm::mat4 worldTransform = nodes[nodeIdx]->worldTransform;
+                glm::vec3 lightPos = glm::vec3(worldTransform[3]);
+                // Light direction: GLTF lights shine along -Z in local space
+                glm::vec3 lightDir = glm::normalize(glm::vec3(-worldTransform[2]));
+                glm::vec3 lightColor(gltfLight.color[0], gltfLight.color[1], gltfLight.color[2]);
+                float intensity = gltfLight.intensity;
+
+                if (gltfLight.type == fastgltf::LightType::Directional) {
+                    // Apply as sun/directional light
+                    // Convert intensity from lux to a reasonable engine scale
+                    float scaledIntensity = std::min(intensity / 1000.0f, 10.0f);
+                    if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+
+                    engine->sceneData.sunlightDirection = glm::vec4(-lightDir, scaledIntensity);
+                    engine->sceneData.sunlightColor = glm::vec4(lightColor, 1.0f);
+
+                    fmt::print("    Directional light '{}': dir=({:.2f},{:.2f},{:.2f}), color=({:.2f},{:.2f},{:.2f}), intensity={:.2f}\n",
+                        std::string(gltfLight.name), lightDir.x, lightDir.y, lightDir.z,
+                        lightColor.r, lightColor.g, lightColor.b, scaledIntensity);
+                }
+                else if (gltfLight.type == fastgltf::LightType::Point) {
+                    // Add as point light
+                    int lightCount = engine->sceneData.pointLightCount;
+                    if (lightCount < 64) {  // MAX_POINT_LIGHTS
+                        float range = gltfLight.range.has_value() ? gltfLight.range.value() : 25.0f;
+                        // Convert candela to engine intensity scale
+                        float scaledIntensity = std::min(intensity / 100.0f, 50.0f);
+                        if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+
+                        engine->sceneData.pointLights[lightCount].position = lightPos;
+                        engine->sceneData.pointLights[lightCount].radius = range;
+                        engine->sceneData.pointLights[lightCount].color = lightColor;
+                        engine->sceneData.pointLights[lightCount].intensity = scaledIntensity;
+                        engine->sceneData.pointLightCount = lightCount + 1;
+
+                        fmt::print("    Point light '{}': pos=({:.2f},{:.2f},{:.2f}), range={:.1f}, intensity={:.2f}\n",
+                            std::string(gltfLight.name), lightPos.x, lightPos.y, lightPos.z, range, scaledIntensity);
+                    }
+                }
+                else if (gltfLight.type == fastgltf::LightType::Spot) {
+                    // Treat spot lights as point lights (simplified)
+                    int lightCount = engine->sceneData.pointLightCount;
+                    if (lightCount < 64) {
+                        float range = gltfLight.range.has_value() ? gltfLight.range.value() : 25.0f;
+                        float scaledIntensity = std::min(intensity / 100.0f, 50.0f);
+                        if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+
+                        engine->sceneData.pointLights[lightCount].position = lightPos;
+                        engine->sceneData.pointLights[lightCount].radius = range;
+                        engine->sceneData.pointLights[lightCount].color = lightColor;
+                        engine->sceneData.pointLights[lightCount].intensity = scaledIntensity;
+                        engine->sceneData.pointLightCount = lightCount + 1;
+
+                        fmt::print("    Spot light '{}' (as point): pos=({:.2f},{:.2f},{:.2f}), range={:.1f}\n",
+                            std::string(gltfLight.name), lightPos.x, lightPos.y, lightPos.z, range);
+                    }
+                }
+            }
+        }
+    }
+    //< load_lights
+
+        fmt::print("GLTF loaded successfully: {} nodes, {} meshes, {} materials, {} cameras, {} lights\n",
+            scene->nodes.size(), scene->meshes.size(), scene->materials.size(), scene->cameras.size(), gltf.lights.size());
         return scene;
         //< load_graph
 
@@ -1404,6 +1590,26 @@ void LoadedGLTF::clearAll()
         }
     }
     meshes.clear();
+
+    // Invalidate texture cache entries that reference this scene's images
+    // MUST happen BEFORE destroying the actual VkImages/VkImageViews
+    {
+        std::vector<VkImageView> deadViews;
+        for (auto& [k, v] : images) {
+            if (v.image == VK_NULL_HANDLE) continue;
+            if (v.image == creator->_errorCheckerboardImage.image) continue;
+            if (v.image == creator->_whiteImage.image) continue;
+            if (v.imageView != VK_NULL_HANDLE) {
+                deadViews.push_back(v.imageView);
+            }
+        }
+        if (!deadViews.empty()) {
+            creator->texCache.InvalidateImageViews(
+                deadViews,
+                creator->_whiteImage.imageView,
+                creator->_defaultSamplerLinear);
+        }
+    }
 
     // Destroy images (skip default/error images)
     for (auto& [k, v] : images) {

@@ -119,7 +119,7 @@ struct RenderSettings {
 
     // === Bloom Settings ===
     bool bloomEnabled = true;
-    float bloomThreshold = 1.0f;
+    float bloomThreshold = 0.8f;
     float bloomIntensity = 0.5f;
     int bloomMipLevels = 7;
     float bloomRadius = 1.0f;

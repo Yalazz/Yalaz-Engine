@@ -17,7 +17,7 @@ layout(push_constant) uniform PushConstants {
     float threshold;
     float softThreshold;
     float filterRadius;
-    int srcMipLevel;
+    float intensity;
 } pc;
 
 // 13-tap filter kernel from Call of Duty: Advanced Warfare
