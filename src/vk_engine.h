@@ -172,6 +172,21 @@ struct StaticMeshData {
 
 
 // =============================================================================
+// REFLECTION PROBE - Multi-probe reflection system
+// =============================================================================
+struct ReflectionProbe {
+    glm::vec3 position = glm::vec3(0.0f);
+    float radius = 50.0f;
+    float skyBlendFactor = 0.3f;
+    bool active = true;
+
+    AllocatedImage cubemap;
+    VkImageView cubemapView = VK_NULL_HANDLE;
+    VkImageView faceViews[6] = {};
+    bool needsUpdate = true;
+};
+
+// =============================================================================
 // ENGINE SUBSYSTEMS - Animation, Physics, Plugin, Shader Systems
 // =============================================================================
 
@@ -784,19 +799,21 @@ public:
     void cleanup_environment_map();
 
     // ==========================================================================
-    // REAL-TIME REFLECTION PROBE
+    // MULTI-PROBE REFLECTION SYSTEM
     // ==========================================================================
     static constexpr uint32_t REFLECTION_PROBE_SIZE = 256;
-    static constexpr int REFLECTION_UPDATE_INTERVAL = 6; // Update every N frames
-    AllocatedImage _reflectionCubemap;         // Cubemap render target
-    VkImageView _reflectionFaceViews[6] = {};  // Per-face image views
-    AllocatedImage _reflectionDepth;           // Depth buffer for probe rendering
-    int _reflectionFrameCounter = 0;           // Frame counter for periodic updates
-    bool _reflectionProbeReady = false;        // Whether the probe has been rendered at least once
+    static constexpr int REFLECTION_UPDATE_INTERVAL = 6;
+    static constexpr int MAX_REFLECTION_PROBES = 4;
 
-    void init_reflection_probe();
-    void cleanup_reflection_probe();
-    void render_reflection_probe(VkCommandBuffer cmd);
+    std::array<ReflectionProbe, 4> _reflectionProbes;
+    int _currentProbeUpdateIndex = 0;
+    int _reflectionFrameCounter = 0;
+    AllocatedImage _sharedProbeDepth;
+    bool _probesReady = false;
+
+    void init_reflection_probes();
+    void cleanup_reflection_probes();
+    void render_reflection_probe_single(VkCommandBuffer cmd, int probeIndex);
     glm::mat4 getReflectionFaceViewMatrix(int face, const glm::vec3& probePos) const;
     glm::mat4 getReflectionProjectionMatrix() const;
 
@@ -947,7 +964,6 @@ public:
     
     void update_scene();
 
-private:
 private:
 
     void rebuild_swapchain();

@@ -631,12 +631,12 @@ void resetEngineState(VulkanEngine& engine) {
     engine.loadedScenes.clear();
     engine.sceneFilePaths.clear();
 
-    auto gltfScene = loadGltf(&engine, "../../assets/monkeyHD.glb");
-    if (gltfScene.has_value()) {
-        engine.loadedScenes["monkey"] = *gltfScene;
-        engine.sceneFilePaths["monkey"] = "../../assets/monkeyHD.glb";
-        fmt::print("[INFO] Default scene reloaded\n");
-    }
+    // auto gltfScene = loadGltf(&engine, "../../assets/monkeyHD.glb");
+    // if (gltfScene.has_value()) {
+    //     engine.loadedScenes["monkey"] = *gltfScene;
+    //     engine.sceneFilePaths["monkey"] = "../../assets/monkeyHD.glb";
+    //     fmt::print("[INFO] Default scene reloaded\n");
+    // }
 
     fmt::print("[INFO] Engine state reset to defaults\n");
 }

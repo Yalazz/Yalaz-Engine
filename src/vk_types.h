@@ -222,9 +222,13 @@ struct alignas(16) GPUSceneData {
     glm::vec4 colorGrading;                     // offset 2688, size 16 (x=exposure, y=contrast, z=saturation, w=vibrance)
     glm::vec4 colorTemperature;                 // offset 2704, size 16 (x=temperature, y=tint, z=tonemapOperator, w=unused)
 
-    // Total: 2720 bytes
+    // === Reflection Probes (80 bytes) ===
+    glm::vec4 probePositions[4];                // offset 2720, size 64 (xyz=position, w=radius)
+    glm::vec4 probeSettings;                    // offset 2784, size 16 (x=probeCount, y=globalSkyBlend, z/w=unused)
+
+    // Total: 2800 bytes
 };
-static_assert(sizeof(GPUSceneData) == 2720, "GPUSceneData must be 2720 bytes for GPU alignment");
+static_assert(sizeof(GPUSceneData) == 2800, "GPUSceneData must be 2800 bytes for GPU alignment");
 
 enum class ShaderOnlyMaterial : uint8_t {
     DEFAULT = 0,      // Full PBR primitive pipeline (default)

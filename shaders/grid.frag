@@ -176,5 +176,9 @@ void main() {
         discard;
     }
 
+    // Convert grid colors from sRGB to linear space
+    // The HDR pipeline (tonemap_final.comp) will apply gamma correction later
+    gridColor = pow(gridColor, vec3(2.2));
+
     outColor = vec4(gridColor, finalAlpha);
 }

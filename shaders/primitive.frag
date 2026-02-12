@@ -65,14 +65,18 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
     // Color Grading
     vec4 colorGrading;                      // x=exposure, y=contrast, z=saturation, w=vibrance
     vec4 colorTemperature;                  // x=temperature, y=tint, z=tonemapOperator, w=unused
+
+    // Reflection Probes
+    vec4 probePositions[4];                 // xyz=position, w=radius
+    vec4 probeSettings;                     // x=probeCount, y=globalSkyBlend
 } sceneData;
 
 // Shadow map sampler
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 // Point light shadow cubemaps
 layout(set = 0, binding = 3) uniform samplerCube pointLightShadowMaps[4];
-// Environment cubemap for reflections
-layout(set = 0, binding = 4) uniform samplerCube envCubemap;
+// Environment cubemaps: [0]=sky, [1-4]=reflection probes
+layout(set = 0, binding = 4) uniform samplerCube envCubemaps[5];
 
 // =============================================================================
 // CASCADE SHADOW MAPPING - Full implementation with PCF soft shadows
@@ -497,16 +501,42 @@ void main()
     vec3 matEmission = materialData.extra[0].rgb * materialData.extra[0].w;
     vec3 emission = emissionColor * emissionStrength + matEmission;
 
-    // === ENVIRONMENT REFLECTION (controlled by push.pbrParams.w) ===
+    // === MULTI-PROBE ENVIRONMENT REFLECTION (controlled by push.pbrParams.w) ===
     float NdotV = max(dot(N, V), 0.0);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
     vec3 reflection = vec3(0.0);
-    float reflectionIntensity = push.pbrParams.w; // 0 = no reflection, >0 = reflect
+    float reflectionIntensity = push.pbrParams.w;
     if (reflectionIntensity > 0.0) {
         vec3 reflectDir = reflect(-V, N);
-        vec3 envColor = texture(envCubemap, reflectDir).rgb;
+
+        int probeCount = int(sceneData.probeSettings.x);
+        vec3 skyColor = texture(envCubemaps[0], reflectDir).rgb;
+        vec3 envColor = skyColor;
+
+        if (probeCount > 0) {
+            int closestProbe = -1;
+            float closestDist = 1e10;
+            for (int i = 0; i < probeCount && i < 4; ++i) {
+                float dist = distance(fragWorldPos, sceneData.probePositions[i].xyz);
+                float radius = sceneData.probePositions[i].w;
+                if (dist < closestDist && dist < radius) {
+                    closestDist = dist;
+                    closestProbe = i;
+                }
+            }
+            if (closestProbe >= 0) {
+                float radius = sceneData.probePositions[closestProbe].w;
+                float weight = 1.0 - smoothstep(0.0, radius, closestDist);
+                vec3 probeColor;
+                if (closestProbe == 0)      probeColor = texture(envCubemaps[1], reflectDir).rgb;
+                else if (closestProbe == 1) probeColor = texture(envCubemaps[2], reflectDir).rgb;
+                else if (closestProbe == 2) probeColor = texture(envCubemaps[3], reflectDir).rgb;
+                else                        probeColor = texture(envCubemaps[4], reflectDir).rgb;
+                envColor = mix(skyColor, probeColor, weight);
+            }
+        }
         reflection = envColor * fresnel * (1.0 - roughness) * reflectionIntensity;
     }
 
@@ -525,6 +555,12 @@ void main()
     if (alpha < 1.0) {
         float fresnelAlpha = 1.0 - pow(1.0 - NdotV, 3.0);
         alpha = mix(alpha, 1.0, (1.0 - fresnelAlpha) * 0.5);
+    }
+
+    // NaN/Inf safety: any NaN from PBR math gets spread by bloom into black rectangles
+    result = clamp(result, vec3(0.0), vec3(65504.0));
+    if (any(isnan(result)) || any(isinf(result))) {
+        result = vec3(0.0);
     }
 
     outColor = vec4(result, alpha);

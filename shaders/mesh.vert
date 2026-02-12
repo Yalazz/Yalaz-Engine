@@ -35,10 +35,19 @@ void main()
     gl_Position = sceneData.viewproj * worldPos;
 
     outWorldPos = worldPos.xyz;
-    outWorldNormal = normalize((PushConstants.render_matrix * vec4(v.normal, 0.0)).xyz);
-    outColor = v.color.rgb * materialData.colorFactors.rgb;
+    outColor = v.color.rgb;
     outUV = vec2(v.uv_x, v.uv_y);
 
+    // Safe normalize: avoid normalize(vec3(0)) which produces NaN
+    vec3 worldNormal = (PushConstants.render_matrix * vec4(v.normal, 0.0)).xyz;
+    float normalLen = length(worldNormal);
+    outWorldNormal = (normalLen > 0.0001) ? (worldNormal / normalLen) : vec3(0.0, 1.0, 0.0);
+
     // Transform tangent to world space (xyz), keep handedness (w)
-    outTangent = vec4(normalize((PushConstants.render_matrix * vec4(v.tangent.xyz, 0.0)).xyz), v.tangent.w);
+    vec3 worldTangent = (PushConstants.render_matrix * vec4(v.tangent.xyz, 0.0)).xyz;
+    float tangentLen = length(worldTangent);
+    outTangent = vec4(
+        (tangentLen > 0.0001) ? (worldTangent / tangentLen) : vec3(0.0),
+        v.tangent.w
+    );
 }

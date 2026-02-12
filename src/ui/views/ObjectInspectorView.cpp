@@ -909,6 +909,24 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
     auto* node = m_Engine->selectedNode;
     if (!node) return;
 
+    // Validate node still exists in a loaded scene (prevent dangling pointer access)
+    bool nodeValid = false;
+    for (const auto& [sceneName, scene] : m_Engine->loadedScenes) {
+        if (!scene) continue;
+        for (const auto& [name, n] : scene->nodes) {
+            if (n && n.get() == node) {
+                nodeValid = true;
+                break;
+            }
+        }
+        if (nodeValid) break;
+    }
+    if (!nodeValid) {
+        m_Engine->selectedNode = nullptr;
+        m_Engine->selectedObjectName.clear();
+        return;
+    }
+
     SectionHeader("Scene Node");
 
     ImGui::Text("Name: %s", m_Engine->selectedObjectName.c_str());

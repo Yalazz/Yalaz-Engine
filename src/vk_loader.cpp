@@ -590,7 +590,7 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
                     imagesize.height = height;
                     imagesize.depth = 1;
 
-                    newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+                    newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
 
                     stbi_image_free(data);
                 }
@@ -609,7 +609,7 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
                     imagesize.height = height;
                     imagesize.depth = 1;
 
-                    newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+                    newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
 
                     stbi_image_free(data);
                 }
@@ -633,7 +633,7 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
                             imagesize.height = height;
                             imagesize.depth = 1;
 
-                            newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+                            newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
 
                             stbi_image_free(data);
                         }
@@ -922,7 +922,6 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             passType = MaterialPass::Transparent;
         }
         // Store alpha cutoff for Mask mode (extra[1].y)
-        // Also use transparent pipeline for Mask materials so alpha test + blending works
         if (mat.alphaMode == fastgltf::AlphaMode::Mask) {
             constants.extra[1].y = mat.alphaCutoff;
             passType = MaterialPass::Transparent;
@@ -1187,7 +1186,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         nodes.push_back(newNode);
-        file.nodes[node.name.c_str()];
+        file.nodes[node.name.c_str()] = newNode;
 
         std::visit(fastgltf::visitor{ [&](fastgltf::Node::TransformMatrix matrix) {
                                           memcpy(&newNode->localTransform, matrix.data(), sizeof(matrix));
@@ -1460,7 +1459,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
             unsigned char* data = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
             if (data) {
                 VkExtent3D size{ (uint32_t)w, (uint32_t)h, 1 };
-                AllocatedImage tex = engine->create_image(data, size, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+                AllocatedImage tex = engine->create_image(data, size, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
                 stbi_image_free(data);
                 res.colorImage = tex;
             }

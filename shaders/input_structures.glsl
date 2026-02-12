@@ -64,6 +64,10 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
     // === Color Grading (32 bytes) ===
     vec4 colorGrading;                      // offset 2688, size 16 (x=exposure, y=contrast, z=saturation, w=vibrance)
     vec4 colorTemperature;                  // offset 2704, size 16 (x=temperature, y=tint, z=tonemapOperator, w=unused)
+
+    // === Reflection Probes (80 bytes) ===
+    vec4 probePositions[4];                 // offset 2720, size 64 (xyz=position, w=radius)
+    vec4 probeSettings;                     // offset 2784, size 16 (x=probeCount, y=globalSkyBlend, z/w=unused)
 } sceneData;
 
 // =============================================================================
@@ -71,7 +75,7 @@ layout(std140, set = 0, binding = 0) uniform SceneData {
 // =============================================================================
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;              // Directional light cascade shadow map
 layout(set = 0, binding = 3) uniform samplerCube pointLightShadowMaps[4];  // Point light shadow cubemaps
-layout(set = 0, binding = 4) uniform samplerCube envCubemap;              // Environment cubemap for reflections
+layout(set = 0, binding = 4) uniform samplerCube envCubemaps[5];          // [0]=sky, [1-4]=reflection probes
 
 // =============================================================================
 // SHADOW CALCULATION FUNCTIONS

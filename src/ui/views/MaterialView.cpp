@@ -182,11 +182,28 @@ void MaterialView::OnRender() {
 void MaterialView::SyncWithSelection() {
     if (!m_Engine) return;
 
-    // Check for GLTF MeshNode selection first
-    // Use try/catch for dynamic_cast safety since selectedNode could be stale
+    // Validate that selectedNode still exists in a loaded scene before using it
+    // (prevents crash on dangling pointer after scene unload)
     MeshNode* meshNode = nullptr;
     if (m_Engine->selectedNode) {
-        meshNode = dynamic_cast<MeshNode*>(m_Engine->selectedNode);
+        bool nodeValid = false;
+        for (const auto& [sceneName, scene] : m_Engine->loadedScenes) {
+            if (!scene) continue;
+            for (const auto& [name, node] : scene->nodes) {
+                if (node && node.get() == m_Engine->selectedNode) {
+                    nodeValid = true;
+                    break;
+                }
+            }
+            if (nodeValid) break;
+        }
+        if (nodeValid) {
+            meshNode = dynamic_cast<MeshNode*>(m_Engine->selectedNode);
+        } else {
+            // selectedNode is dangling - clear it
+            m_Engine->selectedNode = nullptr;
+            m_Engine->selectedObjectName.clear();
+        }
     }
 
     if (meshNode && meshNode->mesh && !meshNode->mesh->surfaces.empty()) {
@@ -409,8 +426,6 @@ void MaterialView::RenderMaterialProperties() {
             ImGuiColorEditFlags_AlphaPreview |
             ImGuiColorEditFlags_Float |
             ImGuiColorEditFlags_DisplayRGB |
-            ImGuiColorEditFlags_DisplayHSV |
-            ImGuiColorEditFlags_DisplayHex |
             ImGuiColorEditFlags_InputRGB;
 
         if (m_ColorPickerMode == 0) {
@@ -449,7 +464,7 @@ void MaterialView::RenderMaterialProperties() {
         // Compact color edit
         if (ImGui::ColorEdit4("##BaseColor", col,
             ImGuiColorEditFlags_Float | ImGuiColorEditFlags_AlphaBar |
-            ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_DisplayHex)) {
+            ImGuiColorEditFlags_DisplayRGB)) {
             m_BaseColor = glm::vec4(col[0], col[1], col[2], col[3]);
             changed = true;
         }
@@ -812,7 +827,7 @@ void MaterialView::RenderMaterialProperties() {
 
     float emCol[3] = { m_Emission.r, m_Emission.g, m_Emission.b };
     if (ImGui::ColorEdit3("##EmissionColor", emCol,
-        ImGuiColorEditFlags_Float | ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_DisplayHex)) {
+        ImGuiColorEditFlags_Float | ImGuiColorEditFlags_DisplayRGB)) {
         m_Emission = glm::vec3(emCol[0], emCol[1], emCol[2]);
         changed = true;
     }

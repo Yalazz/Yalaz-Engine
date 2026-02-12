@@ -19,7 +19,7 @@
 //
 //    bindings.push_back(newbind);
 //}
-void DescriptorLayoutBuilder::add_binding(uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags, uint32_t descriptorCount, bool /*variableCount*/)
+void DescriptorLayoutBuilder::add_binding(uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags, uint32_t descriptorCount, bool variableCount)
 {
     VkDescriptorSetLayoutBinding newbind{};
     newbind.binding = binding;
@@ -29,6 +29,12 @@ void DescriptorLayoutBuilder::add_binding(uint32_t binding, VkDescriptorType typ
     newbind.pImmutableSamplers = nullptr;
 
     bindings.push_back(newbind);
+
+    VkDescriptorBindingFlags flags = 0;
+    if (variableCount) {
+        flags |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    }
+    bindingFlags.push_back(flags);
 }
 
 
@@ -36,6 +42,7 @@ void DescriptorLayoutBuilder::add_binding(uint32_t binding, VkDescriptorType typ
 void DescriptorLayoutBuilder::clear()
 {
     bindings.clear();
+    bindingFlags.clear();
 }
 //< descriptor_bind
 
@@ -46,8 +53,24 @@ VkDescriptorSetLayout DescriptorLayoutBuilder::build(VkDevice device, VkShaderSt
         b.stageFlags |= shaderStages;
     }
 
+    // Check if any binding uses variable descriptor count or partially bound flags
+    bool hasBindingFlags = false;
+    for (auto f : bindingFlags) {
+        if (f != 0) { hasBindingFlags = true; break; }
+    }
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
+    bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    bindingFlagsInfo.bindingCount = (uint32_t)bindingFlags.size();
+    bindingFlagsInfo.pBindingFlags = bindingFlags.data();
+
     VkDescriptorSetLayoutCreateInfo info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    info.pNext = pNext;
+    if (hasBindingFlags) {
+        bindingFlagsInfo.pNext = pNext;
+        info.pNext = &bindingFlagsInfo;
+    } else {
+        info.pNext = pNext;
+    }
 
     info.pBindings = bindings.data();
     info.bindingCount = (uint32_t)bindings.size();
@@ -274,13 +297,11 @@ VkDescriptorSet DescriptorAllocatorGrowable::allocate(VkDevice device, VkDescrip
         poolToUse = get_pool(device);
         allocInfo.descriptorPool = poolToUse;
 
-        VK_CHECK(vkAllocateDescriptorSets(device, &allocInfo, &ds));
+        result = vkAllocateDescriptorSets(device, &allocInfo, &ds);
+        VK_CHECK(result);
     }
 
-    // Eğer havuz dolu değilse, readyPools listesine ekleyin
-    if (result == VK_SUCCESS) {
-        readyPools.push_back(poolToUse);
-    }
+    readyPools.push_back(poolToUse);
 
     return ds;
 }

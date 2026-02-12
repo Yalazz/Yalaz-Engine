@@ -42,6 +42,7 @@ private:
     void drawPerformanceStats();
     void drawPathTracerSettings();
     void drawEnvironmentSettings();
+    void drawReflectionProbeSettings();
 };
 
 } // namespace Yalaz::UI

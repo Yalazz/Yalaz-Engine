@@ -550,7 +550,7 @@ void HierarchyView::RenderSceneNodes() {
                     }
 
                     // Context menu
-                    if (ImGui::BeginPopupContextItem()) {
+                    if (node && ImGui::BeginPopupContextItem()) {
                         if (ImGui::MenuItem("Focus Camera")) {
                             glm::vec3 pos = glm::vec3(node->worldTransform[3]);
                             m_Engine->mainCamera.position = pos + glm::vec3(0, 2, 5);

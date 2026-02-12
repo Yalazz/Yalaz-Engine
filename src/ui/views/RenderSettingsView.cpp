@@ -67,6 +67,11 @@ void RenderSettingsView::OnRenderContent() {
             ImGui::EndTabItem();
         }
 
+        if (ImGui::BeginTabItem("Reflections")) {
+            drawReflectionProbeSettings();
+            ImGui::EndTabItem();
+        }
+
         if (ImGui::BeginTabItem("Performance")) {
             drawPerformanceStats();
             ImGui::EndTabItem();
@@ -665,6 +670,66 @@ void RenderSettingsView::drawEnvironmentSettings() {
             settings.groundColor = glm::vec3(0.1f, 0.1f, 0.1f);
             settings.skyIntensity = 0.5f;
             applyPreset();
+        }
+    }
+}
+
+void RenderSettingsView::drawReflectionProbeSettings() {
+    if (!m_Engine) return;
+
+    ImGui::Text("Multi-Probe Reflection System");
+    ImGui::Separator();
+
+    ImGui::Checkbox("Enable Reflection Probes", &_settings.reflectionProbesEnabled);
+    m_Engine->_probesReady = _settings.reflectionProbesEnabled;
+
+    if (_settings.reflectionProbesEnabled) {
+        ImGui::SliderFloat("Sky Blend", &_settings.globalSkyBlend, 0.0f, 1.0f, "%.2f");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("0 = pure probe reflections, 1 = pure sky reflections");
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Probe Settings");
+
+        for (int i = 0; i < m_Engine->MAX_REFLECTION_PROBES; ++i) {
+            ImGui::PushID(i);
+            auto& probe = m_Engine->_reflectionProbes[i];
+
+            char label[32];
+            snprintf(label, sizeof(label), "Probe %d", i);
+            if (ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("Active", &probe.active);
+                ImGui::DragFloat3("Position", &probe.position.x, 0.5f, -500.0f, 500.0f, "%.1f");
+                ImGui::SliderFloat("Radius", &probe.radius, 5.0f, 200.0f, "%.1f");
+                ImGui::SliderFloat("Sky Blend##probe", &probe.skyBlendFactor, 0.0f, 1.0f, "%.2f");
+
+                if (ImGui::Button("Set to Camera")) {
+                    probe.position = m_Engine->mainCamera.position;
+                    probe.needsUpdate = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Force Update")) {
+                    probe.needsUpdate = true;
+                }
+            }
+            ImGui::PopID();
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("Reset All Probes")) {
+            m_Engine->_reflectionProbes[0].position = glm::vec3(-30.0f, 5.0f, -30.0f);
+            m_Engine->_reflectionProbes[1].position = glm::vec3( 30.0f, 5.0f, -30.0f);
+            m_Engine->_reflectionProbes[2].position = glm::vec3(-30.0f, 5.0f,  30.0f);
+            m_Engine->_reflectionProbes[3].position = glm::vec3( 30.0f, 5.0f,  30.0f);
+            for (auto& p : m_Engine->_reflectionProbes) {
+                p.radius = 50.0f;
+                p.skyBlendFactor = 0.3f;
+                p.active = true;
+                p.needsUpdate = true;
+            }
         }
     }
 }

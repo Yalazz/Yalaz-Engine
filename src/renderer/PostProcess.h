@@ -159,6 +159,10 @@ struct RenderSettings {
     bool spotLightsEnabled = true;
     int maxSpotLights = 16;
     bool spotLightShadowsEnabled = true;
+
+    // === Reflection Probe Settings ===
+    bool reflectionProbesEnabled = true;
+    float globalSkyBlend = 0.3f;
 };
 
 } // namespace Yalaz::Renderer
