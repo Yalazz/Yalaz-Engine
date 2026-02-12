@@ -76,8 +76,8 @@ void main() {
     vec4 worldPos = push.worldMatrix * vec4(inPosition, 1.0);
     fragWorldPos = worldPos.xyz;
 
-    // Transform normal to world space (use inverse transpose for non-uniform scale)
-    mat3 normalMatrix = mat3(push.worldMatrix);
+    // Transform normal to world space (inverse-transpose handles non-uniform scale correctly)
+    mat3 normalMatrix = transpose(inverse(mat3(push.worldMatrix)));
     fragNormal = normalize(normalMatrix * inNormal);
 
     // Determine face index for per-face coloring

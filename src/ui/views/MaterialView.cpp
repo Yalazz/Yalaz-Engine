@@ -211,10 +211,17 @@ void MaterialView::SyncWithSelection() {
         if (meshNode != m_LastSelectedMeshNode) {
             m_SelectionType = MaterialSelectionType::GLTFMaterial;
             m_SelectedMeshNode = meshNode;
+            m_Engine->selectedGLTFSurfaceIndex = 0;
             m_SelectedSurfaceIndex = 0;
             m_LastSelectedMeshNode = meshNode;
             m_LastSelectedPrimitiveIndex = -1;
         }
+
+        if (m_Engine->selectedGLTFSurfaceIndex < 0 ||
+            m_Engine->selectedGLTFSurfaceIndex >= static_cast<int>(meshNode->mesh->surfaces.size())) {
+            m_Engine->selectedGLTFSurfaceIndex = 0;
+        }
+        m_SelectedSurfaceIndex = m_Engine->selectedGLTFSurfaceIndex;
 
         // Always re-read from GPU buffer to stay in sync with ObjectInspectorView
         LoadGLTFMaterialData();
@@ -271,12 +278,15 @@ void MaterialView::LoadGLTFMaterialData() {
 
     auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
     if (surfaces.empty()) {
+        m_Engine->selectedGLTFSurfaceIndex = 0;
         m_SelectedSurfaceIndex = 0;
         return;
     }
-    if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) {
-        m_SelectedSurfaceIndex = 0;
+    if (m_Engine->selectedGLTFSurfaceIndex < 0 ||
+        m_Engine->selectedGLTFSurfaceIndex >= static_cast<int>(surfaces.size())) {
+        m_Engine->selectedGLTFSurfaceIndex = 0;
     }
+    m_SelectedSurfaceIndex = m_Engine->selectedGLTFSurfaceIndex;
 
     auto& surface = surfaces[m_SelectedSurfaceIndex];
     m_CurrentGLTFMaterial = surface.material;
@@ -371,6 +381,7 @@ void MaterialView::RenderGLTFMaterialList() {
 
             // Click to select
             if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
+                m_Engine->selectedGLTFSurfaceIndex = i;
                 m_SelectedSurfaceIndex = i;
                 LoadGLTFMaterialData();
             }
@@ -931,26 +942,9 @@ void MaterialView::ApplyToGLTFMaterial() {
 
     auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
     if (m_SelectedSurfaceIndex >= static_cast<int>(surfaces.size())) return;
-
-    // Find the LoadedGLTF that owns this mesh
-    for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
-        if (!scene) continue;
-
-        // Check if this scene contains our mesh
-        bool found = false;
-        for (auto& [nodeName, node] : scene->nodes) {
-            if (node.get() == m_SelectedMeshNode) {
-                found = true;
-                break;
-            }
-        }
-
-        if (found && scene->materialDataBuffer.buffer != VK_NULL_HANDLE) {
-            // Update the material constants in the buffer
-            UpdateGLTFMaterialBuffer();
-            return;
-        }
-    }
+    // Write directly through selected surface/material.
+    // UpdateGLTFMaterialBuffer already resolves owning scene by material pointer.
+    UpdateGLTFMaterialBuffer();
 }
 
 void MaterialView::UpdateGLTFMaterialBuffer() {
@@ -1532,6 +1526,9 @@ void MaterialView::SetEmissionTexture(const std::string& path) {
 void MaterialView::ClearGLTFSelection() {
     m_SelectionType = MaterialSelectionType::None;
     m_SelectedMeshNode = nullptr;
+    if (m_Engine) {
+        m_Engine->selectedGLTFSurfaceIndex = 0;
+    }
     m_SelectedSurfaceIndex = 0;
     m_CurrentGLTFMaterial = nullptr;
     m_LastSelectedMeshNode = nullptr;

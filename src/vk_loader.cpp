@@ -921,10 +921,11 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         if (mat.alphaMode == fastgltf::AlphaMode::Blend) {
             passType = MaterialPass::Transparent;
         }
-        // Store alpha cutoff for Mask mode (extra[1].y)
+        // Store alpha cutoff for Mask mode (extra[1].y).
+        // glTF MASK is alpha-tested and should remain in the opaque pass.
         if (mat.alphaMode == fastgltf::AlphaMode::Mask) {
             constants.extra[1].y = mat.alphaCutoff;
-            passType = MaterialPass::Transparent;
+            passType = MaterialPass::MainColor;
         }
 
         GLTFMetallic_Roughness::MaterialResources materialResources;

@@ -474,13 +474,9 @@ void main()
 
     // === NORMAL & VIEW DIRECTION ===
     vec3 N = normalize(fragNormal);
-
-    // Handle back-facing normals
-    if (!gl_FrontFacing) {
-        N = -N;
-    }
-
     vec3 V = normalize(sceneData.cameraPosition.xyz - fragWorldPos);
+    // Keep lighting stable regardless pipeline front-face convention or mirrored winding.
+    N = faceforward(N, -V, N);
 
     // === AMBIENT LIGHTING (with AO) ===
     vec3 ambient = albedo * sceneData.ambientColor.rgb * sceneData.ambientColor.a * ao;
@@ -538,6 +534,8 @@ void main()
             }
         }
         reflection = envColor * fresnel * (1.0 - roughness) * reflectionIntensity;
+        // Prevent reflection-only bloom spikes when using reflection presets.
+        reflection = min(reflection, vec3(1.0));
     }
 
     // === FINAL COMPOSITION (HDR linear output) ===
@@ -551,11 +549,7 @@ void main()
         alpha *= push.faceColors[fragFaceIndex].a;
     }
 
-    // For transparent materials, increase alpha at grazing angles (Fresnel)
-    if (alpha < 1.0) {
-        float fresnelAlpha = 1.0 - pow(1.0 - NdotV, 3.0);
-        alpha = mix(alpha, 1.0, (1.0 - fresnelAlpha) * 0.5);
-    }
+    // Keep primitive alpha stable. Opacity should come from color/material inputs only.
 
     // NaN/Inf safety: any NaN from PBR math gets spread by bloom into black rectangles
     result = clamp(result, vec3(0.0), vec3(65504.0));

@@ -179,12 +179,9 @@ void main()
 
     // === NORMAL MAPPING ===
     vec3 N = normalize(inNormal);
-
-    // Flip normal for back-facing triangles (with VK_CULL_MODE_NONE, both sides render)
-    // Without this, back faces have normals pointing away from camera → all lighting = 0 → black
-    if (!gl_FrontFacing) {
-        N = -N;
-    }
+    vec3 V = normalize(sceneData.cameraPosition.xyz - inWorldPos);
+    // Keep lighting stable regardless pipeline front-face convention or mirrored winding.
+    N = faceforward(N, -V, N);
 
 #ifdef USE_BINDLESS
     // Apply normal map if available (normalTexID > 0)
@@ -199,7 +196,6 @@ void main()
     }
 #endif
 
-    vec3 V = normalize(sceneData.cameraPosition.xyz - inWorldPos);
     float NdotV = max(dot(N, V), 0.001);
 
     // === F0 (base reflectance) ===
@@ -271,6 +267,8 @@ void main()
             }
         }
         reflection = envColor * fresnel * (1.0 - roughness) * reflectionIntensity;
+        // Prevent reflection-only bloom spikes when using reflection presets.
+        reflection = min(reflection, vec3(1.0));
     }
 
     // === FINAL COMPOSITION (HDR linear output) ===
@@ -292,11 +290,7 @@ void main()
         alpha = 1.0; // Masked materials are fully opaque where not discarded
     }
 
-    // Fresnel-enhanced transparency for semi-transparent surfaces (Blend mode only)
-    if (alpha < 1.0 && alphaCutoff <= 0.0) {
-        float fresnelAlpha = 1.0 - pow(1.0 - NdotV, 3.0);
-        alpha = mix(alpha, 1.0, (1.0 - fresnelAlpha) * 0.3);
-    }
+    // Keep GLTF alpha stable. Opacity should come from material/texture data only.
 
     // NaN/Inf safety: any NaN from PBR math gets spread by bloom into black rectangles
     result = clamp(result, vec3(0.0), vec3(65504.0));

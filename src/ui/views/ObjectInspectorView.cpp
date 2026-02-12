@@ -1187,9 +1187,11 @@ void ObjectInspectorView::RenderGLTFMaterialEditor() {
 
     auto& surfaces = node->mesh->surfaces;
 
-    // Surface selector if multiple surfaces
-    static int selectedSurface = 0;
-    if (selectedSurface >= static_cast<int>(surfaces.size())) selectedSurface = 0;
+    // Surface selector is shared with MaterialView to keep both panels synchronized.
+    int& selectedSurface = m_Engine->selectedGLTFSurfaceIndex;
+    if (selectedSurface < 0 || selectedSurface >= static_cast<int>(surfaces.size())) {
+        selectedSurface = 0;
+    }
 
     if (surfaces.size() > 1) {
         ImGui::Text("Surfaces: %zu", surfaces.size());

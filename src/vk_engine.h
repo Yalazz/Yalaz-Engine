@@ -555,6 +555,7 @@ public:
     void draw_node_recursive_ui(std::shared_ptr<Node> node);
 
     Node* selectedNode = nullptr;      // Selected GLTF node (Node* to support both mesh and non-mesh nodes)
+    int selectedGLTFSurfaceIndex = 0;      // Shared GLTF surface selection for MaterialView/ObjectInspector
     int selectedPrimitiveIndex = -1;       // Selected primitive shape index (-1 = none)
     int selectedLightIndex = -1;           // Selected light index (-1 = none)
 

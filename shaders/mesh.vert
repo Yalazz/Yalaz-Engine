@@ -38,8 +38,9 @@ void main()
     outColor = v.color.rgb;
     outUV = vec2(v.uv_x, v.uv_y);
 
-    // Safe normalize: avoid normalize(vec3(0)) which produces NaN
-    vec3 worldNormal = (PushConstants.render_matrix * vec4(v.normal, 0.0)).xyz;
+    // Transform normal with inverse-transpose for correct lighting under non-uniform scale.
+    mat3 normalMatrix = transpose(inverse(mat3(PushConstants.render_matrix)));
+    vec3 worldNormal = normalMatrix * v.normal;
     float normalLen = length(worldNormal);
     outWorldNormal = (normalLen > 0.0001) ? (worldNormal / normalLen) : vec3(0.0, 1.0, 0.0);
 
