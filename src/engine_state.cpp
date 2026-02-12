@@ -297,6 +297,7 @@ static json serializeRenderSettings(const Yalaz::Renderer::RenderSettings& rs) {
     // Color grading
     j["contrast"]    = rs.contrast;
     j["saturation"]  = rs.saturation;
+    j["sharpness"]   = rs.sharpness;
     j["temperature"] = rs.temperature;
     j["tint"]        = rs.tint;
     // SSR
@@ -344,6 +345,7 @@ static void deserializeRenderSettings(Yalaz::Renderer::RenderSettings& rs, const
     // Color grading
     if (j.contains("contrast"))    rs.contrast    = j["contrast"].get<float>();
     if (j.contains("saturation"))  rs.saturation  = j["saturation"].get<float>();
+    if (j.contains("sharpness"))   rs.sharpness   = j["sharpness"].get<float>();
     if (j.contains("temperature")) rs.temperature = j["temperature"].get<float>();
     if (j.contains("tint"))        rs.tint        = j["tint"].get<float>();
     // SSR

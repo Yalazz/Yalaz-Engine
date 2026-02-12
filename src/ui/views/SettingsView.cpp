@@ -5,6 +5,7 @@
 #include "SettingsView.h"
 #include "../../vk_engine.h"
 #include <imgui.h>
+#include <algorithm>
 #include <fstream>
 
 // Optional JSON support - define if nlohmann/json is available
@@ -64,8 +65,63 @@ void SettingsView::ApplyToEngine() {
 
     // Apply grid settings
     m_Engine->_showGrid = m_Editor.showGrid;
+    m_Engine->_gridSettings.baseGridSize = std::max(0.01f, m_Editor.gridSize);
+    m_Engine->_gridSettings.gridOpacity = std::clamp(m_Editor.gridOpacity, 0.0f, 1.0f);
 
-    // Note: Snap settings would need to be added to VulkanEngine
+    // Apply snapping
+    m_Engine->snapEnabled = m_Editor.snapToGrid;
+    m_Engine->snapPositionValue = std::max(0.01f, m_Editor.snapValue);
+
+    // Apply render settings used by renderer/runtime
+    auto& rs = m_Engine->_renderSettings;
+    rs.bloomEnabled = m_Graphics.bloom;
+    rs.bloomIntensity = m_Graphics.bloomIntensity;
+    rs.bloomThreshold = m_Graphics.bloomThreshold;
+
+    rs.ssaoEnabled = m_Graphics.ambientOcclusion;
+    rs.ssaoRadius = m_Graphics.aoRadius;
+    rs.ssaoIntensity = m_Graphics.aoIntensity;
+    switch (m_Graphics.aoQuality) {
+        case 0: rs.ssaoSamples = 8;  rs.ssaoBlurPasses = 1; break;   // SSAO
+        case 1: rs.ssaoSamples = 16; rs.ssaoBlurPasses = 2; break;   // HBAO
+        default: rs.ssaoSamples = 32; rs.ssaoBlurPasses = 3; break;  // GTAO
+    }
+
+    rs.ssrEnabled = m_Graphics.screenSpaceReflections;
+    rs.exposure = m_Graphics.exposure;
+    rs.gamma = m_Graphics.gamma;
+    rs.contrast = m_Graphics.contrast;
+    rs.saturation = m_Graphics.saturation;
+    rs.sharpness = std::clamp(m_Graphics.taaSharpness, 0.0f, 1.0f);
+
+    // Apply shadow quality to active shadow toggles and quality-related settings.
+    m_Engine->shadowsEnabled = (m_Graphics.shadowQuality > 0);
+    switch (m_Graphics.shadowQuality) {
+        case 0:
+            rs.pcssEnabled = false;
+            rs.contactShadowsEnabled = false;
+            break;
+        case 1:
+            rs.pcssEnabled = true;
+            rs.pcssBlockerSamples = 8;
+            rs.pcssPCFSamples = 16;
+            rs.contactShadowsEnabled = false;
+            break;
+        case 2:
+            rs.pcssEnabled = true;
+            rs.pcssBlockerSamples = 16;
+            rs.pcssPCFSamples = 32;
+            rs.contactShadowsEnabled = true;
+            rs.contactShadowSteps = 16;
+            break;
+        default:
+            rs.pcssEnabled = true;
+            rs.pcssBlockerSamples = 32;
+            rs.pcssPCFSamples = 64;
+            rs.contactShadowsEnabled = true;
+            rs.contactShadowSteps = 32;
+            break;
+    }
 }
 
 void SettingsView::SaveSettings(const std::string& path) {
@@ -185,20 +241,27 @@ void SettingsView::ApplyQualityPreset(int preset) {
 }
 
 void SettingsView::OnRenderToolbar() {
-    const char* categories[] = {
-        "Graphics", "Rendering", "Editor", "Input", "Performance", "Advanced"
+    struct Tab {
+        const char* name;
+        SettingsCategory category;
+    };
+    static const Tab categories[] = {
+        {"Rendering", SettingsCategory::Rendering},
+        {"Editor", SettingsCategory::Editor},
+        {"Input", SettingsCategory::Input},
+        {"Performance", SettingsCategory::Performance}
     };
 
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(categories)); ++i) {
         if (i > 0) ImGui::SameLine();
 
-        bool selected = (static_cast<int>(m_CurrentCategory) == i);
+        bool selected = (m_CurrentCategory == categories[i].category);
         if (selected) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
         }
 
-        if (ImGui::Button(categories[i])) {
-            m_CurrentCategory = static_cast<SettingsCategory>(i);
+        if (ImGui::Button(categories[i].name)) {
+            m_CurrentCategory = categories[i].category;
         }
 
         if (selected) {
@@ -206,18 +269,12 @@ void SettingsView::OnRenderToolbar() {
         }
     }
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 200);
+    ImGui::SameLine(ImGui::GetWindowWidth() - 120);
 
     if (m_HasUnsavedChanges) {
         ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "*");
         ImGui::SameLine();
     }
-
-    if (ImGui::Button("Apply")) {
-        ApplyToEngine();
-        SaveSettings();
-    }
-    ImGui::SameLine();
 
     if (ImGui::Button("Reset")) {
         ResetToDefaults();
@@ -228,9 +285,6 @@ void SettingsView::OnRenderContent() {
     ImGui::BeginChild("SettingsContent", ImVec2(0, 0), true);
 
     switch (m_CurrentCategory) {
-        case SettingsCategory::Graphics:
-            RenderGraphicsSettings();
-            break;
         case SettingsCategory::Rendering:
             RenderRenderingSettings();
             break;
@@ -243,10 +297,13 @@ void SettingsView::OnRenderContent() {
         case SettingsCategory::Performance:
             RenderPerformanceSettings();
             break;
-        case SettingsCategory::Advanced:
-            RenderAdvancedSettings();
+        default:
+            RenderRenderingSettings();
             break;
     }
+
+    // Apply settings live so all settings panels affect rendering/editor immediately.
+    ApplyToEngine();
 
     ImGui::EndChild();
 }
@@ -476,6 +533,13 @@ void SettingsView::RenderRenderingSettings() {
     ImGui::SameLine(150);
     ImGui::SetNextItemWidth(200);
     if (ImGui::SliderFloat("##Saturation", &m_Graphics.saturation, 0.0f, 2.0f)) {
+        m_HasUnsavedChanges = true;
+    }
+
+    ImGui::Text("Sharpness");
+    ImGui::SameLine(150);
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::SliderFloat("##Sharpness", &m_Graphics.taaSharpness, 0.0f, 1.0f)) {
         m_HasUnsavedChanges = true;
     }
 }

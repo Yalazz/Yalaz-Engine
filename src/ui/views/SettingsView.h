@@ -3,12 +3,10 @@
 // YALAZ ENGINE - Settings View
 // =============================================================================
 // Comprehensive settings panel with categories:
-// - Graphics (display, quality presets, shadows, textures, AA)
 // - Rendering (AO, bloom, SSR, color grading)
 // - Editor (grid, gizmos, camera, UI)
 // - Input (mouse, keyboard, gamepad)
 // - Performance (frame rate, memory)
-// - Advanced (debug options, experimental features)
 // =============================================================================
 
 #include "EditorView.h"
@@ -21,12 +19,10 @@ namespace Yalaz::UI {
 // Settings Categories
 // =============================================================================
 enum class SettingsCategory {
-    Graphics,
     Rendering,
     Editor,
     Input,
-    Performance,
-    Advanced
+    Performance
 };
 
 // =============================================================================
@@ -173,7 +169,7 @@ private:
     void RenderSectionHeader(const char* title);
     bool RenderQualitySlider(const char* label, int* value, const char** names, int count);
 
-    SettingsCategory m_CurrentCategory = SettingsCategory::Graphics;
+    SettingsCategory m_CurrentCategory = SettingsCategory::Rendering;
 
     GraphicsSettings m_Graphics;
     EditorSettings m_Editor;

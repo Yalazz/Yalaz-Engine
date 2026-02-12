@@ -22,8 +22,8 @@ void RenderSettingsView::OnInit(VulkanEngine* engine) {
 void RenderSettingsView::OnRenderContent() {
     if (!m_Engine) return;
 
-    // Sync engine render settings with UI settings each frame
-    m_Engine->_renderSettings = _settings;
+    // Pull latest runtime values first (keeps this panel in sync with other panels).
+    _settings = m_Engine->_renderSettings;
 
     // Tab bar for different categories
     if (ImGui::BeginTabBar("RenderSettingsTabs")) {
@@ -79,6 +79,9 @@ void RenderSettingsView::OnRenderContent() {
 
         ImGui::EndTabBar();
     }
+
+    // Push UI-edited settings back to runtime.
+    m_Engine->_renderSettings = _settings;
 }
 
 void RenderSettingsView::drawSSAOSettings() {
@@ -141,6 +144,7 @@ void RenderSettingsView::drawToneMappingSettings() {
 
         ImGui::SliderFloat("Exposure", &_settings.exposure, -5.0f, 5.0f);
         ImGui::SliderFloat("Gamma", &_settings.gamma, 1.0f, 3.0f);
+        ImGui::SliderFloat("Sharpness", &_settings.sharpness, 0.0f, 1.0f);
     }
 }
 

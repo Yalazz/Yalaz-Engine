@@ -15,11 +15,11 @@ layout(push_constant) uniform PushConstants {
     float exposure;
     float contrast;
     float saturation;
+    float sharpness;
     float temperature;
     float tint;
     int tonemapOperator;  // 0=ACES, 1=Reinhard, 2=Uncharted2, 3=Linear
     int _pad0;
-    int _pad1;
 } pc;
 
 // ACES filmic tone mapping
@@ -91,6 +91,11 @@ void main() {
     // Saturation
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = clamp(mix(vec3(luma), color, pc.saturation), 0.0, 1.0);
+
+    // Sharpness (micro-contrast in color space, range 0..1)
+    if (pc.sharpness > 0.0) {
+        color = clamp(color + (color - vec3(luma)) * pc.sharpness, 0.0, 1.0);
+    }
 
     imageStore(drawImage, coord, vec4(color, pixel.a));
 }

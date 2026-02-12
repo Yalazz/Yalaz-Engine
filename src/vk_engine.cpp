@@ -1939,7 +1939,9 @@ void VulkanEngine::draw_main(VkCommandBuffer cmd)
 
     // === FINAL TONE MAPPING (converts HDR linear -> LDR sRGB) ===
     // Runs AFTER bloom so emissive surfaces can have values > 1.0 for bloom detection
-    if (_tonemapPipeline != VK_NULL_HANDLE && _currentViewMode != ViewMode::PathTraced) {
+    if (_tonemapPipeline != VK_NULL_HANDLE &&
+        _renderSettings.tonemappingEnabled &&
+        _currentViewMode != ViewMode::PathTraced) {
         // Ensure _drawImage is in GENERAL layout for compute imageLoad/imageStore
         // After bloom it's already GENERAL; if bloom is disabled, rasterize left it in GENERAL too
         VkMemoryBarrier memBarrier{};
@@ -8139,11 +8141,11 @@ void VulkanEngine::init_tonemap_pipeline() {
         float exposure;
         float contrast;
         float saturation;
+        float sharpness;
         float temperature;
         float tint;
         int tonemapOperator;
         int _pad0;
-        int _pad1;
     };
 
     // Pipeline layout: uses the drawImage descriptor set (storage image at binding 0)
@@ -8185,17 +8187,18 @@ void VulkanEngine::execute_tonemap(VkCommandBuffer cmd) {
         float exposure;
         float contrast;
         float saturation;
+        float sharpness;
         float temperature;
         float tint;
         int tonemapOperator;
         int _pad0;
-        int _pad1;
     };
 
     TonemapPushConstants pc{};
     pc.exposure = _renderSettings.exposure;
     pc.contrast = _renderSettings.contrast;
     pc.saturation = _renderSettings.saturation;
+    pc.sharpness = _renderSettings.sharpness;
     pc.temperature = _renderSettings.temperature;
     pc.tint = _renderSettings.tint;
     pc.tonemapOperator = _renderSettings.tonemapOperator;

@@ -133,6 +133,7 @@ struct RenderSettings {
     // === Color Grading ===
     float contrast = 1.0f;
     float saturation = 1.0f;
+    float sharpness = 0.0f;    // 0..1, post-tonemap micro-contrast sharpening
     float temperature = 0.0f;  // -1 to 1 (cool to warm)
     float tint = 0.0f;         // -1 to 1 (green to magenta)
 
