@@ -29,7 +29,7 @@ protected:
 
 private:
     Yalaz::Renderer::RenderSettings _settings;
-    char _cubemapPath[512] = "../../assets/cubemapping";
+    char _cubemapPath[512] = "../../assets/cubemaps";
 
     // Draw individual sections
     void drawSSAOSettings();

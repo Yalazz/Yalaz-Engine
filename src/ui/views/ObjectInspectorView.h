@@ -18,6 +18,7 @@
 #include "HierarchyView.h"  // For PrimitiveFaceConfig
 
 struct Node;
+struct MeshNode;
 
 namespace Yalaz::UI {
 
@@ -31,7 +32,7 @@ private:
     void RenderPrimitiveInspector(int index);
     void RenderLightInspector(int index);
     void RenderSceneNodeInspector();
-    void RenderGLTFMaterialEditor();
+    void RenderGLTFMaterialEditor(MeshNode* targetMeshNode);
 
     // Editor helpers
     void RenderTransformEditor(glm::vec3& position, glm::vec3& rotation, glm::vec3& scale);
@@ -53,6 +54,7 @@ private:
     Node* m_LastInspectedNode = nullptr;
     int m_SelectedSkeletonIndex = -1;
     int m_SelectedBoneIndex = -1;
+    int m_SelectedMaterialMeshIndex = 0;
     bool m_ApplyTransformToWholeAsset = true;
 };
 

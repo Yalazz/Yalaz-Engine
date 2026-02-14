@@ -8457,6 +8457,39 @@ void VulkanEngine::updateAnimations(float deltaTime) {
         return (!sourceFile.empty() && sourceFile == sceneFile);
     };
 
+    auto lowerExt = [](const std::string& p) -> std::string {
+        std::string ext = std::filesystem::path(p).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](char c) {
+            return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+        });
+        return ext;
+    };
+    auto isLegacyRootBoneTrack = [&](const AnimationClipData& clip, const AnimationTrackData& track) -> bool {
+        if (track.targetNodeIndex < 0) return false;
+        if (clip.skeletonIndex < 0 || clip.skeletonIndex >= static_cast<int>(skeletons.size())) return false;
+
+        const SkeletonData& skel = skeletons[clip.skeletonIndex];
+        for (const auto& bone : skel.bones) {
+            if (bone.nodeIndex == track.targetNodeIndex) {
+                return bone.parentIndex < 0;
+            }
+        }
+        return false;
+    };
+
+    struct RestPose {
+        glm::vec3 t = glm::vec3(0.0f);
+        glm::quat r = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        glm::vec3 s = glm::vec3(1.0f);
+        bool valid = false;
+    };
+    // Keep rest pose stable across frames so FBX/DAE tracks are applied relative
+    // to spawn orientation, preventing root axis snaps.
+    static std::unordered_map<Node*, RestPose> sRestPoseCache;
+    if (loadedScenes.empty()) {
+        sRestPoseCache.clear();
+    }
+
     struct NodePose {
         bool valid = false;
         bool dirtyT = false;
@@ -8571,6 +8604,30 @@ void VulkanEngine::updateAnimations(float deltaTime) {
             }
             if (!targetNode) continue;
 
+            const std::string srcExt = lowerExt(clip.sourceScene);
+            const bool legacyAssimpAnim = (srcExt == ".fbx" || srcExt == ".dae");
+            if (legacyAssimpAnim) {
+                auto& rest = sRestPoseCache[targetNode];
+                if (!rest.valid) {
+                    if (targetNode->hasLocalTRS) {
+                        rest.t = targetNode->localTranslation;
+                        rest.r = targetNode->localRotation;
+                        rest.s = targetNode->localScale;
+                        rest.valid = true;
+                    } else {
+                        glm::vec3 scale, translation, skew;
+                        glm::vec4 perspective;
+                        glm::quat rotation;
+                        if (glm::decompose(targetNode->localTransform, scale, rotation, translation, skew, perspective)) {
+                            rest.t = translation;
+                            rest.r = rotation;
+                            rest.s = scale;
+                            rest.valid = true;
+                        }
+                    }
+                }
+            }
+
             auto& pose = pendingPoses[targetNode];
             if (!pose.valid) {
                 if (targetNode->hasLocalTRS) {
@@ -8593,6 +8650,38 @@ void VulkanEngine::updateAnimations(float deltaTime) {
             if (!pose.valid) continue;
 
             glm::vec4 sampled = sampleTrack(track, clip.currentTime);
+            if (legacyAssimpAnim && !track.keyframes.empty()) {
+                auto itRest = sRestPoseCache.find(targetNode);
+                if (itRest != sRestPoseCache.end() && itRest->second.valid) {
+                    const RestPose& rest = itRest->second;
+                    const glm::vec4 first = track.keyframes.front().value;
+                    const bool rootBoneTrack = isLegacyRootBoneTrack(clip, track);
+                    if (track.property == "translation") {
+                        if (rootBoneTrack) {
+                            // Keep FBX/DAE root at spawn origin to avoid axis-conversion drift/jumping.
+                            sampled = glm::vec4(rest.t, 0.0f);
+                        } else {
+                            sampled = glm::vec4(rest.t + (glm::vec3(sampled) - glm::vec3(first)), 0.0f);
+                        }
+                    } else if (track.property == "rotation") {
+                        if (rootBoneTrack) {
+                            sampled = glm::vec4(rest.r.x, rest.r.y, rest.r.z, rest.r.w);
+                        } else {
+                            glm::quat qSample = glm::normalize(glm::quat(sampled.w, sampled.x, sampled.y, sampled.z));
+                            glm::quat qFirst = glm::normalize(glm::quat(first.w, first.x, first.y, first.z));
+                            glm::quat qCorr = glm::normalize(rest.r * glm::inverse(qFirst) * qSample);
+                            sampled = glm::vec4(qCorr.x, qCorr.y, qCorr.z, qCorr.w);
+                        }
+                    } else if (track.property == "scale") {
+                        glm::vec3 sFirst = glm::vec3(first);
+                        glm::vec3 sRatio = glm::vec3(1.0f);
+                        sRatio.x = (std::abs(sFirst.x) > 0.00001f) ? (sampled.x / sFirst.x) : 1.0f;
+                        sRatio.y = (std::abs(sFirst.y) > 0.00001f) ? (sampled.y / sFirst.y) : 1.0f;
+                        sRatio.z = (std::abs(sFirst.z) > 0.00001f) ? (sampled.z / sFirst.z) : 1.0f;
+                        sampled = glm::vec4(rest.s * sRatio, 0.0f);
+                    }
+                }
+            }
             if (track.property == "translation") {
                 pose.tAccum += glm::vec3(sampled) * weight;
                 pose.tWeight += weight;

@@ -46,6 +46,22 @@ static const struct PrimitiveStats {
     { 1, 3, "Single triangle" }                   // Triangle
 };
 
+static void CollectEditableMeshNodes(Node* node, std::vector<MeshNode*>& outNodes) {
+    if (!node) return;
+
+    if (auto* meshNode = dynamic_cast<MeshNode*>(node)) {
+        if (meshNode->mesh && !meshNode->mesh->surfaces.empty()) {
+            outNodes.push_back(meshNode);
+        }
+    }
+
+    for (const auto& child : node->children) {
+        if (child) {
+            CollectEditableMeshNodes(child.get(), outNodes);
+        }
+    }
+}
+
 // =============================================================================
 // MAIN RENDER
 // =============================================================================
@@ -933,6 +949,7 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         m_LastInspectedNode = node;
         m_SelectedSkeletonIndex = -1;
         m_SelectedBoneIndex = -1;
+        m_SelectedMaterialMeshIndex = 0;
     }
 
     SectionHeader("Scene Node");
@@ -1066,11 +1083,43 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         ImGui::Unindent();
     }
 
-    // Material editing for GLTF nodes (only for MeshNode with surfaces)
+    // Material editing for imported scene nodes.
+    // If selected node is a root/group node (common in FBX/DAE), expose child mesh materials too.
     MeshNode* meshNode = dynamic_cast<MeshNode*>(node);
-    if (meshNode && meshNode->mesh && !meshNode->mesh->surfaces.empty() && ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+    std::vector<MeshNode*> editableMeshNodes;
+    CollectEditableMeshNodes(node, editableMeshNodes);
+
+    if (!editableMeshNodes.empty() && ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent();
-        RenderGLTFMaterialEditor();
+
+        if (m_SelectedMaterialMeshIndex < 0 ||
+            m_SelectedMaterialMeshIndex >= static_cast<int>(editableMeshNodes.size())) {
+            m_SelectedMaterialMeshIndex = 0;
+        }
+
+        if (editableMeshNodes.size() > 1) {
+            ImGui::Text("Mesh: %zu", editableMeshNodes.size());
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##MeshMaterialSelect",
+                ("Mesh " + std::to_string(m_SelectedMaterialMeshIndex)).c_str())) {
+                for (int i = 0; i < static_cast<int>(editableMeshNodes.size()); ++i) {
+                    const MeshNode* mn = editableMeshNodes[i];
+                    std::string meshLabel = "Mesh " + std::to_string(i);
+                    if (mn && mn->mesh && !mn->mesh->name.empty()) {
+                        meshLabel += " - " + mn->mesh->name;
+                    }
+                    bool isSelected = (i == m_SelectedMaterialMeshIndex);
+                    if (ImGui::Selectable(meshLabel.c_str(), isSelected)) {
+                        m_SelectedMaterialMeshIndex = i;
+                    }
+                    if (isSelected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::Spacing();
+        }
+
+        RenderGLTFMaterialEditor(editableMeshNodes[m_SelectedMaterialMeshIndex]);
         ImGui::Unindent();
     }
 
@@ -1575,8 +1624,7 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
 // GLTF MATERIAL EDITOR - Inline PBR editing for GLTF nodes
 // =============================================================================
 
-void ObjectInspectorView::RenderGLTFMaterialEditor() {
-    MeshNode* node = dynamic_cast<MeshNode*>(m_Engine->selectedNode);
+void ObjectInspectorView::RenderGLTFMaterialEditor(MeshNode* node) {
     if (!node || !node->mesh || node->mesh->surfaces.empty()) return;
 
     auto& surfaces = node->mesh->surfaces;

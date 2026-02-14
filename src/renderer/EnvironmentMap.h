@@ -120,6 +120,7 @@ private:
     void createBRDFLUT();
     void createPipelines();
     void createSkyboxPipeline();
+    bool tryLoadCubemapFromAssets();
 
     void convertEquirectangularToCubemap(AllocatedImage& equirectangular);
     void generateIrradianceMap();

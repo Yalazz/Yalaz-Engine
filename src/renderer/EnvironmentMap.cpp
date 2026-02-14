@@ -4,9 +4,73 @@
 #include "vk_pipelines.h"
 #include <fmt/core.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <array>
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <vector>
 #include "stb_image.h"
 
 namespace Yalaz::Renderer {
+namespace fs = std::filesystem;
+
+namespace {
+std::string toLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+bool hasImageExtension(const fs::path& p) {
+    const std::string ext = toLower(p.extension().string());
+    return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" ||
+           ext == ".bmp" || ext == ".hdr";
+}
+
+bool isFaceMatch(const std::string& n, int faceIdx) {
+    static const std::array<std::vector<std::string>, 6> tokens = {{
+        {"posx", "xpos", "right", "_px", ".px", "+x"},
+        {"negx", "xneg", "left", "_nx", ".nx", "-x"},
+        {"posy", "ypos", "up", "top", "_py", ".py", "+y"},
+        {"negy", "yneg", "down", "bottom", "_ny", ".ny", "-y"},
+        {"posz", "zpos", "front", "_pz", ".pz", "+z"},
+        {"negz", "zneg", "back", "_nz", ".nz", "-z"},
+    }};
+    for (const std::string& t : tokens[faceIdx]) {
+        if (n.find(t) != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool collectFacesFromDir(const fs::path& dir, std::array<std::string, 6>& outFaces) {
+    if (!fs::exists(dir) || !fs::is_directory(dir)) return false;
+
+    std::array<std::string, 6> found{};
+    std::array<bool, 6> ok = { false, false, false, false, false, false };
+
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        const fs::path p = entry.path();
+        if (!hasImageExtension(p)) continue;
+
+        const std::string lowerName = toLower(p.filename().string());
+        for (int i = 0; i < 6; ++i) {
+            if (!ok[i] && isFaceMatch(lowerName, i)) {
+                found[i] = p.string();
+                ok[i] = true;
+                break;
+            }
+        }
+    }
+
+    for (bool v : ok) {
+        if (!v) return false;
+    }
+    outFaces = found;
+    return true;
+}
+} // namespace
 
 EnvironmentMap::EnvironmentMap(VulkanEngine* engine)
     : _engine(engine) {}
@@ -22,7 +86,10 @@ void EnvironmentMap::init() {
 
     createSamplers();
     createBRDFLUT();
-    generateProceduralSky();
+
+    if (!tryLoadCubemapFromAssets()) {
+        generateProceduralSky();
+    }
     createSkyboxPipeline();
 
     _initialized = true;
@@ -77,6 +144,39 @@ void EnvironmentMap::cleanup() {
     }
 
     _initialized = false;
+}
+
+bool EnvironmentMap::tryLoadCubemapFromAssets() {
+    const std::array<std::string, 4> assetRoots = {
+        "../../assets", "../assets", "assets", "./assets"
+    };
+    const std::array<std::string, 1> cubemapDirs = {
+        "cubemaps"
+    };
+
+    for (const std::string& root : assetRoots) {
+        for (const std::string& sub : cubemapDirs) {
+            const fs::path base = fs::path(root) / sub;
+            if (!fs::exists(base) || !fs::is_directory(base)) continue;
+
+            std::array<std::string, 6> faces{};
+            if (collectFacesFromDir(base, faces)) {
+                fmt::print("[Environment] Auto cubemap found: {}\n", base.string());
+                return loadCubemapFaces(faces.data());
+            }
+
+            for (const auto& child : fs::directory_iterator(base)) {
+                if (!child.is_directory()) continue;
+                if (collectFacesFromDir(child.path(), faces)) {
+                    fmt::print("[Environment] Auto cubemap found: {}\n", child.path().string());
+                    return loadCubemapFaces(faces.data());
+                }
+            }
+        }
+    }
+
+    fmt::print("[Environment] No cubemap faces found in assets/cubemaps, using procedural sky.\n");
+    return false;
 }
 
 void EnvironmentMap::createSamplers() {

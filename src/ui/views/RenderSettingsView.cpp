@@ -4,9 +4,68 @@
 #include "renderer/EnvironmentMap.h"
 #include <imgui.h>
 #include <filesystem>
+#include <array>
+#include <vector>
+#include <algorithm>
+#include <cctype>
 #include <fmt/core.h>
 
 namespace Yalaz::UI {
+namespace {
+std::string ToLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+bool HasImageExt(const std::filesystem::path& p) {
+    const std::string ext = ToLower(p.extension().string());
+    return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga" || ext == ".hdr";
+}
+
+bool FaceMatch(const std::string& lowerName, int faceIdx) {
+    static const std::array<std::vector<std::string>, 6> tokens = {{
+        {"posx", "xpos", "right", "_px", ".px", "+x"},
+        {"negx", "xneg", "left", "_nx", ".nx", "-x"},
+        {"posy", "ypos", "up", "top", "_py", ".py", "+y"},
+        {"negy", "yneg", "down", "bottom", "_ny", ".ny", "-y"},
+        {"posz", "zpos", "front", "_pz", ".pz", "+z"},
+        {"negz", "zneg", "back", "_nz", ".nz", "-z"},
+    }};
+    for (const std::string& t : tokens[faceIdx]) {
+        if (lowerName.find(t) != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool CollectCubemapFaces(const std::filesystem::path& folder, std::array<std::string, 6>& outFaces) {
+    if (!std::filesystem::exists(folder) || !std::filesystem::is_directory(folder)) return false;
+
+    std::array<std::string, 6> found{};
+    std::array<bool, 6> ok = { false, false, false, false, false, false };
+
+    for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+        if (!entry.is_regular_file()) continue;
+        if (!HasImageExt(entry.path())) continue;
+
+        const std::string lowerName = ToLower(entry.path().filename().string());
+        for (int i = 0; i < 6; ++i) {
+            if (!ok[i] && FaceMatch(lowerName, i)) {
+                found[i] = entry.path().string();
+                ok[i] = true;
+                break;
+            }
+        }
+    }
+
+    for (bool v : ok) {
+        if (!v) return false;
+    }
+    outFaces = found;
+    return true;
+}
+} // namespace
 
 RenderSettingsView::RenderSettingsView()
     : EditorView("Render Settings", "[R]", ViewCategory::Rendering) {}
@@ -488,68 +547,70 @@ void RenderSettingsView::drawEnvironmentSettings() {
     if (ImGui::CollapsingHeader("Load Cubemap", ImGuiTreeNodeFlags_DefaultOpen)) {
         // Helper lambda to load a cubemap from a folder and switch to skybox background
         auto loadCubemapFromFolder = [&](const std::string& folderPath) {
-            const char* extensions[] = { ".jpg", ".png", ".bmp", ".tga" };
-            const char* faceNames[] = { "posx", "negx", "posy", "negy", "posz", "negz" };
+            std::array<std::string, 6> faces{};
+            if (!CollectCubemapFaces(folderPath, faces)) {
+                return false;
+            }
 
-            for (const char* ext : extensions) {
-                std::string testPath = folderPath + "/" + faceNames[0] + ext;
-                if (std::filesystem::exists(testPath)) {
-                    std::string paths[6];
-                    for (int i = 0; i < 6; i++) {
-                        paths[i] = folderPath + "/" + faceNames[i] + ext;
-                    }
+            vkDeviceWaitIdle(m_Engine->_device);
 
-                    vkDeviceWaitIdle(m_Engine->_device);
+            if (!m_Engine->_environmentMap->loadCubemapFaces(faces.data())) {
+                return false;
+            }
 
-                    if (m_Engine->_environmentMap->loadCubemapFaces(paths)) {
-                        if (m_Engine->_pathTracer) {
-                            m_Engine->_pathTracer->setEnvironmentCubemap(
-                                m_Engine->_environmentMap->getEnvironmentCubemap(),
-                                m_Engine->_environmentMap->getSampler());
-                            m_Engine->_pathTracer->resetAccumulation();
-                        }
-                        m_Engine->updateSkyboxBgDescriptor();
+            if (m_Engine->_pathTracer) {
+                m_Engine->_pathTracer->setEnvironmentCubemap(
+                    m_Engine->_environmentMap->getEnvironmentCubemap(),
+                    m_Engine->_environmentMap->getSampler());
+                m_Engine->_pathTracer->resetAccumulation();
+            }
+            m_Engine->updateSkyboxBgDescriptor();
 
-                        // Auto-switch to skybox background
-                        for (int i = 0; i < static_cast<int>(m_Engine->backgroundEffects.size()); i++) {
-                            if (strcmp(m_Engine->backgroundEffects[i].name, "skybox") == 0) {
-                                m_Engine->currentBackgroundEffect = i;
-                                break;
-                            }
-                        }
-                        return true;
-                    }
-                    return false;
+            // Auto-switch to skybox background
+            for (int i = 0; i < static_cast<int>(m_Engine->backgroundEffects.size()); i++) {
+                if (strcmp(m_Engine->backgroundEffects[i].name, "skybox") == 0) {
+                    m_Engine->currentBackgroundEffect = i;
+                    break;
                 }
             }
-            return false;
+            return true;
         };
 
-        // Scan assets/skyboxes/ for available cubemap folders
-        const std::string skyboxDir = "../../assets/skyboxes";
-        if (std::filesystem::exists(skyboxDir) && std::filesystem::is_directory(skyboxDir)) {
-            for (auto& entry : std::filesystem::directory_iterator(skyboxDir)) {
-                if (entry.is_directory()) {
+        // Scan all supported roots for available cubemap folders
+        std::vector<std::filesystem::path> roots = {
+            "../../assets/skyboxes",
+            "../../assets/cubemaps"
+        };
+
+        bool anyListed = false;
+        for (const auto& root : roots) {
+            if (!std::filesystem::exists(root) || !std::filesystem::is_directory(root)) continue;
+
+            if (ImGui::TreeNode(root.string().c_str())) {
+                for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                    if (!entry.is_directory()) continue;
+                    std::array<std::string, 6> testFaces{};
+                    if (!CollectCubemapFaces(entry.path(), testFaces)) continue;
+
+                    anyListed = true;
                     std::string name = entry.path().filename().string();
+                    std::string buttonLabel = name + "##" + entry.path().string();
                     bool isCurrent = (m_Engine->_environmentMap->stats.loadedPath == name);
 
-                    if (isCurrent) {
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                    }
-
-                    if (ImGui::Button(name.c_str(), ImVec2(-1, 0))) {
+                    if (isCurrent) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+                    if (ImGui::Button(buttonLabel.c_str(), ImVec2(-1, 0))) {
                         if (loadCubemapFromFolder(entry.path().string())) {
                             m_Engine->_environmentMap->stats.loadedPath = name;
                         }
                     }
-
-                    if (isCurrent) {
-                        ImGui::PopStyleColor();
-                    }
+                    if (isCurrent) ImGui::PopStyleColor();
                 }
+                ImGui::TreePop();
             }
-        } else {
-            ImGui::TextDisabled("No skyboxes folder found (assets/skyboxes/)");
+        }
+
+        if (!anyListed) {
+            ImGui::TextDisabled("No cubemap folders found in assets/skyboxes, assets/cubemaps");
         }
 
         ImGui::Separator();
