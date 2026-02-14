@@ -21,6 +21,10 @@
 #include <array>
 #include <fmt/core.h>
 #include <fstream>
+#include <future>
+#include <filesystem>
+#include <chrono>
+#include <cstdlib>
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -140,72 +144,7 @@ void VulkanEngine::init()
     initSubsystems();
 
     // Register shader pipelines for ShaderDebugView
-    shaderPipelines.clear();
-    if (_meshPipeline != VK_NULL_HANDLE) {
-        ShaderPipelineInfo meshShader;
-        meshShader.name = "Mesh Pipeline";
-        meshShader.vertPath = "shaders/mesh.vert.spv";
-        meshShader.fragPath = "shaders/mesh.frag.spv";
-        meshShader.pipeline = _meshPipeline;
-        meshShader.layout = _meshPipelineLayout;
-        meshShader.isValid = true;
-        meshShader.compileTimeMs = 45.2f;
-        meshShader.uniformCount = 6;
-        meshShader.textureCount = 2;
-        shaderPipelines.push_back(meshShader);
-    }
-    if (_primitivePipeline != VK_NULL_HANDLE) {
-        ShaderPipelineInfo primitiveShader;
-        primitiveShader.name = "Primitive Pipeline";
-        primitiveShader.vertPath = "shaders/primitive.vert.spv";
-        primitiveShader.fragPath = "shaders/primitive.frag.spv";
-        primitiveShader.pipeline = _primitivePipeline;
-        primitiveShader.layout = _primitivePipelineLayout;
-        primitiveShader.isValid = true;
-        primitiveShader.compileTimeMs = 32.1f;
-        primitiveShader.uniformCount = 4;
-        primitiveShader.textureCount = 0;
-        shaderPipelines.push_back(primitiveShader);
-    }
-    if (_shadedPipeline != VK_NULL_HANDLE) {
-        ShaderPipelineInfo shadedShader;
-        shadedShader.name = "Shaded Pipeline";
-        shadedShader.vertPath = "shaders/shaded.vert.spv";
-        shadedShader.fragPath = "shaders/shaded.frag.spv";
-        shadedShader.pipeline = _shadedPipeline;
-        shadedShader.layout = _shadedPipelineLayout;
-        shadedShader.isValid = true;
-        shadedShader.compileTimeMs = 56.8f;
-        shadedShader.uniformCount = 8;
-        shadedShader.textureCount = 4;
-        shaderPipelines.push_back(shadedShader);
-    }
-    if (_wireframePipeline != VK_NULL_HANDLE) {
-        ShaderPipelineInfo wireframeShader;
-        wireframeShader.name = "Wireframe Pipeline";
-        wireframeShader.vertPath = "shaders/wireframe.vert.spv";
-        wireframeShader.fragPath = "shaders/wireframe.frag.spv";
-        wireframeShader.pipeline = _wireframePipeline;
-        wireframeShader.layout = _wireframePipelineLayout;
-        wireframeShader.isValid = true;
-        wireframeShader.compileTimeMs = 12.4f;
-        wireframeShader.uniformCount = 2;
-        wireframeShader.textureCount = 0;
-        shaderPipelines.push_back(wireframeShader);
-    }
-    if (gridPipeline != VK_NULL_HANDLE) {
-        ShaderPipelineInfo gridShader;
-        gridShader.name = "Grid Pipeline";
-        gridShader.vertPath = "shaders/grid.vert.spv";
-        gridShader.fragPath = "shaders/grid.frag.spv";
-        gridShader.pipeline = gridPipeline;
-        gridShader.layout = gridPipelineLayout;
-        gridShader.isValid = true;
-        gridShader.compileTimeMs = 8.3f;
-        gridShader.uniformCount = 2;
-        gridShader.textureCount = 0;
-        shaderPipelines.push_back(gridShader);
-    }
+    rebuildShaderPipelineRegistry();
 
     // everything went fine
     _isInitialized = true;
@@ -1603,6 +1542,14 @@ void VulkanEngine::updateSkyboxBgDescriptor() {
     VkSampler cubemapSampler = _environmentMap->getSampler();
     if (cubemapView == VK_NULL_HANDLE || cubemapSampler == VK_NULL_HANDLE) return;
 
+    // Avoid updating a descriptor set that may still be referenced by in-flight command buffers.
+    // Most frames use the same draw image + environment cubemap handles, so skip redundant updates.
+    if (_skyboxBgLastDrawImageView == _drawImage.imageView &&
+        _skyboxBgLastCubemapView == cubemapView &&
+        _skyboxBgLastCubemapSampler == cubemapSampler) {
+        return;
+    }
+
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageView = _drawImage.imageView;
     imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -1628,6 +1575,10 @@ void VulkanEngine::updateSkyboxBgDescriptor() {
     writes[1].pImageInfo = &cubemapInfo;
 
     vkUpdateDescriptorSets(_device, 2, writes, 0, nullptr);
+
+    _skyboxBgLastDrawImageView = _drawImage.imageView;
+    _skyboxBgLastCubemapView = cubemapView;
+    _skyboxBgLastCubemapSampler = cubemapSampler;
 }
 
 void VulkanEngine::init_default_data() {
@@ -2188,21 +2139,23 @@ void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
 
 void VulkanEngine::draw()
 {
+    FrameData& frame = get_current_frame();
+
     //wait until the gpu has finished rendering the last frame. Timeout of 1 second
-    VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+    VK_CHECK(vkWaitForFences(_device, 1, &frame._renderFence, true, 1000000000));
 
     // Process deferred scene unloads AFTER fence wait (GPU done with all references)
     processPendingSceneUnloads();
 
-    get_current_frame()._deletionQueue.flush();
-    get_current_frame()._frameDescriptors.clear_pools(_device);
+    frame._deletionQueue.flush();
+    frame._frameDescriptors.clear_pools(_device);
 
     // Update scene AFTER fence wait to avoid writing to buffers still in use by GPU
     update_scene();
     //request image from the swapchain
     uint32_t swapchainImageIndex;
 
-    VkResult e = vkAcquireNextImageKHR(_device, _swapchain, 1000000000, get_current_frame()._swapchainSemaphore, nullptr, &swapchainImageIndex);
+    VkResult e = vkAcquireNextImageKHR(_device, _swapchain, 1000000000, frame._swapchainSemaphore, nullptr, &swapchainImageIndex);
     if (e == VK_ERROR_OUT_OF_DATE_KHR) {
         resize_requested = true;
         return;
@@ -2211,7 +2164,7 @@ void VulkanEngine::draw()
     _drawExtent.height = std::min(_swapchainExtent.height, _drawImage.imageExtent.height) * renderScale;
     _drawExtent.width = std::min(_swapchainExtent.width, _drawImage.imageExtent.width) * renderScale;
 
-    VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
+    VK_CHECK(vkResetFences(_device, 1, &frame._renderFence));
 
     // Process pending BVH rebuild BEFORE command recording (safe to destroy/create buffers here)
     if (_pathTracer) {
@@ -2219,62 +2172,55 @@ void VulkanEngine::draw()
     }
 
     //now that we are sure that the commands finished executing, we can safely reset the command buffer to begin recording again.
-    VK_CHECK(vkResetCommandBuffer(get_current_frame()._mainCommandBuffer, 0));
+    VK_CHECK(vkResetCommandBuffer(frame._mainCommandBuffer, 0));
+    VK_CHECK(vkResetCommandBuffer(frame._uiCommandBuffer, 0));
 
-    //naming it cmd for shorter writing
-    VkCommandBuffer cmd = get_current_frame()._mainCommandBuffer;
+    auto mainRecordTask = std::async(std::launch::async, [this, &frame, swapchainImageIndex]() {
+        VkCommandBuffer cmd = frame._mainCommandBuffer;
+        VkCommandBufferBeginInfo cmdBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+        VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
-    //begin the command buffer recording. We will use this command buffer exactly once, so we want to let vulkan know that
-    VkCommandBufferBeginInfo cmdBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+        vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
-    //> draw_first
-    VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+        draw_main(cmd);
 
-    // transition our main draw image into general layout so we can write into it
-    // we will overwrite it all so we dont care about what was the older layout
-    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-    vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
 
-    draw_main(cmd);
+        VK_CHECK(vkEndCommandBuffer(cmd));
+    });
 
-    //transtion the draw image and the swapchain image into their correct transfer layouts
-    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkCommandBuffer uiCmd = frame._uiCommandBuffer;
+    VkCommandBufferBeginInfo uiBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+    VK_CHECK(vkBeginCommandBuffer(uiCmd, &uiBeginInfo));
+    vkutil::transition_image(uiCmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    draw_imgui(uiCmd, _swapchainImageViews[swapchainImageIndex]);
+    vkutil::transition_image(uiCmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    VK_CHECK(vkEndCommandBuffer(uiCmd));
 
-    VkExtent2D extent;
-    extent.height = _windowExtent.height;
-    extent.width = _windowExtent.width;
-    //< draw_first
-    //> imgui_draw
-    // execute a copy from the draw image into the swapchain
-    vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
-
-    // set swapchain image layout to Attachment Optimal so we can draw it
-    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-
-    //draw imgui into the swapchain image
-    draw_imgui(cmd, _swapchainImageViews[swapchainImageIndex]);
-
-    // set swapchain image layout to Present so we can draw it
-    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-
-    //finalize the command buffer (we can no longer add commands, but it can now be executed)
-    VK_CHECK(vkEndCommandBuffer(cmd));
+    mainRecordTask.get();
 
     //prepare the submission to the queue. 
     //we want to wait on the _presentSemaphore, as that semaphore is signaled when the swapchain is ready
     //we will signal the _renderSemaphore, to signal that rendering has finished
 
-    VkCommandBufferSubmitInfo cmdinfo = vkinit::command_buffer_submit_info(cmd);
+    std::array<VkCommandBufferSubmitInfo, 2> cmdInfos = {
+        vkinit::command_buffer_submit_info(frame._mainCommandBuffer),
+        vkinit::command_buffer_submit_info(frame._uiCommandBuffer)
+    };
 
-    VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR, get_current_frame()._swapchainSemaphore);
-    VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, get_current_frame()._renderSemaphore);
+    VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR, frame._swapchainSemaphore);
+    VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, frame._renderSemaphore);
 
-    VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
+    VkSubmitInfo2 submit = vkinit::submit_info(nullptr, &signalInfo, &waitInfo);
+    submit.commandBufferInfoCount = static_cast<uint32_t>(cmdInfos.size());
+    submit.pCommandBufferInfos = cmdInfos.data();
 
     //submit command buffer to the queue and execute it.
     // _renderFence will now block until the graphic commands finish execution
-    VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, get_current_frame()._renderFence));
+    VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, frame._renderFence));
 
     //prepare present
     // this will put the image we just rendered to into the visible window.
@@ -2285,7 +2231,7 @@ void VulkanEngine::draw()
     presentInfo.pSwapchains = &_swapchain;
     presentInfo.swapchainCount = 1;
 
-    presentInfo.pWaitSemaphores = &get_current_frame()._renderSemaphore;
+    presentInfo.pWaitSemaphores = &frame._renderSemaphore;
     presentInfo.waitSemaphoreCount = 1;
 
     presentInfo.pImageIndices = &swapchainImageIndex;
@@ -2960,7 +2906,7 @@ void VulkanEngine::draw_shaded(
 
         if (r.isSkinned && pipeline == &metalRoughMaterial.opaqueSkinnedPipeline) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = r.transform;
+            push.worldMatrix = glm::mat4(1.0f);
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -2969,7 +2915,7 @@ void VulkanEngine::draw_shaded(
         } else if (r.isSkinned && (pipeline == &metalRoughMaterial.transparentSkinnedPipeline ||
             pipeline == &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline)) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = r.transform;
+            push.worldMatrix = glm::mat4(1.0f);
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -3231,7 +3177,7 @@ void VulkanEngine::draw_rendered(
 
         if (r.isSkinned && pipeline == &metalRoughMaterial.opaqueSkinnedPipeline) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = r.transform;
+            push.worldMatrix = glm::mat4(1.0f);
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -3240,7 +3186,7 @@ void VulkanEngine::draw_rendered(
         } else if (r.isSkinned && (pipeline == &metalRoughMaterial.transparentSkinnedPipeline ||
             pipeline == &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline)) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = r.transform;
+            push.worldMatrix = glm::mat4(1.0f);
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -5433,6 +5379,12 @@ void VulkanEngine::update_scene() {
     stats.visible_count = 0;
     stats.shader_count = 0;
 
+    // Rebuild draw lists from scratch every frame.
+    // Without this, stale RenderObject entries can outlive scene unloads
+    // and keep dangling material descriptor-set pointers.
+    drawCommands.OpaqueSurfaces.clear();
+    drawCommands.TransparentSurfaces.clear();
+
     // Use static containers to avoid allocation every frame
     static std::unordered_set<VkPipeline> uniqueShaders;
     static std::vector<std::string> visibleObjects;
@@ -6454,13 +6406,19 @@ void VulkanEngine::init_commands()
     for (int i = 0; i < FRAME_OVERLAP; i++) {
 
         VK_CHECK(vkCreateCommandPool(_device, &commandPoolInfo, nullptr, &_frames[i]._commandPool));
+        VK_CHECK(vkCreateCommandPool(_device, &commandPoolInfo, nullptr, &_frames[i]._uiCommandPool));
 
         // allocate the default command buffer that we will use for rendering
         VkCommandBufferAllocateInfo cmdAllocInfo = vkinit::command_buffer_allocate_info(_frames[i]._commandPool, 1);
 
         VK_CHECK(vkAllocateCommandBuffers(_device, &cmdAllocInfo, &_frames[i]._mainCommandBuffer));
+        cmdAllocInfo = vkinit::command_buffer_allocate_info(_frames[i]._uiCommandPool, 1);
+        VK_CHECK(vkAllocateCommandBuffers(_device, &cmdAllocInfo, &_frames[i]._uiCommandBuffer));
 
-        _mainDeletionQueue.push_function([this, i]() { vkDestroyCommandPool(_device, _frames[i]._commandPool, nullptr); });
+        _mainDeletionQueue.push_function([this, i]() {
+            vkDestroyCommandPool(_device, _frames[i]._commandPool, nullptr);
+            vkDestroyCommandPool(_device, _frames[i]._uiCommandPool, nullptr);
+        });
     }
 
     VK_CHECK(vkCreateCommandPool(_device, &commandPoolInfo, nullptr, &_immCommandPool));
@@ -7990,7 +7948,49 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 
 void GLTFMetallic_Roughness::clear_resources(VkDevice device)
 {
+    if (opaquePipeline.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
+        opaquePipeline.pipeline = VK_NULL_HANDLE;
+    }
+    if (transparentPipeline.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
+        transparentPipeline.pipeline = VK_NULL_HANDLE;
+    }
+    if (transparentDoubleSidedPipeline.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, transparentDoubleSidedPipeline.pipeline, nullptr);
+        transparentDoubleSidedPipeline.pipeline = VK_NULL_HANDLE;
+    }
+    if (opaqueSkinnedPipeline.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, opaqueSkinnedPipeline.pipeline, nullptr);
+        opaqueSkinnedPipeline.pipeline = VK_NULL_HANDLE;
+    }
+    if (transparentSkinnedPipeline.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, transparentSkinnedPipeline.pipeline, nullptr);
+        transparentSkinnedPipeline.pipeline = VK_NULL_HANDLE;
+    }
+    if (transparentDoubleSidedSkinnedPipeline.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, transparentDoubleSidedSkinnedPipeline.pipeline, nullptr);
+        transparentDoubleSidedSkinnedPipeline.pipeline = VK_NULL_HANDLE;
+    }
 
+    if (opaquePipeline.layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, opaquePipeline.layout, nullptr);
+        opaquePipeline.layout = VK_NULL_HANDLE;
+    }
+    if (opaqueSkinnedPipeline.layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, opaqueSkinnedPipeline.layout, nullptr);
+        opaqueSkinnedPipeline.layout = VK_NULL_HANDLE;
+    }
+
+    transparentPipeline.layout = VK_NULL_HANDLE;
+    transparentDoubleSidedPipeline.layout = VK_NULL_HANDLE;
+    transparentSkinnedPipeline.layout = VK_NULL_HANDLE;
+    transparentDoubleSidedSkinnedPipeline.layout = VK_NULL_HANDLE;
+
+    if (materialLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, materialLayout, nullptr);
+        materialLayout = VK_NULL_HANDLE;
+    }
 }
 
 //MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator)
@@ -8300,6 +8300,12 @@ void VulkanEngine::updateAnimations(float deltaTime) {
         const std::string& scenePath = itPath->second;
         if (scenePath == sourceScene) return true;
 
+        // Only allow filename-only matching when sourceScene is itself filename-only.
+        // This prevents cross-scene animation misbinding when different files share names.
+        const bool sourceIsFilenameOnly =
+            (sourceScene.find('/') == std::string::npos && sourceScene.find('\\') == std::string::npos);
+        if (!sourceIsFilenameOnly) return false;
+
         const std::string sourceFile = fileNameOnly(sourceScene);
         const std::string sceneFile = fileNameOnly(scenePath);
         return (!sourceFile.empty() && sourceFile == sceneFile);
@@ -8421,14 +8427,21 @@ void VulkanEngine::updateAnimations(float deltaTime) {
 
             auto& pose = pendingPoses[targetNode];
             if (!pose.valid) {
-                glm::vec3 scale, translation, skew;
-                glm::vec4 perspective;
-                glm::quat rotation;
-                if (glm::decompose(targetNode->localTransform, scale, rotation, translation, skew, perspective)) {
-                    pose.baseT = translation;
-                    pose.baseR = rotation;
-                    pose.baseS = scale;
+                if (targetNode->hasLocalTRS) {
+                    pose.baseT = targetNode->localTranslation;
+                    pose.baseR = targetNode->localRotation;
+                    pose.baseS = targetNode->localScale;
                     pose.valid = true;
+                } else {
+                    glm::vec3 scale, translation, skew;
+                    glm::vec4 perspective;
+                    glm::quat rotation;
+                    if (glm::decompose(targetNode->localTransform, scale, rotation, translation, skew, perspective)) {
+                        pose.baseT = translation;
+                        pose.baseR = rotation;
+                        pose.baseS = scale;
+                        pose.valid = true;
+                    }
                 }
             }
             if (!pose.valid) continue;
@@ -8467,10 +8480,11 @@ void VulkanEngine::updateAnimations(float deltaTime) {
         glm::quat rVal = pose.dirtyR && pose.rWeight > 0.0f ? glm::normalize(pose.rValue) : pose.baseR;
         glm::vec3 sVal = pose.dirtyS && pose.sWeight > 0.0f ? (pose.sAccum / pose.sWeight) : pose.baseS;
 
-        glm::mat4 t = glm::translate(glm::mat4(1.0f), tVal);
-        glm::mat4 r = glm::toMat4(rVal);
-        glm::mat4 s = glm::scale(glm::mat4(1.0f), sVal);
-        node->localTransform = t * r * s;
+        node->localTranslation = tVal;
+        node->localRotation = rVal;
+        node->localScale = sVal;
+        node->hasLocalTRS = true;
+        node->rebuildLocalTransformFromTRS();
     }
 
     for (auto& [sceneName, scene] : loadedScenes) {
@@ -8486,53 +8500,6 @@ void VulkanEngine::updateAnimations(float deltaTime) {
         const std::string activeSourceScene =
             (activeAnimationIndex >= 0 && activeAnimationIndex < static_cast<int>(animationClips.size()))
             ? animationClips[activeAnimationIndex].sourceScene : std::string();
-        glm::mat4 skinnedMeshWorldInv = glm::mat4(1.0f);
-        bool hasSkinnedMeshWorld = false;
-
-        // glTF joint matrices are evaluated in scene/world space.
-        // If there is exactly one skinned mesh in the active source scene, convert to that mesh local skin space.
-        // For multi-skinned scenes, applying one mesh inverse to all skeletons corrupts transforms.
-        int skinnedMeshCandidates = 0;
-        std::vector<glm::mat4> skinnedMeshWorlds;
-        skinnedMeshWorlds.reserve(16);
-        for (auto& [sceneName, scene] : loadedScenes) {
-            if (!scene || !sceneMatchesSource(sceneName, activeSourceScene)) continue;
-            for (const auto& [nodeName, nodePtr] : scene->nodes) {
-                auto* meshNode = dynamic_cast<MeshNode*>(nodePtr.get());
-                if (!meshNode || !meshNode->mesh) continue;
-                if (!meshNode->mesh->hasSkinData) continue;
-                ++skinnedMeshCandidates;
-                skinnedMeshWorlds.push_back(meshNode->worldTransform);
-                if (skinnedMeshCandidates == 1) {
-                    skinnedMeshWorldInv = glm::inverse(meshNode->worldTransform);
-                    hasSkinnedMeshWorld = true;
-                }
-            }
-        }
-        if (skinnedMeshCandidates > 1) {
-            auto matrixNearlyEqual = [](const glm::mat4& a, const glm::mat4& b, float eps) {
-                for (int c = 0; c < 4; ++c) {
-                    for (int r = 0; r < 4; ++r) {
-                        if (std::abs(a[c][r] - b[c][r]) > eps) return false;
-                    }
-                }
-                return true;
-            };
-
-            bool allSame = true;
-            const glm::mat4& ref = skinnedMeshWorlds.front();
-            for (size_t i = 1; i < skinnedMeshWorlds.size(); ++i) {
-                if (!matrixNearlyEqual(ref, skinnedMeshWorlds[i], 0.0005f)) {
-                    allSame = false;
-                    break;
-                }
-            }
-            // Common glTF case: one skinned character split into multiple mesh surfaces/nodes
-            // with identical world transforms. Keep mesh-space conversion enabled for correct size.
-            if (!allSame) {
-                hasSkinnedMeshWorld = false;
-            }
-        }
 
         for (auto& m : skinningMatrices) {
             m = glm::mat4(1.0f);
@@ -8573,9 +8540,9 @@ void VulkanEngine::updateAnimations(float deltaTime) {
             if (!boneNode) continue;
 
             const glm::mat4 jointWorld = boneNode->worldTransform;
-            skinningMatrices[boneIdx] = (hasSkinnedMeshWorld ? skinnedMeshWorldInv : glm::mat4(1.0f))
-                * jointWorld
-                * bone.inverseBindMatrix;
+            // glTF skinning: jointMatrix = globalJointTransform * inverseBindMatrix
+            // Do not additionally multiply by meshWorld inverse here; that causes deformation/scale artifacts.
+            skinningMatrices[boneIdx] = jointWorld * bone.inverseBindMatrix;
         }
 
         if (skinningMatrixBuffer.buffer == VK_NULL_HANDLE) {
@@ -8810,17 +8777,247 @@ void VulkanEngine::registerShaderPipeline(const ShaderPipelineInfo& info) {
     shaderPipelines.push_back(info);
 }
 
+void VulkanEngine::rebuildShaderPipelineRegistry() {
+    shaderPipelines.clear();
+
+    auto addGraphics = [&](const std::string& name, const std::string& vert, const std::string& frag, VkPipeline p, VkPipelineLayout l, int texCount) {
+        if (p == VK_NULL_HANDLE) return;
+        ShaderPipelineInfo info{};
+        info.name = name;
+        info.vertPath = vert;
+        info.fragPath = frag;
+        info.pipeline = p;
+        info.layout = l;
+        info.isValid = true;
+        info.textureCount = texCount;
+        shaderPipelines.push_back(info);
+    };
+
+    addGraphics("Mesh Pipeline", "shaders/mesh.vert.spv", "shaders/mesh.frag.spv", _meshPipeline, _meshPipelineLayout, 2);
+    addGraphics("Primitive Pipeline", "shaders/primitive.vert.spv", "shaders/primitive.frag.spv", _primitivePipeline, _primitivePipelineLayout, 0);
+    addGraphics("Shaded Pipeline", "shaders/shaded.vert.spv", "shaders/shaded.frag.spv", _shadedPipeline, _shadedPipelineLayout, 4);
+    addGraphics("Wireframe Pipeline", "shaders/mesh.vert.spv", "shaders/mesh.frag.spv", _wireframePipeline, _wireframePipelineLayout, 2);
+    addGraphics("Grid Pipeline", "shaders/grid.vert.spv", "shaders/grid.frag.spv", _gridPipeline, _gridPipelineLayout, 0);
+    addGraphics("Material Preview Pipeline", "shaders/materialpreview.vert.spv", "shaders/materialpreview.frag.spv", _materialPreviewPipeline, _materialPreviewPipelineLayout, 1);
+    addGraphics("Shadow Pipeline", "shaders/shadow.vert.spv", "", _shadowPipeline, _shadowPipelineLayout, 0);
+
+    if (_tonemapPipeline != VK_NULL_HANDLE) {
+        ShaderPipelineInfo tonemap{};
+        tonemap.name = "Tonemap Compute";
+        tonemap.vertPath.clear();
+        tonemap.fragPath = "shaders/tonemap_final.comp.spv";
+        tonemap.pipeline = _tonemapPipeline;
+        tonemap.layout = _tonemapPipelineLayout;
+        tonemap.isValid = true;
+        shaderPipelines.push_back(tonemap);
+    }
+}
+
+bool VulkanEngine::compile_shader_to_spirv(const std::string& spvPath, std::string& outLog, float& outMs) {
+    namespace fs = std::filesystem;
+
+    if (spvPath.empty()) {
+        outLog = "empty shader path";
+        return false;
+    }
+
+    std::string normalized = spvPath;
+    if (normalized.rfind("shaders/", 0) == 0 || normalized.rfind("shaders\\", 0) == 0) {
+        normalized = "../../" + normalized;
+    }
+    if (normalized.rfind("..\\..\\shaders\\", 0) == 0) {
+        std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    }
+
+    if (normalized.size() < 5 || normalized.substr(normalized.size() - 4) != ".spv") {
+        outLog = "not a .spv file path: " + normalized;
+        return false;
+    }
+
+    std::string sourcePath = normalized.substr(0, normalized.size() - 4);
+    if (!fs::exists(sourcePath)) {
+        outLog = "source not found: " + sourcePath;
+        return false;
+    }
+
+    std::vector<std::string> commands;
+    commands.emplace_back("glslangValidator -V \"" + sourcePath + "\" -o \"" + normalized + "\"");
+    commands.emplace_back("glslc \"" + sourcePath + "\" -o \"" + normalized + "\"");
+
+    const char* sdkEnv = std::getenv("VULKAN_SDK");
+    if (sdkEnv && sdkEnv[0] != '\0') {
+        std::string sdk = sdkEnv;
+        commands.emplace_back("\"" + sdk + "/Bin/glslangValidator.exe\" -V \"" + sourcePath + "\" -o \"" + normalized + "\"");
+    }
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (const auto& cmd : commands) {
+        int ret = std::system(cmd.c_str());
+        if (ret == 0 && fs::exists(normalized)) {
+            auto t1 = std::chrono::high_resolution_clock::now();
+            outMs = std::chrono::duration<float, std::milli>(t1 - t0).count();
+            outLog.clear();
+            return true;
+        }
+    }
+
+    outLog = "failed compile: " + sourcePath + " (glslangValidator/glslc not available or compile error)";
+    return false;
+}
+
+void VulkanEngine::cleanup_reloadable_pipelines() {
+    for (auto& e : backgroundEffects) {
+        if (e.pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(_device, e.pipeline, nullptr);
+            e.pipeline = VK_NULL_HANDLE;
+        }
+    }
+    backgroundEffects.clear();
+
+    if (_gradientPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(_device, _gradientPipelineLayout, nullptr);
+        _gradientPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (_skyboxBgPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(_device, _skyboxBgPipelineLayout, nullptr);
+        _skyboxBgPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (_skyboxBgDescriptorLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(_device, _skyboxBgDescriptorLayout, nullptr);
+        _skyboxBgDescriptorLayout = VK_NULL_HANDLE;
+    }
+    _skyboxBgDescriptorSet = VK_NULL_HANDLE;
+
+    auto destroyPipeline = [&](VkPipeline& p) {
+        if (p != VK_NULL_HANDLE) {
+            vkDestroyPipeline(_device, p, nullptr);
+            p = VK_NULL_HANDLE;
+        }
+    };
+    auto destroyLayout = [&](VkPipelineLayout& l) {
+        if (l != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(_device, l, nullptr);
+            l = VK_NULL_HANDLE;
+        }
+    };
+
+    destroyPipeline(_wireframeOutlinePipeline);
+    destroyLayout(_wireframeOutlinePipelineLayout);
+    destroyPipeline(_wireframePipeline);
+    destroyLayout(_wireframePipelineLayout);
+    destroyPipeline(_solidPipeline);
+    destroyLayout(_solidPipelineLayout);
+    destroyPipeline(_shadedPipeline);
+    destroyLayout(_shadedPipelineLayout);
+    destroyPipeline(_normalsPipeline);
+    destroyLayout(_normalsPipelineLayout);
+    destroyPipeline(_uvCheckerPipeline);
+    destroyLayout(_uvCheckerPipelineLayout);
+    destroyPipeline(_materialPreviewPipeline);
+    destroyLayout(_materialPreviewPipelineLayout);
+    destroyPipeline(_emissivePipeline);
+    destroyLayout(_emissivePipelineLayout);
+    destroyPipeline(gridPipeline);
+    destroyLayout(gridPipelineLayout);
+    destroyPipeline(_2dPipeline);
+    destroyPipeline(_2dPipelineCulled);
+    destroyPipeline(_2dPipelineDoubleSided);
+    destroyLayout(_2dPipelineLayout);
+    destroyPipeline(_primitivePipeline);
+    destroyLayout(_primitivePipelineLayout);
+    destroyPipeline(_primitiveWireframePipeline);
+    destroyPipeline(_primitiveSolidPipeline);
+    destroyPipeline(_shadowPipeline);
+    destroyLayout(_shadowPipelineLayout);
+    destroyPipeline(_tonemapPipeline);
+    destroyLayout(_tonemapPipelineLayout);
+
+    metalRoughMaterial.clear_resources(_device);
+}
+
+void VulkanEngine::rebuild_pipelines_after_shader_recompile() {
+    vkDeviceWaitIdle(_device);
+    cleanup_reloadable_pipelines();
+
+    init_pipelines();
+    init_shadow_pipeline();
+    init_tonemap_pipeline();
+    updateSkyboxBgDescriptor();
+    rebuildShaderPipelineRegistry();
+}
+
 void VulkanEngine::recompileShader(int index) {
-    if (index >= 0 && index < static_cast<int>(shaderPipelines.size())) {
-        // In a real implementation, this would recompile the shader
-        shaderPipelines[index].isValid = true;
-        shaderPipelines[index].errorLog.clear();
+    if (index < 0 || index >= static_cast<int>(shaderPipelines.size())) return;
+
+    auto& p = shaderPipelines[index];
+    bool anyCompiled = false;
+    bool allOk = true;
+    std::string logs;
+    float totalMs = 0.0f;
+
+    auto compileOne = [&](const std::string& path) {
+        if (path.empty()) return;
+        float ms = 0.0f;
+        std::string log;
+        bool ok = compile_shader_to_spirv(path, log, ms);
+        anyCompiled = anyCompiled || ok;
+        allOk = allOk && ok;
+        totalMs += ms;
+        if (!ok && !log.empty()) {
+            if (!logs.empty()) logs += "\n";
+            logs += log;
+        }
+    };
+
+    compileOne(p.vertPath);
+    compileOne(p.fragPath);
+
+    p.compileTimeMs = totalMs;
+    p.isValid = allOk && anyCompiled;
+    p.errorLog = logs;
+
+    if (p.isValid) {
+        rebuild_pipelines_after_shader_recompile();
     }
 }
 
 void VulkanEngine::recompileAllShaders() {
-    for (size_t i = 0; i < shaderPipelines.size(); ++i) {
-        recompileShader(static_cast<int>(i));
+    bool anyCompiled = false;
+    bool allOk = true;
+
+    for (auto& p : shaderPipelines) {
+        float totalMs = 0.0f;
+        std::string logs;
+        bool localCompiled = false;
+        bool localOk = true;
+
+        auto compileOne = [&](const std::string& path) {
+            if (path.empty()) return;
+            float ms = 0.0f;
+            std::string log;
+            bool ok = compile_shader_to_spirv(path, log, ms);
+            totalMs += ms;
+            localCompiled = localCompiled || ok;
+            localOk = localOk && ok;
+            if (!ok && !log.empty()) {
+                if (!logs.empty()) logs += "\n";
+                logs += log;
+            }
+        };
+
+        compileOne(p.vertPath);
+        compileOne(p.fragPath);
+
+        p.compileTimeMs = totalMs;
+        p.isValid = localOk && localCompiled;
+        p.errorLog = logs;
+
+        anyCompiled = anyCompiled || localCompiled;
+        allOk = allOk && p.isValid;
+    }
+
+    if (anyCompiled && allOk) {
+        rebuild_pipelines_after_shader_recompile();
     }
 }
 

@@ -215,6 +215,13 @@ file(GLOB_RECURSE GLSL_SOURCE_FILES CONFIGURE_DEPENDS
 )
 list(REMOVE_DUPLICATES GLSL_SOURCE_FILES)
 
+# Exclude legacy prototype shaders that are not part of current runtime pipeline
+# (they rely on a different macro/include contract and break the default build).
+set(LEGACY_SHADER_REGEX
+    ".*/(compute_mtx\\.comp|compute_skinning\\.comp|gbuffer\\.frag|gizmo\\.frag|gizmo\\.vert|intro\\.frag|lighting\\.frag|mask\\.frag|model\\.frag|model\\.vert|particles\\.comp|particles\\.frag|particles\\.vert|shadows\\.vert|skybox\\.frag|skybox\\.vert|sprite\\.frag|sprite\\.vert|visibility\\.comp)$"
+)
+list(FILTER GLSL_SOURCE_FILES EXCLUDE REGEX "${LEGACY_SHADER_REGEX}")
+
 set(SHADER_DEFINES "-DUSE_BINDLESS")
 set(SHADER_INCLUDE_DIRS "${SHADER_SRC_DIR}")
 set(SHADER_INCLUDE_ARGS "")

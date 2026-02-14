@@ -19,6 +19,91 @@ namespace Yalaz::UI {
 
 using json = nlohmann::json;
 
+namespace {
+
+std::string fileNameOnly(const std::string& p) {
+    std::filesystem::path path(p);
+    return path.filename().string();
+}
+
+bool sceneMatchesSource(VulkanEngine* engine, const std::string& sceneName, const std::string& sourceScene) {
+    if (sourceScene.empty()) return true;
+    if (sceneName == sourceScene) return true;
+
+    if (engine) {
+        auto it = engine->sceneFilePaths.find(sceneName);
+        if (it != engine->sceneFilePaths.end() && it->second == sourceScene) {
+            return true;
+        }
+    }
+
+    std::error_code ec;
+    const std::string scenePath = std::filesystem::weakly_canonical(sceneName, ec).string();
+    if (!scenePath.empty() && scenePath == sourceScene) return true;
+
+    const bool sourceIsFileOnly =
+        (sourceScene.find('/') == std::string::npos && sourceScene.find('\\') == std::string::npos);
+    if (!sourceIsFileOnly) return false;
+
+    return fileNameOnly(sceneName) == sourceScene;
+}
+
+std::vector<int> collectVisibleClipIndices(VulkanEngine* engine) {
+    std::vector<int> visible;
+    if (!engine || engine->animationClips.empty()) return visible;
+    if (engine->loadedScenes.empty()) return visible;
+
+    visible.reserve(engine->animationClips.size());
+    for (int i = 0; i < static_cast<int>(engine->animationClips.size()); ++i) {
+        const auto& clip = engine->animationClips[i];
+        if (clip.sourceScene.empty()) {
+            visible.push_back(i);
+            continue;
+        }
+
+        bool clipSceneLoaded = false;
+        for (const auto& [sceneName, scene] : engine->loadedScenes) {
+            if (!scene) continue;
+            if (sceneMatchesSource(engine, sceneName, clip.sourceScene)) {
+                clipSceneLoaded = true;
+                break;
+            }
+        }
+        if (!clipSceneLoaded) continue;
+
+        visible.push_back(i);
+    }
+
+    // Fallback: if we have loaded scenes and clips but strict source matching found none,
+    // don't hide animation panel content completely.
+    if (visible.empty() && !engine->animationClips.empty()) {
+        visible.reserve(engine->animationClips.size());
+        for (int i = 0; i < static_cast<int>(engine->animationClips.size()); ++i) {
+            visible.push_back(i);
+        }
+    }
+
+    return visible;
+}
+
+int normalizeActiveVisibleClip(VulkanEngine* engine, const std::vector<int>& visibleIndices) {
+    if (!engine) return -1;
+    if (visibleIndices.empty()) {
+        engine->activeAnimationIndex = -1;
+        return -1;
+    }
+
+    const int active = engine->activeAnimationIndex;
+    if (std::find(visibleIndices.begin(), visibleIndices.end(), active) != visibleIndices.end()) {
+        return active;
+    }
+
+    engine->activeAnimationIndex = visibleIndices.front();
+    return engine->activeAnimationIndex;
+}
+
+} // namespace
+
 AnimationView::AnimationView()
     : EditorView("Animation", "[A]", ViewCategory::Animation) {
 }
@@ -30,13 +115,24 @@ ViewFlags AnimationView::GetFlags() const {
 
 void AnimationView::EnsureGraphInitialized() {
     if (!m_Engine) return;
-    if (m_Engine->animationClips.empty()) return;
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    if (visibleClips.empty()) {
+        auto& graph = m_Engine->animationGraph;
+        graph.states.clear();
+        graph.transitions.clear();
+        graph.activeState = -1;
+        graph.nextState = -1;
+        graph.blending = false;
+        graph.blendDuration = 0.0f;
+        graph.blendElapsed = 0.0f;
+        return;
+    }
 
     auto& graph = m_Engine->animationGraph;
     bool graphValid = !graph.states.empty();
     if (graphValid) {
         for (const auto& s : graph.states) {
-            if (s.clipIndex < 0 || s.clipIndex >= static_cast<int>(m_Engine->animationClips.size())) {
+            if (std::find(visibleClips.begin(), visibleClips.end(), s.clipIndex) == visibleClips.end()) {
                 graphValid = false;
                 break;
             }
@@ -50,10 +146,11 @@ void AnimationView::EnsureGraphInitialized() {
     graph.parameters.push_back({"speed", 0.0f, false});
     graph.parameters.push_back({"isGrounded", 1.0f, true});
 
-    for (int i = 0; i < static_cast<int>(m_Engine->animationClips.size()); ++i) {
+    for (int i = 0; i < static_cast<int>(visibleClips.size()); ++i) {
+        const int clipIndex = visibleClips[i];
         AnimationGraphStateData state;
-        state.name = m_Engine->animationClips[i].name;
-        state.clipIndex = i;
+        state.name = m_Engine->animationClips[clipIndex].name;
+        state.clipIndex = clipIndex;
         state.isDefault = (i == 0);
         state.positionX = 120.0f + static_cast<float>(i % 4) * 180.0f;
         state.positionY = 100.0f + static_cast<float>(i / 4) * 120.0f;
@@ -79,14 +176,18 @@ void AnimationView::EnsureGraphInitialized() {
 void AnimationView::UpdateAutoGraphPath() {
     if (!m_Engine) return;
     std::string sceneKey = "default_scene";
-    if (m_Engine->activeAnimationIndex >= 0 &&
-        m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
-        const std::string& src = m_Engine->animationClips[m_Engine->activeAnimationIndex].sourceScene;
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    const int activeVisibleIndex = normalizeActiveVisibleClip(m_Engine, visibleClips);
+
+    if (activeVisibleIndex >= 0 &&
+        activeVisibleIndex < static_cast<int>(m_Engine->animationClips.size())) {
+        const std::string& src = m_Engine->animationClips[activeVisibleIndex].sourceScene;
         if (!src.empty()) {
             sceneKey = src;
         }
-    } else if (!m_Engine->animationClips.empty() && !m_Engine->animationClips.front().sourceScene.empty()) {
-        sceneKey = m_Engine->animationClips.front().sourceScene;
+    } else if (!visibleClips.empty() &&
+        !m_Engine->animationClips[visibleClips.front()].sourceScene.empty()) {
+        sceneKey = m_Engine->animationClips[visibleClips.front()].sourceScene;
     }
 
     std::string sanitized;
@@ -248,11 +349,10 @@ void AnimationView::SyncWithEngine() {
     if (!m_Engine) return;
     UpdateAutoGraphPath();
 
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+
     // Sync animation clips from engine
-    int clipIndex = m_Engine->activeAnimationIndex;
-    if (clipIndex < 0 || clipIndex >= static_cast<int>(m_Engine->animationClips.size())) {
-        clipIndex = m_Engine->animationClips.empty() ? -1 : 0;
-    }
+    int clipIndex = normalizeActiveVisibleClip(m_Engine, visibleClips);
     if (clipIndex >= 0) {
         const auto& engineClip = m_Engine->animationClips[clipIndex];
         m_Clip.name = engineClip.name;
@@ -290,9 +390,16 @@ void AnimationView::SyncWithEngine() {
 
     // Sync skeleton from engine
     m_Skeleton.clear();
-    int skeletonIndex = m_Engine->activeSkeletonIndex;
-    if (skeletonIndex < 0 || skeletonIndex >= static_cast<int>(m_Engine->skeletons.size())) {
-        skeletonIndex = m_Engine->skeletons.empty() ? -1 : 0;
+    int skeletonIndex = -1;
+    if (clipIndex >= 0) {
+        const auto& clip = m_Engine->animationClips[clipIndex];
+        if (clip.skeletonIndex >= 0 &&
+            clip.skeletonIndex < static_cast<int>(m_Engine->skeletons.size())) {
+            skeletonIndex = clip.skeletonIndex;
+            m_Engine->activeSkeletonIndex = skeletonIndex;
+        } else {
+            m_Engine->activeSkeletonIndex = -1;
+        }
     }
     if (skeletonIndex >= 0) {
         const auto& engineSkeleton = m_Engine->skeletons[skeletonIndex];
@@ -378,8 +485,10 @@ void AnimationView::SyncWithEngine() {
 
 void AnimationView::OnUpdate(float deltaTime) {
     SyncWithEngine();
-    if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-        m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    const int activeVisible = normalizeActiveVisibleClip(m_Engine, visibleClips);
+    if (m_Engine && activeVisible >= 0 &&
+        activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
         return; // Engine drives runtime playback time
     }
     if (m_IsPlaying) {
@@ -397,44 +506,57 @@ void AnimationView::OnUpdate(float deltaTime) {
 }
 
 void AnimationView::Play() {
-    if (!m_Engine || m_Engine->animationClips.empty()) return;
+    if (!m_Engine) return;
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    if (visibleClips.empty()) return;
+
     m_IsPlaying = true;
-    if (m_Engine->activeAnimationIndex < 0 ||
-        m_Engine->activeAnimationIndex >= static_cast<int>(m_Engine->animationClips.size())) {
-        m_Engine->activeAnimationIndex = 0;
-        if (m_Engine->animationClips[0].skeletonIndex >= 0) {
-            m_Engine->activeSkeletonIndex = m_Engine->animationClips[0].skeletonIndex;
-        }
+    int activeClip = normalizeActiveVisibleClip(m_Engine, visibleClips);
+    if (activeClip < 0) return;
+
+    if (m_Engine->animationClips[activeClip].skeletonIndex >= 0) {
+        m_Engine->activeSkeletonIndex = m_Engine->animationClips[activeClip].skeletonIndex;
+    } else {
+        m_Engine->activeSkeletonIndex = -1;
     }
-    auto& clip = m_Engine->animationClips[m_Engine->activeAnimationIndex];
+    auto& clip = m_Engine->animationClips[activeClip];
     if (std::abs(clip.speed) < 0.0001f) {
         clip.speed = 1.0f;
     }
-    m_Engine->playAnimation(m_Engine->activeAnimationIndex);
+    m_Engine->playAnimation(activeClip);
 }
 
 void AnimationView::Pause() {
     m_IsPlaying = false;
-    if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-        m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
-        m_Engine->animationClips[m_Engine->activeAnimationIndex].isPlaying = false;
+    if (!m_Engine) return;
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    const int activeVisible = normalizeActiveVisibleClip(m_Engine, visibleClips);
+    if (activeVisible >= 0 &&
+        activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
+        m_Engine->animationClips[activeVisible].isPlaying = false;
     }
 }
 
 void AnimationView::Stop() {
     m_IsPlaying = false;
     m_CurrentTime = 0.0f;
-    if (m_Engine && m_Engine->activeAnimationIndex >= 0) {
-        m_Engine->stopAnimation(m_Engine->activeAnimationIndex);
+    if (!m_Engine) return;
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    const int activeVisible = normalizeActiveVisibleClip(m_Engine, visibleClips);
+    if (activeVisible >= 0) {
+        m_Engine->stopAnimation(activeVisible);
     }
 }
 
 void AnimationView::SetTime(float time) {
     const float maxTime = std::max(0.0f, m_Clip.duration);
     m_CurrentTime = std::clamp(time, 0.0f, maxTime);
-    if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-        m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
-        auto& activeClip = m_Engine->animationClips[m_Engine->activeAnimationIndex];
+    if (!m_Engine) return;
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    const int activeVisible = normalizeActiveVisibleClip(m_Engine, visibleClips);
+    if (activeVisible >= 0 &&
+        activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
+        auto& activeClip = m_Engine->animationClips[activeVisible];
         activeClip.currentTime = m_CurrentTime;
         m_Engine->updateAnimations(0.0f);
     }
@@ -451,34 +573,41 @@ void AnimationView::SetSkeleton(const std::vector<SkeletonBone>& bones) {
 }
 
 void AnimationView::OnRenderToolbar() {
-    if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-        m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
-        auto& activeClip = m_Engine->animationClips[m_Engine->activeAnimationIndex];
+    const std::vector<int> visibleClips = collectVisibleClipIndices(m_Engine);
+    const int activeVisible = normalizeActiveVisibleClip(m_Engine, visibleClips);
+
+    if (m_Engine && activeVisible >= 0 &&
+        activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
+        auto& activeClip = m_Engine->animationClips[activeVisible];
         m_Clip.loop = activeClip.loop;
         m_CurrentTime = activeClip.currentTime;
         m_IsPlaying = activeClip.isPlaying;
     }
 
-    const bool hasEngineClips = (m_Engine && !m_Engine->animationClips.empty());
+    const bool hasEngineClips = (m_Engine && !visibleClips.empty());
     if (hasEngineClips) {
-        int activeIdx = m_Engine->activeAnimationIndex;
-        if (activeIdx < 0 || activeIdx >= static_cast<int>(m_Engine->animationClips.size())) {
-            activeIdx = 0;
-            m_Engine->activeAnimationIndex = 0;
-            if (m_Engine->animationClips[0].skeletonIndex >= 0) {
-                m_Engine->activeSkeletonIndex = m_Engine->animationClips[0].skeletonIndex;
+        int activeIdx = activeVisible;
+        if (activeIdx < 0) {
+            activeIdx = visibleClips.front();
+            m_Engine->activeAnimationIndex = activeIdx;
+            if (m_Engine->animationClips[activeIdx].skeletonIndex >= 0) {
+                m_Engine->activeSkeletonIndex = m_Engine->animationClips[activeIdx].skeletonIndex;
+            } else {
+                m_Engine->activeSkeletonIndex = -1;
             }
         }
 
         ImGui::SetNextItemWidth(170.0f);
         const char* currentName = m_Engine->animationClips[activeIdx].name.c_str();
         if (ImGui::BeginCombo("##AnimClipSelect", currentName)) {
-            for (int i = 0; i < static_cast<int>(m_Engine->animationClips.size()); ++i) {
+            for (const int i : visibleClips) {
                 bool selected = (i == activeIdx);
                 if (ImGui::Selectable(m_Engine->animationClips[i].name.c_str(), selected)) {
                     m_Engine->activeAnimationIndex = i;
                     if (m_Engine->animationClips[i].skeletonIndex >= 0) {
                         m_Engine->activeSkeletonIndex = m_Engine->animationClips[i].skeletonIndex;
+                    } else {
+                        m_Engine->activeSkeletonIndex = -1;
                     }
                     SyncWithEngine();
                 }
@@ -536,15 +665,15 @@ void AnimationView::OnRenderToolbar() {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(60);
     float speed = m_Settings.previewSpeed;
-    if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-        m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
-        speed = m_Engine->animationClips[m_Engine->activeAnimationIndex].speed;
+    if (m_Engine && activeVisible >= 0 &&
+        activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
+        speed = m_Engine->animationClips[activeVisible].speed;
     }
     if (ImGui::SliderFloat("##Speed", &speed, 0.1f, 3.0f, "%.1fx")) {
         m_Settings.previewSpeed = speed;
-        if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-            m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
-            m_Engine->animationClips[m_Engine->activeAnimationIndex].speed = speed;
+        if (m_Engine && activeVisible >= 0 &&
+            activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
+            m_Engine->animationClips[activeVisible].speed = speed;
         }
     }
 
@@ -560,15 +689,15 @@ void AnimationView::OnRenderToolbar() {
 
     ImGui::SameLine();
     if (ImGui::Checkbox("Loop", &m_Clip.loop)) {
-        if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-            m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
-            m_Engine->animationClips[m_Engine->activeAnimationIndex].loop = m_Clip.loop;
+        if (m_Engine && activeVisible >= 0 &&
+            activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
+            m_Engine->animationClips[activeVisible].loop = m_Clip.loop;
         }
     }
-    if (m_Engine && m_Engine->activeAnimationIndex >= 0 &&
-        m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
+    if (m_Engine && activeVisible >= 0 &&
+        activeVisible < static_cast<int>(m_Engine->animationClips.size())) {
         ImGui::SameLine();
-        ImGui::Checkbox("PingPong", &m_Engine->animationClips[m_Engine->activeAnimationIndex].pingPong);
+        ImGui::Checkbox("PingPong", &m_Engine->animationClips[activeVisible].pingPong);
     }
     ImGui::SameLine();
     ImGui::Checkbox("Snap", &m_Settings.snapToFrame);
@@ -945,6 +1074,9 @@ void AnimationView::RenderStateMachine() {
 
     ImGui::Checkbox("Enable Runtime State Machine", &graph.enabled);
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(320.0f);
+    ImGui::InputText("Graph File", m_GraphPath, IM_ARRAYSIZE(m_GraphPath));
+    ImGui::SameLine();
     if (ImGui::Button("Save Graph")) {
         SaveStateMachineGraph(m_GraphPath);
     }
@@ -953,8 +1085,6 @@ void AnimationView::RenderStateMachine() {
         LoadStateMachineGraph(m_GraphPath);
         SyncWithEngine();
     }
-    ImGui::SetNextItemWidth(320.0f);
-    ImGui::InputText("Graph File", m_GraphPath, IM_ARRAYSIZE(m_GraphPath));
 
     if (graph.blending) {
         float blendAlpha = (graph.blendDuration > 0.0001f)
@@ -1004,6 +1134,9 @@ void AnimationView::RenderStateMachine() {
         // Arrow head
         ImVec2 dir(end.x - start.x, end.y - start.y);
         float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        if (len <= 0.0001f) {
+            continue;
+        }
         dir.x /= len;
         dir.y /= len;
 
@@ -1050,9 +1183,9 @@ void AnimationView::RenderStateMachine() {
             IM_COL32(220, 220, 220, 255), state.name.c_str());
 
         // Interaction: click a state to switch active clip.
-        if (ImGui::IsMouseHoveringRect(stateMin, stateMax) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const bool stateHovered = ImGui::IsMouseHoveringRect(stateMin, stateMax);
+        if (stateHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             m_SelectedStateIndex = static_cast<int>(i);
-            m_DraggingStateIndex = static_cast<int>(i);
             for (size_t si = 0; si < m_States.size(); ++si) {
                 m_States[si].isSelected = (si == i);
             }
@@ -1081,6 +1214,12 @@ void AnimationView::RenderStateMachine() {
                 }
                 SyncWithEngine();
             }
+        }
+        if (stateHovered &&
+            m_SelectedStateIndex == static_cast<int>(i) &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) {
+            m_DraggingStateIndex = static_cast<int>(i);
         }
     }
 
@@ -1174,10 +1313,19 @@ void AnimationView::RenderStateMachine() {
                 m_SelectedTransitionIndex = filteredTransitionIndices.front();
             }
 
-            std::string label = "Transition " + std::to_string(m_SelectedTransitionIndex);
+            const auto& selectedTr = graph.transitions[m_SelectedTransitionIndex];
+            auto stateLabel = [&](int idx) -> const char* {
+                if (idx >= 0 && idx < static_cast<int>(graph.states.size())) {
+                    return graph.states[idx].name.c_str();
+                }
+                return "Invalid";
+            };
+            std::string label = std::string(stateLabel(selectedTr.fromState)) + " -> " + stateLabel(selectedTr.toState);
             if (ImGui::BeginCombo("Transition", label.c_str())) {
                 for (int ti : filteredTransitionIndices) {
-                    std::string entry = "To " + std::to_string(graph.transitions[ti].toState) + "##tr_" + std::to_string(ti);
+                    const auto& optTr = graph.transitions[ti];
+                    std::string entry = std::string(stateLabel(optTr.fromState)) + " -> " + stateLabel(optTr.toState) +
+                        "##tr_" + std::to_string(ti);
                     bool selected = (ti == m_SelectedTransitionIndex);
                     if (ImGui::Selectable(entry.c_str(), selected)) {
                         m_SelectedTransitionIndex = ti;

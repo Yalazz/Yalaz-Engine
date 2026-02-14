@@ -52,6 +52,8 @@ struct FrameData {
 
     VkCommandPool _commandPool;
     VkCommandBuffer _mainCommandBuffer;
+    VkCommandPool _uiCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer _uiCommandBuffer = VK_NULL_HANDLE;
     AllocatedBuffer sceneDataBuffer;
 
     VkDescriptorSet drawImageDescriptorSet;
@@ -445,6 +447,7 @@ public:
     void registerShaderPipeline(const ShaderPipelineInfo& info);
     void recompileShader(int index);
     void recompileAllShaders();
+    void rebuildShaderPipelineRegistry();
 
     // =========================================================================
     // SNAP SETTINGS (shared across all views)
@@ -713,6 +716,9 @@ public:
     VkPipelineLayout _skyboxBgPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout _skyboxBgDescriptorLayout = VK_NULL_HANDLE;
     VkDescriptorSet _skyboxBgDescriptorSet = VK_NULL_HANDLE;
+    VkImageView _skyboxBgLastDrawImageView = VK_NULL_HANDLE;
+    VkImageView _skyboxBgLastCubemapView = VK_NULL_HANDLE;
+    VkSampler _skyboxBgLastCubemapSampler = VK_NULL_HANDLE;
     void updateSkyboxBgDescriptor();
 
     std::vector<VkFramebuffer> _framebuffers;
@@ -1036,6 +1042,9 @@ private:
 	void resize_swapchain();
     void init_commands();
     void init_pipelines();
+    void cleanup_reloadable_pipelines();
+    bool compile_shader_to_spirv(const std::string& spvPath, std::string& outLog, float& outMs);
+    void rebuild_pipelines_after_shader_recompile();
     void init_background_pipelines();
 	void init_triangle_pipeline();
 	void init_mesh_pipeline();

@@ -10,6 +10,7 @@
 
 #include "GPUDebugView.h"
 #include "../../vk_engine.h"
+#include "imgui_impl_vulkan.h"
 #include <algorithm>
 #include <cmath>
 
@@ -39,6 +40,10 @@ void GPUDebugView::OnRender() {
     }
 
     if (ImGui::BeginTabBar("GPUDebugTabs")) {
+        if (ImGui::BeginTabItem("Render Targets")) {
+            RenderVisualization();
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("Overview")) {
             RenderOverview();
             ImGui::EndTabItem();
@@ -59,6 +64,10 @@ void GPUDebugView::OnRender() {
     }
 
     EndView();
+}
+
+void GPUDebugView::OnShutdown() {
+    ClearRenderTargetDescriptors();
 }
 
 void GPUDebugView::RenderOverview() {
@@ -152,61 +161,91 @@ void GPUDebugView::RenderOverview() {
 }
 
 void GPUDebugView::RenderVisualization() {
-    if (m_DebugMode == 0) {
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImGui::SetCursorPos(ImVec2(avail.x * 0.25f, avail.y * 0.45f));
-        ImGui::TextDisabled("Select a debug mode from the toolbar");
+    if (!m_Engine) {
+        ImGui::TextDisabled("No engine context");
         return;
     }
 
-    SectionHeader("Debug Visualization");
+    EnsureRenderTargetDescriptors();
 
-    // Legend based on mode
-    const char* modeNames[] = {"", "Overdraw", "Depth Buffer", "Stencil", "Normals", "UVs", "Mipmaps"};
-    ImGui::Text("Mode: %s", modeNames[m_DebugMode]);
-
+    SectionHeader("Render Target Debug");
+    ImGui::TextDisabled("Live textures from Vulkan render path");
     ImGui::Spacing();
 
-    // Preview area
-    ImVec2 avail = ImGui::GetContentRegionAvail();
-    float previewSize = std::min(avail.x - 20, 300.0f);
+    ImGui::Columns(2, nullptr, false);
+    RenderTargetTile("Draw HDR", m_DrawImageDS,
+        VkExtent2D{m_Engine->_drawImage.imageExtent.width, m_Engine->_drawImage.imageExtent.height},
+        m_Engine->_drawImage.imageFormat);
+    ImGui::NextColumn();
+    RenderTargetTile("Depth", m_DepthImageDS,
+        VkExtent2D{m_Engine->_depthImage.imageExtent.width, m_Engine->_depthImage.imageExtent.height},
+        m_Engine->_depthImage.imageFormat);
+    ImGui::Columns(1);
 
-    ImVec2 pos = ImGui::GetCursorScreenPos();
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    ImGui::Columns(2, nullptr, false);
+    RenderTargetTile("GBuffer Normals", m_NormalImageDS,
+        VkExtent2D{m_Engine->_gBufferNormals.imageExtent.width, m_Engine->_gBufferNormals.imageExtent.height},
+        m_Engine->_gBufferNormals.imageFormat);
+    ImGui::NextColumn();
+    RenderTargetTile("GBuffer Metal/Rough", m_MetalRoughImageDS,
+        VkExtent2D{m_Engine->_gBufferMetalRough.imageExtent.width, m_Engine->_gBufferMetalRough.imageExtent.height},
+        m_Engine->_gBufferMetalRough.imageFormat);
+    ImGui::Columns(1);
+}
 
-    drawList->AddRectFilled(pos, ImVec2(pos.x + previewSize, pos.y + previewSize),
-                            IM_COL32(30, 30, 35, 255));
+void GPUDebugView::EnsureRenderTargetDescriptors() {
+    if (!m_Engine) return;
 
-    // Mode-specific visualization
-    if (m_DebugMode == 1) {  // Overdraw
-        for (int i = 0; i < 5; ++i) {
-            float x = pos.x + previewSize * (0.3f + i * 0.1f);
-            float y = pos.y + previewSize * (0.3f + i * 0.08f);
-            float r = previewSize * 0.2f;
-            uint8_t alpha = 50 + i * 30;
-            drawList->AddCircleFilled(ImVec2(x, y), r,
-                                      IM_COL32(255, 100 - i * 15, 50 - i * 10, alpha));
+    auto refresh = [&](VkImageView view, VkDescriptorSet& ds, VkImageView& cached) {
+        if (view == cached && ds != VK_NULL_HANDLE) return;
+        if (ds != VK_NULL_HANDLE) {
+            ImGui_ImplVulkan_RemoveTexture(ds);
+            ds = VK_NULL_HANDLE;
         }
-    } else if (m_DebugMode == 2) {  // Depth
-        for (int y = 0; y < static_cast<int>(previewSize); ++y) {
-            float t = static_cast<float>(y) / previewSize;
-            uint8_t gray = static_cast<uint8_t>(t * 255);
-            drawList->AddLine(ImVec2(pos.x, pos.y + y),
-                              ImVec2(pos.x + previewSize, pos.y + y),
-                              IM_COL32(gray, gray, gray, 255));
+        cached = view;
+        if (view != VK_NULL_HANDLE) {
+            ds = ImGui_ImplVulkan_AddTexture(
+                m_Engine->_defaultSamplerLinear,
+                view,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
-    } else if (m_DebugMode == 4) {  // Normals
-        drawList->AddTriangleFilled(
-            ImVec2(pos.x + previewSize * 0.5f, pos.y + previewSize * 0.2f),
-            ImVec2(pos.x + previewSize * 0.2f, pos.y + previewSize * 0.8f),
-            ImVec2(pos.x + previewSize * 0.8f, pos.y + previewSize * 0.8f),
-            IM_COL32(128, 128, 255, 255));
+    };
+
+    refresh(m_Engine->_drawImage.imageView, m_DrawImageDS, m_DrawImageView);
+    refresh(m_Engine->_depthImage.imageView, m_DepthImageDS, m_DepthImageView);
+    refresh(m_Engine->_gBufferNormals.imageView, m_NormalImageDS, m_NormalImageView);
+    refresh(m_Engine->_gBufferMetalRough.imageView, m_MetalRoughImageDS, m_MetalRoughImageView);
+}
+
+void GPUDebugView::RenderTargetTile(const char* label, VkDescriptorSet ds, VkExtent2D extent, VkFormat format) {
+    ImGui::Text("%s", label);
+    ImGui::TextDisabled("%ux%u  format=%d", extent.width, extent.height, static_cast<int>(format));
+
+    float width = ImGui::GetContentRegionAvail().x - 8.0f;
+    width = std::max(120.0f, width);
+    float height = width * 0.5625f;
+    if (ds != VK_NULL_HANDLE) {
+        ImGui::Image(reinterpret_cast<ImTextureID>(ds), ImVec2(width, height), ImVec2(0, 0), ImVec2(1, 1));
+    } else {
+        ImGui::BeginChild(label, ImVec2(width, height), true);
+        ImGui::TextDisabled("Unavailable");
+        ImGui::EndChild();
     }
+    ImGui::Spacing();
+}
 
-    drawList->AddRect(pos, ImVec2(pos.x + previewSize, pos.y + previewSize),
-                      IM_COL32(80, 80, 80, 255));
-
-    ImGui::Dummy(ImVec2(previewSize, previewSize));
+void GPUDebugView::ClearRenderTargetDescriptors() {
+    auto clear = [](VkDescriptorSet& ds, VkImageView& view) {
+        if (ds != VK_NULL_HANDLE) {
+            ImGui_ImplVulkan_RemoveTexture(ds);
+            ds = VK_NULL_HANDLE;
+        }
+        view = VK_NULL_HANDLE;
+    };
+    clear(m_DrawImageDS, m_DrawImageView);
+    clear(m_DepthImageDS, m_DepthImageView);
+    clear(m_NormalImageDS, m_NormalImageView);
+    clear(m_MetalRoughImageDS, m_MetalRoughImageView);
 }
 
 void GPUDebugView::RenderDrawCalls() {

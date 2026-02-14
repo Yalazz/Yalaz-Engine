@@ -35,6 +35,8 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <vulkan/vk_enum_string_helper.h>
 #include <vk_mem_alloc.h>
 
@@ -521,8 +523,19 @@ struct Node : public IRenderable {
     std::weak_ptr<Node> parent;
     std::vector<std::shared_ptr<Node>> children;
 
+    bool hasLocalTRS = false;
+    glm::vec3 localTranslation = glm::vec3(0.0f);
+    glm::quat localRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3 localScale = glm::vec3(1.0f);
+
     glm::mat4 localTransform;
     glm::mat4 worldTransform;
+
+    void rebuildLocalTransformFromTRS() {
+        localTransform = glm::translate(glm::mat4(1.0f), localTranslation) *
+            glm::toMat4(localRotation) *
+            glm::scale(glm::mat4(1.0f), localScale);
+    }
 
     void refreshTransform(const glm::mat4& parentMatrix)
     {

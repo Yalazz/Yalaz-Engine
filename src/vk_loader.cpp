@@ -498,7 +498,12 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cctype>
+#include <limits>
 #include <sstream>
+#include <unordered_map>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "vk_engine.h"
 #include "vk_initializers.h"
@@ -515,6 +520,8 @@
 #include "ui/views/ConsoleView.h"
 
 namespace {
+std::unordered_map<std::string, std::string> gConvertedObjSourceDir;
+
 std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
@@ -530,12 +537,97 @@ std::string shellQuote(const std::string& s) {
     return out;
 }
 
+#ifndef _WIN32
 bool runCommand(const std::string& cmd) {
     int rc = std::system(cmd.c_str());
     return rc == 0;
 }
+#endif
 
-bool convertModelToGlb(const std::filesystem::path& inputPath, std::filesystem::path& outGlbPath) {
+bool runCommandArgs(const std::string& exe, const std::vector<std::string>& args) {
+#ifdef _WIN32
+    std::string commandLine = shellQuote(exe);
+    for (const auto& arg : args) {
+        commandLine += " " + shellQuote(arg);
+    }
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    std::vector<char> mutableCmd(commandLine.begin(), commandLine.end());
+    mutableCmd.push_back('\0');
+
+    const BOOL ok = CreateProcessA(
+        nullptr,
+        mutableCmd.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+    if (!ok) {
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return exitCode == 0;
+#else
+    std::string cmd = shellQuote(exe);
+    for (const auto& arg : args) {
+        cmd += " " + shellQuote(arg);
+    }
+    return runCommand(cmd);
+#endif
+}
+
+std::vector<std::string> getAssimpCandidates() {
+    std::vector<std::string> assimpCandidates;
+    if (const char* assimpBin = std::getenv("ASSIMP_BIN")) {
+        assimpCandidates.emplace_back(assimpBin);
+    }
+    if (const char* assimpRoot = std::getenv("ASSIMP_ROOT")) {
+        const std::filesystem::path root(assimpRoot);
+        assimpCandidates.push_back((root / "bin" / "assimp.exe").string());
+        assimpCandidates.push_back((root / "assimp.exe").string());
+    }
+
+    std::vector<std::string> defaultCandidates = {
+        "assimp",
+        "assimp.exe",
+        "C:\\Program Files\\assimp\\bin\\assimp.exe",
+        "C:\\Program Files\\Assimp\\bin\\assimp.exe",
+        "C:\\Program Files (x86)\\Assimp\\bin\\assimp.exe",
+        "C:\\msys64\\mingw64\\bin\\assimp.exe"
+    };
+    assimpCandidates.insert(assimpCandidates.end(), defaultCandidates.begin(), defaultCandidates.end());
+    return assimpCandidates;
+}
+
+bool tryAssimpExport(const std::string& inputAbsPath, const std::filesystem::path& outPath, const char* formatTag) {
+    const auto candidates = getAssimpCandidates();
+    for (const auto& tool : candidates) {
+        const bool hasPathSeparators = (tool.find('\\') != std::string::npos || tool.find('/') != std::string::npos);
+        if (hasPathSeparators && !std::filesystem::exists(std::filesystem::path(tool))) {
+            continue;
+        }
+        if (runCommandArgs(tool, { "export", inputAbsPath, outPath.string(), "-f", formatTag })) {
+            if (std::filesystem::exists(outPath) && std::filesystem::file_size(outPath) > 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool convertModelToGltf(const std::filesystem::path& inputPath, std::filesystem::path& outPath) {
     try {
         const auto absIn = std::filesystem::absolute(inputPath).string();
         std::hash<std::string> h;
@@ -543,25 +635,55 @@ bool convertModelToGlb(const std::filesystem::path& inputPath, std::filesystem::
 
         auto cacheDir = std::filesystem::temp_directory_path() / "yalaz_import_cache";
         std::filesystem::create_directories(cacheDir);
-        outGlbPath = cacheDir / (inputPath.stem().string() + "_" + std::to_string(hash) + ".glb");
 
-        if (std::filesystem::exists(outGlbPath) && std::filesystem::file_size(outGlbPath) > 0) {
+        const std::filesystem::path outGlb = cacheDir / (inputPath.stem().string() + "_" + std::to_string(hash) + ".glb");
+        const std::filesystem::path outGltf = cacheDir / (inputPath.stem().string() + "_" + std::to_string(hash) + ".gltf");
+
+        if (std::filesystem::exists(outGlb) && std::filesystem::file_size(outGlb) > 0) {
+            outPath = outGlb;
+            return true;
+        }
+        if (std::filesystem::exists(outGltf) && std::filesystem::file_size(outGltf) > 0) {
+            outPath = outGltf;
             return true;
         }
 
-        const std::string inQ = shellQuote(absIn);
-        const std::string outQ = shellQuote(outGlbPath.string());
-
-        // Assimp CLI primary path.
-        if (runCommand("assimp export " + inQ + " " + outQ + " -f glb2")) {
-            return std::filesystem::exists(outGlbPath);
+        if (tryAssimpExport(absIn, outGlb, "glb2")) {
+            outPath = outGlb;
+            return true;
+        }
+        if (tryAssimpExport(absIn, outGltf, "gltf2")) {
+            outPath = outGltf;
+            return true;
         }
 
-        // Secondary common tool name on Windows.
-        if (runCommand("assimp.exe export " + inQ + " " + outQ + " -f glb2")) {
-            return std::filesystem::exists(outGlbPath);
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool convertModelToObj(const std::filesystem::path& inputPath, std::filesystem::path& outPath) {
+    try {
+        const auto absIn = std::filesystem::absolute(inputPath).string();
+        std::hash<std::string> h;
+        const auto hash = h(absIn);
+
+        auto cacheDir = std::filesystem::temp_directory_path() / "yalaz_import_cache";
+        std::filesystem::create_directories(cacheDir);
+
+        const std::filesystem::path outObj = cacheDir / (inputPath.stem().string() + "_" + std::to_string(hash) + ".obj");
+        if (std::filesystem::exists(outObj) && std::filesystem::file_size(outObj) > 0) {
+            outPath = outObj;
+            gConvertedObjSourceDir[outObj.string()] = std::filesystem::absolute(inputPath).parent_path().string();
+            return true;
         }
 
+        if (tryAssimpExport(absIn, outObj, "obj")) {
+            outPath = outObj;
+            gConvertedObjSourceDir[outObj.string()] = std::filesystem::absolute(inputPath).parent_path().string();
+            return true;
+        }
         return false;
     } catch (...) {
         return false;
@@ -579,6 +701,17 @@ bool collectObjPoints(const std::string& path, std::vector<glm::vec3>& points) {
     points.reserve(attrib.vertices.size() / 3);
     for (size_t i = 0; i + 2 < attrib.vertices.size(); i += 3) {
         points.emplace_back(attrib.vertices[i + 0], attrib.vertices[i + 1], attrib.vertices[i + 2]);
+    }
+    constexpr size_t kMaxPreviewPoints = 15000;
+    if (points.size() > kMaxPreviewPoints) {
+        std::vector<glm::vec3> reduced;
+        reduced.reserve(kMaxPreviewPoints);
+        const float step = static_cast<float>(points.size()) / static_cast<float>(kMaxPreviewPoints);
+        for (size_t i = 0; i < kMaxPreviewPoints; ++i) {
+            const size_t src = std::min(points.size() - 1, static_cast<size_t>(i * step));
+            reduced.push_back(points[src]);
+        }
+        points.swap(reduced);
     }
     return !points.empty();
 }
@@ -617,6 +750,17 @@ bool collectGltfPoints(const std::string& path, std::vector<glm::vec3>& points) 
             fastgltf::iterateAccessorWithIndex<glm::vec3>(gltf, posAccessor,
                 [&](glm::vec3 v, size_t idx) { points[base + idx] = v; });
         }
+    }
+    constexpr size_t kMaxPreviewPoints = 15000;
+    if (points.size() > kMaxPreviewPoints) {
+        std::vector<glm::vec3> reduced;
+        reduced.reserve(kMaxPreviewPoints);
+        const float step = static_cast<float>(points.size()) / static_cast<float>(kMaxPreviewPoints);
+        for (size_t i = 0; i < kMaxPreviewPoints; ++i) {
+            const size_t src = std::min(points.size() - 1, static_cast<size_t>(i * step));
+            reduced.push_back(points[src]);
+        }
+        points.swap(reduced);
     }
     return !points.empty();
 }
@@ -1364,6 +1508,15 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
         std::visit(fastgltf::visitor{ [&](fastgltf::Node::TransformMatrix matrix) {
                                           memcpy(&newNode->localTransform, matrix.data(), sizeof(matrix));
+                                          glm::vec3 scale, translation, skew;
+                                          glm::vec4 perspective;
+                                          glm::quat rotation;
+                                          if (glm::decompose(newNode->localTransform, scale, rotation, translation, skew, perspective)) {
+                                              newNode->localTranslation = translation;
+                                              newNode->localRotation = rotation;
+                                              newNode->localScale = scale;
+                                              newNode->hasLocalTRS = true;
+                                          }
                                       },
                        [&](fastgltf::Node::TRS transform) {
                            glm::vec3 tl(transform.translation[0], transform.translation[1],
@@ -1372,11 +1525,11 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                                transform.rotation[2]);
                            glm::vec3 sc(transform.scale[0], transform.scale[1], transform.scale[2]);
 
-                           glm::mat4 tm = glm::translate(glm::mat4(1.f), tl);
-                           glm::mat4 rm = glm::toMat4(rot);
-                           glm::mat4 sm = glm::scale(glm::mat4(1.f), sc);
-
-                           newNode->localTransform = tm * rm * sm;
+                           newNode->localTranslation = tl;
+                           newNode->localRotation = rot;
+                           newNode->localScale = sc;
+                           newNode->hasLocalTRS = true;
+                           newNode->rebuildLocalTransformFromTRS();
                        } },
             node.transform);
     }
@@ -1814,6 +1967,19 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
     tinyobj::ObjReader reader;
     tinyobj::ObjReaderConfig config;
     config.mtl_search_path = std::filesystem::path(filePath).parent_path().string();
+    config.triangulate = true;
+
+    const std::string objPath = std::filesystem::path(filePath).string();
+    std::string sourceDir;
+    if (auto it = gConvertedObjSourceDir.find(objPath); it != gConvertedObjSourceDir.end()) {
+        sourceDir = it->second;
+    } else {
+        // Try absolute-key fallback.
+        const std::string absObj = std::filesystem::absolute(std::filesystem::path(filePath)).string();
+        if (auto itAbs = gConvertedObjSourceDir.find(absObj); itAbs != gConvertedObjSourceDir.end()) {
+            sourceDir = itAbs->second;
+        }
+    }
 
     if (!reader.ParseFromFile(std::string(filePath), config)) {
         std::cerr << "Failed to load OBJ: " << reader.Error() << std::endl;
@@ -1825,10 +1991,33 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
     const auto& shapes = reader.GetShapes();
     const auto& materialsTiny = reader.GetMaterials();
 
-    if (!materialsTiny.empty()) {
-        file.materialDataBuffer = engine->create_buffer(
-            sizeof(GLTFMetallic_Roughness::MaterialConstants) * materialsTiny.size(),
-            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    // +1 for the default material at slot 0, then imported OBJ/MTL materials at [1..N]
+    const size_t materialCount = std::max<size_t>(1, materialsTiny.size() + 1);
+    file.materialDataBuffer = engine->create_buffer(
+        sizeof(GLTFMetallic_Roughness::MaterialConstants) * materialCount,
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    std::shared_ptr<GLTFMaterial> defaultMat = nullptr;
+    {
+        GLTFMetallic_Roughness::MaterialConstants constants{};
+        constants.colorFactors = glm::vec4(0.85f, 0.85f, 0.85f, 1.0f);
+        constants.metal_rough_factors = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+        auto* mapped = reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(file.materialDataBuffer.info.pMappedData);
+        mapped[0] = constants;
+
+        GLTFMetallic_Roughness::MaterialResources res;
+        res.colorImage = engine->_whiteImage;
+        res.colorSampler = engine->_defaultSamplerLinear;
+        res.metalRoughImage = engine->_whiteImage;
+        res.metalRoughSampler = engine->_defaultSamplerLinear;
+        res.dataBuffer = file.materialDataBuffer.buffer;
+        res.dataBufferOffset = 0;
+
+        defaultMat = std::make_shared<GLTFMaterial>();
+        defaultMat->data = engine->metalRoughMaterial.write_material(
+            engine->_device, MaterialPass::MainColor, true, res, file.descriptorPool);
+        materials.push_back(defaultMat);
+        file.materials["_default"] = defaultMat;
     }
 
     for (size_t i = 0; i < materialsTiny.size(); i++) {
@@ -1842,7 +2031,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
         constants.metal_rough_factors = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 
         auto* mapped = reinterpret_cast<GLTFMetallic_Roughness::MaterialConstants*>(file.materialDataBuffer.info.pMappedData);
-        mapped[i] = constants;
+        mapped[i + 1] = constants;
 
         GLTFMetallic_Roughness::MaterialResources res;
         res.colorImage = engine->_whiteImage;
@@ -1850,12 +2039,48 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
         res.metalRoughImage = engine->_whiteImage;
         res.metalRoughSampler = engine->_defaultSamplerLinear;
         res.dataBuffer = file.materialDataBuffer.buffer;
-        res.dataBufferOffset = i * sizeof(GLTFMetallic_Roughness::MaterialConstants);
+        res.dataBufferOffset = (i + 1) * sizeof(GLTFMetallic_Roughness::MaterialConstants);
 
         if (!mat.diffuse_texname.empty()) {
-            std::string texPath = config.mtl_search_path + "/" + mat.diffuse_texname;
+            std::vector<std::filesystem::path> textureCandidates;
+            const std::filesystem::path texRel = std::filesystem::path(mat.diffuse_texname);
+            std::vector<std::filesystem::path> texRelVariants;
+            texRelVariants.push_back(texRel);
+
+            // Assimp OBJ export can emit "file.tga.png"; try "file.tga" as fallback.
+            if (texRel.extension() == ".png") {
+                std::filesystem::path withoutPng = texRel;
+                withoutPng.replace_extension("");
+                if (withoutPng != texRel) {
+                    texRelVariants.push_back(withoutPng);
+                }
+            }
+
+            for (const auto& rel : texRelVariants) {
+                const std::string texFileName = rel.filename().string();
+
+                textureCandidates.push_back(std::filesystem::path(config.mtl_search_path) / rel);
+                if (!sourceDir.empty()) {
+                    textureCandidates.push_back(std::filesystem::path(sourceDir) / rel);
+                    textureCandidates.push_back(std::filesystem::path(sourceDir) / texFileName);
+                    textureCandidates.push_back(std::filesystem::path(sourceDir) / "textures" / texFileName);
+                    textureCandidates.push_back(std::filesystem::path(sourceDir).parent_path() / "textures" / texFileName);
+                }
+            }
+
+            std::filesystem::path texPath;
+            for (const auto& cand : textureCandidates) {
+                if (std::filesystem::exists(cand)) {
+                    texPath = cand;
+                    break;
+                }
+            }
+
             int w, h, ch;
-            unsigned char* data = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+            unsigned char* data = nullptr;
+            if (!texPath.empty()) {
+                data = stbi_load(texPath.string().c_str(), &w, &h, &ch, 4);
+            }
             if (data) {
                 VkExtent3D size{ (uint32_t)w, (uint32_t)h, 1 };
                 AllocatedImage tex = engine->create_image(data, size, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
@@ -1863,75 +2088,170 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
                 res.colorImage = tex;
             }
             else {
-                fmt::print("⚠️ Texture load failed: {}\n", texPath);
+                fmt::print("Texture load failed: {} (sourceDir={})\n",
+                    mat.diffuse_texname,
+                    sourceDir.empty() ? "<none>" : sourceDir);
             }
         }
 
         newMat->data = engine->metalRoughMaterial.write_material(
-            engine->_device, MaterialPass::MainColor, false, res, file.descriptorPool);
+            engine->_device, MaterialPass::MainColor, true, res, file.descriptorPool);
     }
 
     std::vector<uint32_t> indices;
     std::vector<Vertex> vertices;
 
+    size_t meshCounter = 0;
     for (const auto& shape : shapes) {
         std::shared_ptr<MeshAsset> newmesh = std::make_shared<MeshAsset>();
         meshes.push_back(newmesh);
-        file.meshes[shape.name.c_str()] = newmesh;
-        newmesh->name = shape.name;
+        const std::string meshName = shape.name.empty() ? ("obj_mesh_" + std::to_string(meshCounter++)) : shape.name;
+        file.meshes[meshName] = newmesh;
+        newmesh->name = meshName;
 
         indices.clear();
         vertices.clear();
+        newmesh->surfaces.clear();
 
         size_t index_offset = 0;
+        int activeMatId = std::numeric_limits<int>::min();
+        bool hasActiveSurface = false;
+        GeoSurface activeSurface{};
+        glm::vec3 activeMin(0.0f);
+        glm::vec3 activeMax(0.0f);
+
+        auto flushActiveSurface = [&]() {
+            if (!hasActiveSurface) return;
+            const uint32_t start = activeSurface.startIndex;
+            const uint32_t end = static_cast<uint32_t>(indices.size());
+            if (end > start) {
+                activeSurface.count = end - start;
+                activeSurface.bounds.origin = (activeMax + activeMin) * 0.5f;
+                activeSurface.bounds.extents = (activeMax - activeMin) * 0.5f;
+                activeSurface.bounds.sphereRadius = glm::length(activeSurface.bounds.extents);
+                newmesh->surfaces.push_back(activeSurface);
+            }
+            hasActiveSurface = false;
+        };
+
         for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++) {
-            int fv = shape.mesh.num_face_vertices[f];
+            const int fv = shape.mesh.num_face_vertices[f];
+            if (fv < 3) {
+                index_offset += static_cast<size_t>(std::max(fv, 0));
+                continue;
+            }
+
             int matId = shape.mesh.material_ids.size() > f ? shape.mesh.material_ids[f] : -1;
-            std::shared_ptr<GLTFMaterial> mat = (matId >= 0 && matId < materials.size()) ? materials[matId] : nullptr;
+            std::shared_ptr<GLTFMaterial> mat = defaultMat;
+            if (matId >= 0 && static_cast<size_t>(matId) < materialsTiny.size()) {
+                mat = materials[static_cast<size_t>(matId) + 1];
+            }
+
+            if (!hasActiveSurface || matId != activeMatId) {
+                flushActiveSurface();
+                activeMatId = matId;
+                hasActiveSurface = true;
+                activeSurface = {};
+                activeSurface.startIndex = static_cast<uint32_t>(indices.size());
+                activeSurface.material = mat;
+                const float maxF = std::numeric_limits<float>::max();
+                const float minF = std::numeric_limits<float>::lowest();
+                activeMin = glm::vec3(maxF, maxF, maxF);
+                activeMax = glm::vec3(minF, minF, minF);
+            }
+
+            std::vector<uint32_t> faceVertexIndices;
+            faceVertexIndices.reserve(static_cast<size_t>(fv));
+            bool faceHasNormals = true;
 
             for (int v = 0; v < fv; v++) {
-                tinyobj::index_t idx = shape.mesh.indices[index_offset + v];
+                const tinyobj::index_t idx = shape.mesh.indices[index_offset + static_cast<size_t>(v)];
+                if (idx.vertex_index < 0) {
+                    continue;
+                }
+
+                const size_t posBase = static_cast<size_t>(idx.vertex_index) * 3;
+                if (posBase + 2 >= attrib.vertices.size()) {
+                    continue;
+                }
+
                 Vertex vert{};
                 vert.position = {
-                    attrib.vertices[3 * idx.vertex_index + 0],
-                    attrib.vertices[3 * idx.vertex_index + 1],
-                    attrib.vertices[3 * idx.vertex_index + 2]
+                    attrib.vertices[posBase + 0],
+                    attrib.vertices[posBase + 1],
+                    attrib.vertices[posBase + 2]
                 };
-                vert.normal = (idx.normal_index >= 0 && !attrib.normals.empty())
-                    ? glm::vec3(
-                        attrib.normals[3 * idx.normal_index + 0],
-                        attrib.normals[3 * idx.normal_index + 1],
-                        attrib.normals[3 * idx.normal_index + 2])
-                    : glm::vec3(0, 1, 0);
+                if (idx.normal_index >= 0 && !attrib.normals.empty()) {
+                    const size_t normalBase = static_cast<size_t>(idx.normal_index) * 3;
+                    if (normalBase + 2 < attrib.normals.size()) {
+                        vert.normal = glm::vec3(
+                            attrib.normals[normalBase + 0],
+                            attrib.normals[normalBase + 1],
+                            attrib.normals[normalBase + 2]);
+                    } else {
+                        faceHasNormals = false;
+                        vert.normal = glm::vec3(0.0f);
+                    }
+                } else {
+                    faceHasNormals = false;
+                    vert.normal = glm::vec3(0.0f);
+                }
                 if (idx.texcoord_index >= 0 && !attrib.texcoords.empty()) {
-                    vert.uv_x = attrib.texcoords[2 * idx.texcoord_index + 0];
-                    vert.uv_y = 1.0f - attrib.texcoords[2 * idx.texcoord_index + 1]; // Vulkan uyumu
+                    const size_t uvBase = static_cast<size_t>(idx.texcoord_index) * 2;
+                    if (uvBase + 1 < attrib.texcoords.size()) {
+                        vert.uv_x = attrib.texcoords[uvBase + 0];
+                        vert.uv_y = 1.0f - attrib.texcoords[uvBase + 1];
+                    } else {
+                        vert.uv_x = 0.0f;
+                        vert.uv_y = 0.0f;
+                    }
                 }
                 else {
-                    vert.uv_x = 0; vert.uv_y = 0;
+                    vert.uv_x = 0.0f;
+                    vert.uv_y = 0.0f;
                 }
                 vert.color = glm::vec4(1.0f);
+
                 vertices.push_back(vert);
-                indices.push_back(static_cast<uint32_t>(vertices.size() - 1));
+                const uint32_t newIndex = static_cast<uint32_t>(vertices.size() - 1);
+                faceVertexIndices.push_back(newIndex);
+                activeMin = glm::min(activeMin, vert.position);
+                activeMax = glm::max(activeMax, vert.position);
+            }
+            index_offset += static_cast<size_t>(fv);
+
+            if (faceVertexIndices.size() < 3) {
+                continue;
             }
 
-            GeoSurface surface;
-            surface.startIndex = indices.size() - fv;
-            surface.count = fv;
-            surface.material = mat;
-
-            // Bound
-            glm::vec3 minpos = vertices[surface.startIndex].position;
-            glm::vec3 maxpos = minpos;
-            for (uint32_t i = 0; i < surface.count; ++i) {
-                minpos = glm::min(minpos, vertices[surface.startIndex + i].position);
-                maxpos = glm::max(maxpos, vertices[surface.startIndex + i].position);
+            if (!faceHasNormals) {
+                const glm::vec3 p0 = vertices[faceVertexIndices[0]].position;
+                const glm::vec3 p1 = vertices[faceVertexIndices[1]].position;
+                const glm::vec3 p2 = vertices[faceVertexIndices[2]].position;
+                glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
+                const float nLen = glm::length(n);
+                if (nLen > 1e-6f) {
+                    n /= nLen;
+                } else {
+                    n = glm::vec3(0.0f, 1.0f, 0.0f);
+                }
+                for (uint32_t vtxIdx : faceVertexIndices) {
+                    vertices[vtxIdx].normal = n;
+                }
             }
-            surface.bounds.origin = (maxpos + minpos) / 2.0f;
-            surface.bounds.extents = (maxpos - minpos) / 2.0f;
-            surface.bounds.sphereRadius = glm::length(surface.bounds.extents);
 
-            newmesh->surfaces.push_back(surface);
+            for (size_t tri = 1; tri + 1 < faceVertexIndices.size(); ++tri) {
+                indices.push_back(faceVertexIndices[0]);
+                indices.push_back(faceVertexIndices[tri]);
+                indices.push_back(faceVertexIndices[tri + 1]);
+            }
+        }
+        flushActiveSurface();
+
+        if (indices.empty() || vertices.empty() || newmesh->surfaces.empty()) {
+            meshes.pop_back();
+            file.meshes.erase(meshName);
+            continue;
         }
 
         newmesh->meshBuffers = engine->uploadMesh(indices, vertices);
@@ -1939,6 +2259,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
 
     for (const auto& mesh : meshes) {
         std::shared_ptr<Node> newNode = std::make_shared<MeshNode>();
+        newNode->localTransform = glm::mat4(1.0f);
+        newNode->worldTransform = glm::mat4(1.0f);
         static_cast<MeshNode*>(newNode.get())->mesh = mesh;
         nodes.push_back(newNode);
         file.nodes[mesh->name.c_str()] = newNode;
@@ -1973,13 +2295,55 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadSceneAsset(VulkanEngine* engine, 
         return {};
     }
     if (ext == ".fbx" || ext == ".dae") {
-        std::filesystem::path convertedGlb;
-        if (!convertModelToGlb(p, convertedGlb)) {
-            Yalaz::UI::Console::Error(
-                "FBX/DAE conversion failed. Install Assimp CLI and ensure `assimp` is on PATH.");
-            return {};
+        std::filesystem::path convertedPath;
+        if (convertModelToGltf(p, convertedPath)) {
+            return loadGltf(engine, convertedPath.string());
         }
-        return loadGltf(engine, convertedGlb.string());
+        if (convertModelToObj(p, convertedPath)) {
+            // OBJ fallback does not carry skeleton/animation data.
+            // Remove any stale animation/skeleton entries for this source scene to prevent
+            // mismatched clips from driving unrelated nodes with the same filename.
+            auto fileNameOnly = [](const std::string& in) -> std::string {
+                size_t s1 = in.find_last_of('/');
+                size_t s2 = in.find_last_of('\\');
+                size_t pos = std::string::npos;
+                if (s1 == std::string::npos) pos = s2;
+                else if (s2 == std::string::npos) pos = s1;
+                else pos = std::max(s1, s2);
+                return (pos == std::string::npos) ? in : in.substr(pos + 1);
+            };
+
+            const std::string sourceFile = fileNameOnly(path);
+            engine->animationClips.erase(
+                std::remove_if(engine->animationClips.begin(), engine->animationClips.end(),
+                    [&](const AnimationClipData& c) {
+                        if (c.sourceScene.empty()) return false;
+                        if (c.sourceScene == path) return true;
+                        return fileNameOnly(c.sourceScene) == sourceFile;
+                    }),
+                engine->animationClips.end());
+
+            engine->skeletons.erase(
+                std::remove_if(engine->skeletons.begin(), engine->skeletons.end(),
+                    [&](const SkeletonData& s) {
+                        if (s.sourceScene.empty()) return false;
+                        if (s.sourceScene == path) return true;
+                        return fileNameOnly(s.sourceScene) == sourceFile;
+                    }),
+                engine->skeletons.end());
+
+            if (engine->animationClips.empty()) engine->activeAnimationIndex = -1;
+            else if (engine->activeAnimationIndex >= static_cast<int>(engine->animationClips.size())) engine->activeAnimationIndex = 0;
+            if (engine->skeletons.empty()) engine->activeSkeletonIndex = -1;
+            else if (engine->activeSkeletonIndex >= static_cast<int>(engine->skeletons.size())) engine->activeSkeletonIndex = 0;
+
+            return loadObj(engine, convertedPath.string());
+        }
+        Yalaz::UI::Console::Error(
+            "FBX/DAE conversion failed for: " + path +
+            ". Install Assimp CLI (`assimp`) or place assimp.exe under C:\\Program Files\\Assimp\\bin. "
+            "You can also set ASSIMP_BIN or ASSIMP_ROOT.");
+        return {};
     }
 
     Yalaz::UI::Console::Warn("Unsupported model format: " + path);
@@ -2002,9 +2366,14 @@ bool generateModelPreviewRGBA(std::string_view filePath, int maxSize, std::vecto
     } else if (ext == ".gltf" || ext == ".glb") {
         if (!collectGltfPoints(path, points)) return false;
     } else if (ext == ".fbx" || ext == ".dae") {
-        std::filesystem::path convertedGlb;
-        if (!convertModelToGlb(p, convertedGlb)) return false;
-        if (!collectGltfPoints(convertedGlb.string(), points)) return false;
+        std::filesystem::path convertedPath;
+        if (convertModelToGltf(p, convertedPath)) {
+            if (!collectGltfPoints(convertedPath.string(), points)) return false;
+        } else if (convertModelToObj(p, convertedPath)) {
+            if (!collectObjPoints(convertedPath.string(), points)) return false;
+        } else {
+            return false;
+        }
     } else {
         return false;
     }
@@ -2146,8 +2515,16 @@ void LoadedGLTF::clearAll()
     }
     samplers.clear();
 
-    // Destroy descriptor pools
-    descriptorPool.destroy_pools(dv);
+    // NOTE:
+    // Do not destroy scene descriptor pools immediately here.
+    // On some frame overlap / submission orders, descriptor sets can still be
+    // referenced by pending command buffers even after per-frame fence waits.
+    // Immediate pool destruction then causes invalid-handle and in-use validation
+    // errors when handles get recycled.
+    //
+    // Keeping these pools alive avoids use-after-free descriptor hazards.
+    // (They are released when the process exits; this trades memory for safety.)
+    // descriptorPool.destroy_pools(dv);
 
     // Destroy material data buffer
     if (materialDataBuffer.buffer != VK_NULL_HANDLE) {

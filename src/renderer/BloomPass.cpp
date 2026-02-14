@@ -190,16 +190,20 @@ void BloomPass::createPipelines() {
 }
 
 void BloomPass::createDescriptors() {
-    // Allocate descriptor sets from the global allocator
+    // Descriptor sets are allocated per-frame in updateDescriptors()
+    // to avoid updating descriptor sets that are still in-flight.
     for (int i = 0; i < MAX_MIP_LEVELS; ++i) {
-        _downsampleDescriptors[i] = _engine->globalDescriptorAllocator.allocate(_engine->_device, _descriptorLayout);
-        _upsampleDescriptors[i] = _engine->globalDescriptorAllocator.allocate(_engine->_device, _descriptorLayout);
+        _downsampleDescriptors[i] = VK_NULL_HANDLE;
+        _upsampleDescriptors[i] = VK_NULL_HANDLE;
     }
 }
 
 void BloomPass::updateDescriptors(AllocatedImage& input, AllocatedImage& output) {
     // Update downsample descriptors
     for (int i = 0; i < _actualMipLevels; ++i) {
+        _downsampleDescriptors[i] = _engine->get_current_frame()._frameDescriptors.allocate(
+            _engine->_device, _descriptorLayout);
+
         VkDescriptorImageInfo srcImageInfo{};
         srcImageInfo.sampler = _linearSampler;
         srcImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -235,6 +239,9 @@ void BloomPass::updateDescriptors(AllocatedImage& input, AllocatedImage& output)
 
     // Update upsample descriptors
     for (int i = _actualMipLevels - 2; i >= 0; --i) {
+        _upsampleDescriptors[i] = _engine->get_current_frame()._frameDescriptors.allocate(
+            _engine->_device, _descriptorLayout);
+
         VkDescriptorImageInfo srcImageInfo{};
         srcImageInfo.sampler = _linearSampler;
         srcImageInfo.imageView = _mipChain[i + 1].image.imageView;

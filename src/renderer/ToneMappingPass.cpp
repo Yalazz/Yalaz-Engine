@@ -188,11 +188,14 @@ void ToneMappingPass::createPipeline() {
 
     vkDestroyShaderModule(_engine->_device, shader, nullptr);
 
-    // Allocate descriptor set
-    _descriptorSet = _engine->globalDescriptorAllocator.allocate(_engine->_device, _descriptorLayout);
+    // Descriptor set is allocated per-frame in updateDescriptors()
+    _descriptorSet = VK_NULL_HANDLE;
 }
 
 void ToneMappingPass::updateDescriptors(AllocatedImage& input, AllocatedImage& output) {
+    _descriptorSet = _engine->get_current_frame()._frameDescriptors.allocate(
+        _engine->_device, _descriptorLayout);
+
     VkDescriptorImageInfo srcImageInfo{};
     srcImageInfo.sampler = _linearSampler;
     srcImageInfo.imageView = input.imageView;

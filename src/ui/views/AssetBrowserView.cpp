@@ -15,6 +15,8 @@
 #include "../../vk_loader.h"
 #include <filesystem>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <stb_image.h>
 #include <imgui_impl_vulkan.h>
 
@@ -52,10 +54,12 @@ void AssetBrowserView::OnInit(VulkanEngine* engine) {
         for (int i = 0; i < 5; i++) {
             fs::path assetsPath = exeDir / "assets";
             if (fs::exists(assetsPath) && fs::is_directory(assetsPath)) {
-                m_CurrentPath = assetsPath.string();
-                m_RootPath = m_CurrentPath;
-                RefreshDirectory();
-                return;
+            m_CurrentPath = assetsPath.string();
+            m_RootPath = m_CurrentPath;
+            strncpy(m_PathBuffer, m_CurrentPath.c_str(), sizeof(m_PathBuffer) - 1);
+            m_PathBuffer[sizeof(m_PathBuffer) - 1] = '\0';
+            RefreshDirectory();
+            return;
             }
             exeDir = exeDir.parent_path();
         }
@@ -66,6 +70,8 @@ void AssetBrowserView::OnInit(VulkanEngine* engine) {
         if (fs::exists(path) && fs::is_directory(path)) {
             m_CurrentPath = fs::absolute(path).string();
             m_RootPath = m_CurrentPath;
+            strncpy(m_PathBuffer, m_CurrentPath.c_str(), sizeof(m_PathBuffer) - 1);
+            m_PathBuffer[sizeof(m_PathBuffer) - 1] = '\0';
             RefreshDirectory();
             return;
         }
@@ -73,6 +79,8 @@ void AssetBrowserView::OnInit(VulkanEngine* engine) {
 
     m_CurrentPath = fs::current_path().string();
     m_RootPath = m_CurrentPath;
+    strncpy(m_PathBuffer, m_CurrentPath.c_str(), sizeof(m_PathBuffer) - 1);
+    m_PathBuffer[sizeof(m_PathBuffer) - 1] = '\0';
     RefreshDirectory();
 }
 
@@ -242,6 +250,8 @@ void AssetBrowserView::RenderPathBar() {
         fs::path p(m_CurrentPath);
         if (p.has_parent_path() && p.parent_path() != p) {
             m_CurrentPath = p.parent_path().string();
+            strncpy(m_PathBuffer, m_CurrentPath.c_str(), sizeof(m_PathBuffer) - 1);
+            m_PathBuffer[sizeof(m_PathBuffer) - 1] = '\0';
             RefreshDirectory();
         }
     }
@@ -253,7 +263,27 @@ void AssetBrowserView::RenderPathBar() {
         } else {
             m_CurrentPath = fs::current_path().string();
         }
+        strncpy(m_PathBuffer, m_CurrentPath.c_str(), sizeof(m_PathBuffer) - 1);
+        m_PathBuffer[sizeof(m_PathBuffer) - 1] = '\0';
         RefreshDirectory();
+    }
+    ImGui::SameLine();
+
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::InputText("##AssetPath", m_PathBuffer, sizeof(m_PathBuffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
+        fs::path p(m_PathBuffer);
+        if (fs::exists(p) && fs::is_directory(p)) {
+            m_CurrentPath = fs::absolute(p).string();
+            RefreshDirectory();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Go")) {
+        fs::path p(m_PathBuffer);
+        if (fs::exists(p) && fs::is_directory(p)) {
+            m_CurrentPath = fs::absolute(p).string();
+            RefreshDirectory();
+        }
     }
     ImGui::SameLine();
 
@@ -264,6 +294,8 @@ void AssetBrowserView::RenderPathBar() {
         accumulated /= part;
         if (ImGui::Button(part.string().c_str())) {
             m_CurrentPath = accumulated.string();
+            strncpy(m_PathBuffer, m_CurrentPath.c_str(), sizeof(m_PathBuffer) - 1);
+            m_PathBuffer[sizeof(m_PathBuffer) - 1] = '\0';
             RefreshDirectory();
         }
         ImGui::SameLine();
@@ -298,6 +330,15 @@ void AssetBrowserView::RenderAssetGrid() {
     }
 
     ImGui::Columns(1);
+
+    // Defer directory changes until after iteration to avoid invalidating m_Assets mid-loop.
+    if (!m_PendingNavigatePath.empty()) {
+        m_CurrentPath = m_PendingNavigatePath;
+        strncpy(m_PathBuffer, m_CurrentPath.c_str(), sizeof(m_PathBuffer) - 1);
+        m_PathBuffer[sizeof(m_PathBuffer) - 1] = '\0';
+        m_PendingNavigatePath.clear();
+        RefreshDirectory();
+    }
 }
 
 void AssetBrowserView::RenderAssetCard(const AssetEntry& asset, float size) {
@@ -431,8 +472,7 @@ void AssetBrowserView::RenderAssetCard(const AssetEntry& asset, float size) {
     // Handle click
     if (clicked) {
         if (asset.isDirectory) {
-            m_CurrentPath = asset.path;
-            RefreshDirectory();
+            m_PendingNavigatePath = fs::absolute(asset.path).string();
         }
     }
 
@@ -707,6 +747,58 @@ ThumbnailEntry* AssetBrowserView::GetOrLoadThumbnail(const AssetEntry& asset) {
             m_ThumbnailCache[asset.path] = entry;
             return &m_ThumbnailCache[asset.path];
         }
+    } else if (asset.type == AssetType::HDRI) {
+        // HDR/EXR path: load float data and tonemap to LDR thumbnail
+        int channels = 0;
+        float* dataf = stbi_loadf(asset.path.c_str(), &width, &height, &channels, 4);
+        if (!dataf) {
+            entry.failed = true;
+            m_ThumbnailCache[asset.path] = entry;
+            return &m_ThumbnailCache[asset.path];
+        }
+
+        float aspect = (float)width / (float)height;
+        if (aspect > 1.0f) {
+            thumbH = std::max(1, (int)(THUMB_RES / aspect));
+        } else {
+            thumbW = std::max(1, (int)(THUMB_RES * aspect));
+        }
+
+        thumbData.resize(thumbW * thumbH * 4);
+
+        float xStep = (float)width / thumbW;
+        float yStep = (float)height / thumbH;
+
+        auto toByte = [](float v) -> uint8_t {
+            v = std::max(0.0f, v);
+            // Simple Reinhard tonemap + gamma
+            float mapped = v / (1.0f + v);
+            float srgb = std::pow(mapped, 1.0f / 2.2f);
+            int iv = static_cast<int>(srgb * 255.0f + 0.5f);
+            iv = std::clamp(iv, 0, 255);
+            return static_cast<uint8_t>(iv);
+        };
+
+        for (int y = 0; y < thumbH; y++) {
+            for (int x = 0; x < thumbW; x++) {
+                int srcX = std::min((int)(x * xStep), width - 1);
+                int srcY = std::min((int)(y * yStep), height - 1);
+                int srcIdx = (srcY * width + srcX) * 4;
+                int dstIdx = (y * thumbW + x) * 4;
+
+                float r = std::isfinite(dataf[srcIdx + 0]) ? dataf[srcIdx + 0] : 0.0f;
+                float g = std::isfinite(dataf[srcIdx + 1]) ? dataf[srcIdx + 1] : 0.0f;
+                float b = std::isfinite(dataf[srcIdx + 2]) ? dataf[srcIdx + 2] : 0.0f;
+                float a = std::isfinite(dataf[srcIdx + 3]) ? dataf[srcIdx + 3] : 1.0f;
+
+                thumbData[dstIdx + 0] = toByte(r);
+                thumbData[dstIdx + 1] = toByte(g);
+                thumbData[dstIdx + 2] = toByte(b);
+                thumbData[dstIdx + 3] = static_cast<uint8_t>(std::clamp(a, 0.0f, 1.0f) * 255.0f);
+            }
+        }
+
+        stbi_image_free(dataf);
     } else {
         // Load image with stb_image
         int channels = 0;
@@ -753,7 +845,7 @@ ThumbnailEntry* AssetBrowserView::GetOrLoadThumbnail(const AssetEntry& asset) {
 
     AllocatedImage thumbImage = m_Engine->create_image(
         thumbData.data(), imageSize,
-        VK_FORMAT_R8G8B8A8_SRGB,
+        VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_SAMPLED_BIT,
         false
     );
@@ -830,6 +922,19 @@ void AssetBrowserView::HandleAssetClick(const AssetEntry& asset) {
             m_Engine->sceneFilePaths[sceneName] = asset.path;
             m_SelectedScene = sceneName;
             m_ShowLoadedScenes = true;
+
+            // Auto-focus camera on first top node so imported scenes are immediately visible.
+            auto loadedIt = m_Engine->loadedScenes.find(sceneName);
+            if (loadedIt != m_Engine->loadedScenes.end() && loadedIt->second && !loadedIt->second->topNodes.empty()) {
+                for (auto& top : loadedIt->second->topNodes) {
+                    if (!top) continue;
+                    glm::vec3 pos = glm::vec3(top->worldTransform[3]);
+                    if (std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z)) {
+                        m_Engine->mainCamera.focusOnPoint(pos, 12.0f);
+                        break;
+                    }
+                }
+            }
         }
     } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".hdr" || ext == ".bmp") {
         m_LastSelectedTexture = asset.path;
@@ -884,14 +989,24 @@ void AssetBrowserView::RefreshDirectory() {
         m_CachedDirectory = m_CurrentPath;
     }
 
-    if (!fs::exists(m_CurrentPath)) return;
+    try {
+        m_CurrentPath = fs::weakly_canonical(fs::path(m_CurrentPath)).string();
+    } catch (...) {
+        m_CurrentPath = fs::absolute(fs::path(m_CurrentPath)).string();
+    }
+
+    if (!fs::exists(m_CurrentPath) || !fs::is_directory(m_CurrentPath)) return;
 
     try {
-        for (const auto& entry : fs::directory_iterator(m_CurrentPath)) {
+        for (const auto& entry : fs::directory_iterator(m_CurrentPath, fs::directory_options::skip_permission_denied)) {
             AssetEntry asset;
-            asset.name = entry.path().filename().string();
-            asset.path = entry.path().string();
-            asset.isDirectory = entry.is_directory();
+            try {
+                asset.name = entry.path().filename().string();
+                asset.path = entry.path().string();
+                asset.isDirectory = entry.is_directory();
+            } catch (...) {
+                continue;
+            }
 
             if (asset.isDirectory) {
                 asset.type = AssetType::Folder;

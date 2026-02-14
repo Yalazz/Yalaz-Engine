@@ -87,6 +87,7 @@ private:
     std::string m_RootPath;      // Root assets folder path
     std::vector<AssetEntry> m_Assets;
     char m_SearchBuffer[256] = "";
+    char m_PathBuffer[1024] = "";
 
     // View settings
     bool m_GridView = true;
@@ -100,6 +101,7 @@ private:
     // Selection
     std::string m_SelectedScene;
     std::string m_LastSelectedTexture;
+    std::string m_PendingNavigatePath;
 };
 
 } // namespace Yalaz::UI
