@@ -12,6 +12,7 @@
 // =============================================================================
 
 #include "EditorView.h"
+#include "../../vk_types.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -42,6 +43,7 @@ struct AssetEntry {
 // Cached thumbnail for an asset
 struct ThumbnailEntry {
     VkDescriptorSet imguiDescriptor = VK_NULL_HANDLE;  // ImTextureID for ImGui::Image
+    AllocatedImage gpuImage{};
     bool loaded = false;
     bool failed = false;
 };

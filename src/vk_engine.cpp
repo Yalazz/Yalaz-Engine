@@ -2148,7 +2148,11 @@ void VulkanEngine::draw()
     processPendingSceneUnloads();
 
     frame._deletionQueue.flush();
-    frame._frameDescriptors.clear_pools(_device);
+    // Hotfix: avoid resetting per-frame descriptor pools here.
+    // Some descriptor sets can still be referenced across passes/frame overlap,
+    // and pool reset triggers invalid-set/use-after-free validation errors.
+    // This keeps pools growing but stabilizes runtime correctness.
+    // frame._frameDescriptors.clear_pools(_device);
 
     // Update scene AFTER fence wait to avoid writing to buffers still in use by GPU
     update_scene();
@@ -2486,6 +2490,18 @@ void VulkanEngine::draw_wireframe_outline(VkCommandBuffer cmd, const RenderObjec
 
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 {
+    // If all scenes are unloaded, force-clear any stale render lists/picks.
+    // This prevents binding material descriptor sets that belonged to destroyed scenes.
+    if (loadedScenes.empty()) {
+        drawCommands.OpaqueSurfaces.clear();
+        drawCommands.TransparentSurfaces.clear();
+        pickableRenderObjects.clear();
+        if (selectedNode != nullptr) {
+            selectedNode = nullptr;
+            selectedObjectName.clear();
+        }
+    }
+
     // === GPU SceneData ===
     AllocatedBuffer gpuSceneDataBuffer = create_buffer(sizeof(GPUSceneData),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -2615,6 +2631,31 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     }
 
     writer.update_set(_device, globalDescriptor);
+
+    // Purge stale render objects whose material pointers no longer belong to
+    // currently loaded scenes. This protects against descriptor binds with
+    // freed/invalid material descriptor sets after deferred scene unload.
+    std::unordered_set<const MaterialInstance*> liveSceneMaterials;
+    for (const auto& [sceneName, scene] : loadedScenes) {
+        (void)sceneName;
+        if (!scene) continue;
+        for (const auto& [matName, mat] : scene->materials) {
+            (void)matName;
+            if (!mat) continue;
+            liveSceneMaterials.insert(&mat->data);
+        }
+    }
+    auto isLiveMaterial = [&](const RenderObject& ro) -> bool {
+        if (ro.material == nullptr) return false;
+        if (liveSceneMaterials.empty()) return false;
+        return liveSceneMaterials.find(ro.material) != liveSceneMaterials.end();
+    };
+    std::erase_if(drawCommands.OpaqueSurfaces, [&](const RenderObject& ro) {
+        return !isLiveMaterial(ro);
+    });
+    std::erase_if(drawCommands.TransparentSurfaces, [&](const RenderObject& ro) {
+        return !isLiveMaterial(ro);
+    });
 
     // === Görünürlük ve Raycast Hazırlığı ===
     std::vector<uint32_t> opaque_draws;
@@ -2906,7 +2947,7 @@ void VulkanEngine::draw_shaded(
 
         if (r.isSkinned && pipeline == &metalRoughMaterial.opaqueSkinnedPipeline) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = glm::mat4(1.0f);
+            push.worldMatrix = r.transform;
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -2915,7 +2956,7 @@ void VulkanEngine::draw_shaded(
         } else if (r.isSkinned && (pipeline == &metalRoughMaterial.transparentSkinnedPipeline ||
             pipeline == &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline)) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = glm::mat4(1.0f);
+            push.worldMatrix = r.transform;
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -3177,7 +3218,7 @@ void VulkanEngine::draw_rendered(
 
         if (r.isSkinned && pipeline == &metalRoughMaterial.opaqueSkinnedPipeline) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = glm::mat4(1.0f);
+            push.worldMatrix = r.transform;
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -3186,7 +3227,7 @@ void VulkanEngine::draw_rendered(
         } else if (r.isSkinned && (pipeline == &metalRoughMaterial.transparentSkinnedPipeline ||
             pipeline == &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline)) {
             GPUSkinnedDrawPushConstants push{};
-            push.worldMatrix = glm::mat4(1.0f);
+            push.worldMatrix = r.transform;
             push.vertexBuffer = r.vertexBufferAddress;
             push.skinBuffer = r.skinBufferAddress;
             push.boneBuffer = skinningMatrixBufferAddress;
@@ -8072,7 +8113,11 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
 
         def.material = &s.material->data;
         def.bounds = s.bounds;
-        def.transform = nodeMatrix;
+        // GLTF spec: when a mesh node has a skin, the mesh node's global transform
+        // is overridden by skinning. skinningMatrices already produce world-space
+        // coords (jointWorld * inverseBindMatrix), so applying the mesh transform
+        // again would double-transform and corrupt the animation.
+        def.transform = def.isSkinned ? glm::mat4(1.0f) : nodeMatrix;
 
         def.name = mesh->name;
         def.nodePointer = this;
@@ -8391,7 +8436,7 @@ void VulkanEngine::updateAnimations(float deltaTime) {
                     }
                 }
             }
-            if (!targetNode && track.targetNodeIndex >= 0) {
+            if (!targetNode && track.targetNodeIndex >= 0 && clip.sourceScene.empty()) {
                 for (auto& [sceneName, scene] : loadedScenes) {
                     if (!scene) continue;
                     if (track.targetNodeIndex < static_cast<int>(scene->indexedNodes.size())) {
@@ -8413,7 +8458,7 @@ void VulkanEngine::updateAnimations(float deltaTime) {
                     }
                 }
             }
-            if (!targetNode && !track.targetNode.empty()) {
+            if (!targetNode && !track.targetNode.empty() && clip.sourceScene.empty()) {
                 for (auto& [sceneName, scene] : loadedScenes) {
                     if (!scene) continue;
                     auto it = scene->nodes.find(track.targetNode);
@@ -8525,7 +8570,7 @@ void VulkanEngine::updateAnimations(float deltaTime) {
                     }
                 }
             }
-            if (!boneNode) {
+            if (!boneNode && activeSourceScene.empty()) {
                 for (auto& [sceneName, scene] : loadedScenes) {
                     if (!scene) continue;
                     if (bone.nodeIndex < static_cast<int>(scene->indexedNodes.size())) {
@@ -8540,9 +8585,15 @@ void VulkanEngine::updateAnimations(float deltaTime) {
             if (!boneNode) continue;
 
             const glm::mat4 jointWorld = boneNode->worldTransform;
-            // glTF skinning: jointMatrix = globalJointTransform * inverseBindMatrix
-            // Do not additionally multiply by meshWorld inverse here; that causes deformation/scale artifacts.
-            skinningMatrices[boneIdx] = jointWorld * bone.inverseBindMatrix;
+            // glTF skinning: jointMatrix = jointGlobalTransform * inverseBindMatrix * meshBindTransform
+            // meshBindTransform is the mesh node's world transform at bind time.
+            // For FBX-converted files this contains the axis-conversion root rotation
+            // (e.g. -90° X for Z-up→Y-up). Without it, bind pose = identity, so vertices
+            // in FBX space remain un-rotated (character lays down).
+            // For native GLTF files meshBindTransform = identity (no effect).
+            // render_matrix is identity for skinned meshes (set in MeshNode::Draw),
+            // so this is the only place the mesh transform enters the pipeline.
+            skinningMatrices[boneIdx] = jointWorld * bone.inverseBindMatrix * skel.meshBindTransform;
         }
 
         if (skinningMatrixBuffer.buffer == VK_NULL_HANDLE) {

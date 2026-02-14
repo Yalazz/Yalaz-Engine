@@ -240,6 +240,11 @@ struct SkeletonData {
     std::string name;
     std::string sourceScene;
     std::vector<SkeletonBoneData> bones;
+    // World transform of the mesh node that references this skin at bind time.
+    // For FBX-converted files, this includes the axis conversion root rotation.
+    // Applied in skinning matrix: skinMat = jointWorld * IBM * meshBindTransform
+    // so that vertex data (potentially in FBX Z-up space) gets rotated correctly.
+    glm::mat4 meshBindTransform = glm::mat4(1.0f);
 };
 
 struct AnimationGraphParameter {

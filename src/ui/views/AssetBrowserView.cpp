@@ -872,6 +872,7 @@ ThumbnailEntry* AssetBrowserView::GetOrLoadThumbnail(const AssetEntry& asset) {
     }
 
     entry.imguiDescriptor = ds;
+    entry.gpuImage = thumbImage;
     entry.loaded = true;
     entry.failed = false;
 
@@ -880,9 +881,23 @@ ThumbnailEntry* AssetBrowserView::GetOrLoadThumbnail(const AssetEntry& asset) {
 }
 
 void AssetBrowserView::ClearThumbnailCache() {
+    if (!m_Engine) {
+        m_ThumbnailCache.clear();
+        return;
+    }
+
+    // ImGui texture descriptors are allocated from descriptor pools that can still
+    // be referenced by submitted command buffers. Wait for GPU idle before freeing.
+    vkDeviceWaitIdle(m_Engine->_device);
+
     for (auto& [path, entry] : m_ThumbnailCache) {
         if (entry.imguiDescriptor != VK_NULL_HANDLE) {
             ImGui_ImplVulkan_RemoveTexture(entry.imguiDescriptor);
+            entry.imguiDescriptor = VK_NULL_HANDLE;
+        }
+        if (entry.gpuImage.image != VK_NULL_HANDLE) {
+            m_Engine->destroy_image(entry.gpuImage);
+            entry.gpuImage = {};
         }
     }
     m_ThumbnailCache.clear();

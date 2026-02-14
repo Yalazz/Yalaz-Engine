@@ -630,8 +630,10 @@ bool tryAssimpExport(const std::string& inputAbsPath, const std::filesystem::pat
 bool convertModelToGltf(const std::filesystem::path& inputPath, std::filesystem::path& outPath) {
     try {
         const auto absIn = std::filesystem::absolute(inputPath).string();
+        constexpr uint64_t kImportCacheVersion = 3; // Bumped: fixes for FBX/DAE animation
+        const auto writeTime = std::filesystem::last_write_time(inputPath).time_since_epoch().count();
         std::hash<std::string> h;
-        const auto hash = h(absIn);
+        const auto hash = h(absIn + "|" + std::to_string(writeTime) + "|" + std::to_string(kImportCacheVersion));
 
         auto cacheDir = std::filesystem::temp_directory_path() / "yalaz_import_cache";
         std::filesystem::create_directories(cacheDir);
@@ -639,22 +641,55 @@ bool convertModelToGltf(const std::filesystem::path& inputPath, std::filesystem:
         const std::filesystem::path outGlb = cacheDir / (inputPath.stem().string() + "_" + std::to_string(hash) + ".glb");
         const std::filesystem::path outGltf = cacheDir / (inputPath.stem().string() + "_" + std::to_string(hash) + ".gltf");
 
-        if (std::filesystem::exists(outGlb) && std::filesystem::file_size(outGlb) > 0) {
-            outPath = outGlb;
+        auto gltfScore = [](const std::filesystem::path& p) -> int {
+            if (!std::filesystem::exists(p) || std::filesystem::file_size(p) == 0) return -1;
+
+            fastgltf::Parser parser(fastgltf::Extensions::KHR_lights_punctual);
+            constexpr auto opts = fastgltf::Options::DontRequireValidAssetMember
+                | fastgltf::Options::AllowDouble
+                | fastgltf::Options::LoadGLBBuffers
+                | fastgltf::Options::LoadExternalBuffers;
+
+            fastgltf::GltfDataBuffer data;
+            if (!data.loadFromFile(p.string())) return -1;
+
+            auto type = fastgltf::determineGltfFileType(&data);
+
+            fastgltf::Asset asset;
+            if (type == fastgltf::GltfType::glTF) {
+                auto res = parser.loadGLTF(&data, p.parent_path(), opts);
+                if (!res) return -1;
+                asset = std::move(res.get());
+            } else {
+                auto res = parser.loadBinaryGLTF(&data, p.parent_path(), opts);
+                if (!res) return -1;
+                asset = std::move(res.get());
+            }
+
+            // Strongly prefer files that keep animation + skinning.
+            return static_cast<int>(asset.animations.size()) * 100000
+                + static_cast<int>(asset.skins.size()) * 10000
+                + static_cast<int>(asset.nodes.size()) * 100
+                + static_cast<int>(asset.meshes.size());
+        };
+
+        auto chooseBestExisting = [&]() -> bool {
+            const int glbScore = gltfScore(outGlb);
+            const int gltfScoreVal = gltfScore(outGltf);
+            if (glbScore < 0 && gltfScoreVal < 0) return false;
+            outPath = (gltfScoreVal > glbScore) ? outGltf : outGlb;
             return true;
-        }
-        if (std::filesystem::exists(outGltf) && std::filesystem::file_size(outGltf) > 0) {
-            outPath = outGltf;
+        };
+
+        if (chooseBestExisting()) {
             return true;
         }
 
         if (tryAssimpExport(absIn, outGlb, "glb2")) {
-            outPath = outGlb;
-            return true;
+            if (chooseBestExisting()) return true;
         }
         if (tryAssimpExport(absIn, outGltf, "gltf2")) {
-            outPath = outGltf;
-            return true;
+            if (chooseBestExisting()) return true;
         }
 
         return false;
@@ -666,8 +701,10 @@ bool convertModelToGltf(const std::filesystem::path& inputPath, std::filesystem:
 bool convertModelToObj(const std::filesystem::path& inputPath, std::filesystem::path& outPath) {
     try {
         const auto absIn = std::filesystem::absolute(inputPath).string();
+        constexpr uint64_t kImportCacheVersion = 2;
+        const auto writeTime = std::filesystem::last_write_time(inputPath).time_since_epoch().count();
         std::hash<std::string> h;
-        const auto hash = h(absIn);
+        const auto hash = h(absIn + "|" + std::to_string(writeTime) + "|" + std::to_string(kImportCacheVersion));
 
         auto cacheDir = std::filesystem::temp_directory_path() / "yalaz_import_cache";
         std::filesystem::create_directories(cacheDir);
@@ -1064,6 +1101,9 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
         file.samplers.push_back(newSampler);
     }
+    // NOTE: Do not push engine default sampler into file.samplers.
+    // LoadedGLTF::clearAll destroys all samplers in this vector; including a global
+    // engine sampler here would destroy shared state and corrupt subsequent renders.
     //< load_samplers
     //> load_arrays
         // temporal arrays for all the objects to use while creating the GLTF data
@@ -1199,39 +1239,56 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         materialResources.dataBuffer = file.materialDataBuffer.buffer;
         materialResources.dataBufferOffset = data_index * sizeof(GLTFMetallic_Roughness::MaterialConstants);
         // grab textures from gltf file
+        auto resolveTextureBinding = [&](size_t textureIndex, size_t& outImg, VkSampler& outSampler) -> bool {
+            if (textureIndex >= gltf.textures.size()) return false;
+            const auto& tex = gltf.textures[textureIndex];
+            if (!tex.imageIndex.has_value()) return false;
+            outImg = tex.imageIndex.value();
+            if (outImg >= images.size()) return false;
+
+            size_t samplerIndex = 0;
+            if (tex.samplerIndex.has_value() && tex.samplerIndex.value() < file.samplers.size()) {
+                samplerIndex = tex.samplerIndex.value();
+            }
+            outSampler = file.samplers[samplerIndex];
+            return true;
+        };
+
         // Load base color (albedo) texture
         if (mat.pbrData.baseColorTexture.has_value()) {
-            size_t img = gltf.textures[mat.pbrData.baseColorTexture.value().textureIndex].imageIndex.value();
-            size_t sampler = gltf.textures[mat.pbrData.baseColorTexture.value().textureIndex].samplerIndex.value();
+            size_t img = 0;
+            VkSampler sampler = engine->_defaultSamplerLinear;
+            if (resolveTextureBinding(mat.pbrData.baseColorTexture.value().textureIndex, img, sampler)) {
+                materialResources.colorImage = images[img];
+                materialResources.colorSampler = sampler;
 
-            materialResources.colorImage = images[img];
-            materialResources.colorSampler = file.samplers[sampler];
-
-            // Add to bindless texture cache so the shader can sample it
-            auto& colorImg = images[img];
-            if (colorImg.image != VK_NULL_HANDLE && colorImg.image != engine->_whiteImage.image) {
-                TextureID colorTexID = engine->texCache.AddTexture(
-                    colorImg.imageView, file.samplers[sampler],
-                    std::string("color_") + std::to_string(data_index));
-                constants.colorTexID = colorTexID.Index;
+                // Add to bindless texture cache so the shader can sample it
+                auto& colorImg = images[img];
+                if (colorImg.image != VK_NULL_HANDLE && colorImg.image != engine->_whiteImage.image) {
+                    TextureID colorTexID = engine->texCache.AddTexture(
+                        colorImg.imageView, sampler,
+                        std::string("color_") + std::to_string(data_index));
+                    constants.colorTexID = colorTexID.Index;
+                }
             }
         }
 
         // Load metallic-roughness texture
         if (mat.pbrData.metallicRoughnessTexture.has_value()) {
-            size_t img = gltf.textures[mat.pbrData.metallicRoughnessTexture.value().textureIndex].imageIndex.value();
-            size_t sampler = gltf.textures[mat.pbrData.metallicRoughnessTexture.value().textureIndex].samplerIndex.value();
+            size_t img = 0;
+            VkSampler sampler = engine->_defaultSamplerLinear;
+            if (resolveTextureBinding(mat.pbrData.metallicRoughnessTexture.value().textureIndex, img, sampler)) {
+                materialResources.metalRoughImage = images[img];
+                materialResources.metalRoughSampler = sampler;
 
-            materialResources.metalRoughImage = images[img];
-            materialResources.metalRoughSampler = file.samplers[sampler];
-
-            // Add to bindless texture cache for shader sampling
-            auto& mrImg = images[img];
-            if (mrImg.image != VK_NULL_HANDLE && mrImg.image != engine->_whiteImage.image) {
-                TextureID mrTexID = engine->texCache.AddTexture(
-                    mrImg.imageView, file.samplers[sampler],
-                    std::string("metalrough_") + std::to_string(data_index));
-                constants.metalRoughTexID = mrTexID.Index;
+                // Add to bindless texture cache for shader sampling
+                auto& mrImg = images[img];
+                if (mrImg.image != VK_NULL_HANDLE && mrImg.image != engine->_whiteImage.image) {
+                    TextureID mrTexID = engine->texCache.AddTexture(
+                        mrImg.imageView, sampler,
+                        std::string("metalrough_") + std::to_string(data_index));
+                    constants.metalRoughTexID = mrTexID.Index;
+                }
             }
         }
 
@@ -1253,32 +1310,38 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
         // Load normal map texture
         if (mat.normalTexture.has_value()) {
-            size_t img = gltf.textures[mat.normalTexture.value().textureIndex].imageIndex.value();
-            // Store normal texture in the texture cache and set the ID
-            auto& normalImage = images[img];
-            if (normalImage.image != VK_NULL_HANDLE && normalImage.image != engine->_whiteImage.image &&
-                normalImage.image != engine->_errorCheckerboardImage.image) {
-                TextureID normalTexID = engine->texCache.AddTexture(
-                    normalImage.imageView, engine->_defaultSamplerLinear,
-                    std::string("normal_") + std::to_string(data_index));
-                constants.normalTexID = normalTexID.Index;
-                constants.metal_rough_factors.w = mat.normalTexture.value().scale; // normal strength
+            size_t img = 0;
+            VkSampler ignoredSampler = engine->_defaultSamplerLinear;
+            if (resolveTextureBinding(mat.normalTexture.value().textureIndex, img, ignoredSampler)) {
+                // Store normal texture in the texture cache and set the ID
+                auto& normalImage = images[img];
+                if (normalImage.image != VK_NULL_HANDLE && normalImage.image != engine->_whiteImage.image &&
+                    normalImage.image != engine->_errorCheckerboardImage.image) {
+                    TextureID normalTexID = engine->texCache.AddTexture(
+                        normalImage.imageView, engine->_defaultSamplerLinear,
+                        std::string("normal_") + std::to_string(data_index));
+                    constants.normalTexID = normalTexID.Index;
+                    constants.metal_rough_factors.w = mat.normalTexture.value().scale; // normal strength
+                }
             }
         }
 
         // Load emissive texture
         if (mat.emissiveTexture.has_value()) {
-            size_t img = gltf.textures[mat.emissiveTexture.value().textureIndex].imageIndex.value();
-            auto& emissiveImage = images[img];
-            if (emissiveImage.image != VK_NULL_HANDLE && emissiveImage.image != engine->_whiteImage.image &&
-                emissiveImage.image != engine->_errorCheckerboardImage.image) {
-                TextureID emissiveTexID = engine->texCache.AddTexture(
-                    emissiveImage.imageView, engine->_defaultSamplerLinear,
-                    std::string("emissive_") + std::to_string(data_index));
-                constants.emissiveTexID = emissiveTexID.Index;
-                // If no emissive factor was set, default to white so the texture shows
-                if (!hasEmissive) {
-                    constants.extra[0] = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+            size_t img = 0;
+            VkSampler ignoredSampler = engine->_defaultSamplerLinear;
+            if (resolveTextureBinding(mat.emissiveTexture.value().textureIndex, img, ignoredSampler)) {
+                auto& emissiveImage = images[img];
+                if (emissiveImage.image != VK_NULL_HANDLE && emissiveImage.image != engine->_whiteImage.image &&
+                    emissiveImage.image != engine->_errorCheckerboardImage.image) {
+                    TextureID emissiveTexID = engine->texCache.AddTexture(
+                        emissiveImage.imageView, engine->_defaultSamplerLinear,
+                        std::string("emissive_") + std::to_string(data_index));
+                    constants.emissiveTexID = emissiveTexID.Index;
+                    // If no emissive factor was set, default to white so the texture shows
+                    if (!hasEmissive) {
+                        constants.extra[0] = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    }
                 }
             }
         }
@@ -1507,16 +1570,10 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         file.nodes[nodeName] = newNode;
 
         std::visit(fastgltf::visitor{ [&](fastgltf::Node::TransformMatrix matrix) {
+                                          // Keep authoring matrix as-is. Decomposing and rebuilding TRS here can
+                                          // break FBX/DAE converted rigs that rely on matrix-space bind/orient data.
                                           memcpy(&newNode->localTransform, matrix.data(), sizeof(matrix));
-                                          glm::vec3 scale, translation, skew;
-                                          glm::vec4 perspective;
-                                          glm::quat rotation;
-                                          if (glm::decompose(newNode->localTransform, scale, rotation, translation, skew, perspective)) {
-                                              newNode->localTranslation = translation;
-                                              newNode->localRotation = rotation;
-                                              newNode->localScale = scale;
-                                              newNode->hasLocalTRS = true;
-                                          }
+                                          newNode->hasLocalTRS = false;
                                       },
                        [&](fastgltf::Node::TRS transform) {
                            glm::vec3 tl(transform.translation[0], transform.translation[1],
@@ -1619,6 +1676,59 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             skinToSkeletonIndex[skinIdx] = static_cast<int>(engine->skeletons.size()) - 1;
             if (engine->activeSkeletonIndex < 0) {
                 engine->activeSkeletonIndex = skinToSkeletonIndex[skinIdx];
+            }
+        }
+    }
+
+    // Find the mesh node that references each skin and store its world transform.
+    // FBX-converted GLTF files have vertex data in FBX space (e.g. Z-up) and a root
+    // rotation node for axis conversion. The skinning equation (jointWorld * IBM)
+    // cancels out at bind pose, leaving vertices untransformed. We need the mesh
+    // node's world transform applied to vertices so the axis conversion takes effect.
+    // Store it in meshBindTransform; it's included in the skinning matrix later.
+    for (size_t nodeIdx = 0; nodeIdx < gltf.nodes.size(); ++nodeIdx) {
+        const auto& gltfNode = gltf.nodes[nodeIdx];
+        if (gltfNode.skinIndex.has_value() && gltfNode.meshIndex.has_value()) {
+            size_t skinIdx = gltfNode.skinIndex.value();
+            if (skinIdx < skinToSkeletonIndex.size()) {
+                int skelIdx = skinToSkeletonIndex[skinIdx];
+                if (skelIdx >= 0 && skelIdx < static_cast<int>(engine->skeletons.size())) {
+                    auto& skel = engine->skeletons[skelIdx];
+                    if (nodeIdx < nodes.size() && nodes[nodeIdx]) {
+                        skel.meshBindTransform = nodes[nodeIdx]->worldTransform;
+                    }
+                }
+            }
+        }
+    }
+
+    // Force TRS decomposition for all skeleton joint nodes.
+    // FBX/DAE-converted GLTF files may store bone transforms as matrices instead
+    // of TRS. The animation system operates on TRS, so lazy decomposition during
+    // playback via glm::decompose can produce flipped quaternions / wrong scale.
+    // Decompose eagerly here with negative-determinant handling.
+    for (int skelIdx : skinToSkeletonIndex) {
+        if (skelIdx < 0 || skelIdx >= static_cast<int>(engine->skeletons.size())) continue;
+        const auto& skel = engine->skeletons[skelIdx];
+        for (const auto& bone : skel.bones) {
+            if (bone.nodeIndex < 0 || bone.nodeIndex >= static_cast<int>(nodes.size())) continue;
+            auto& node = nodes[bone.nodeIndex];
+            if (node && !node->hasLocalTRS) {
+                glm::vec3 scale, translation, skew;
+                glm::vec4 perspective;
+                glm::quat rotation;
+                if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                    // Negative determinant means a reflection; absorb it into the quaternion
+                    if (glm::determinant(glm::mat3(node->localTransform)) < 0.0f) {
+                        scale = -scale;
+                        rotation = glm::conjugate(rotation);
+                    }
+                    node->localTranslation = translation;
+                    node->localRotation = glm::normalize(rotation);
+                    node->localScale = scale;
+                    node->hasLocalTRS = true;
+                    node->rebuildLocalTransformFromTRS();
+                }
             }
         }
     }
@@ -1759,6 +1869,32 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                 engine->animationClips.push_back(clip);
                 if (engine->activeAnimationIndex < 0) {
                     engine->activeAnimationIndex = static_cast<int>(engine->animationClips.size()) - 1;
+                }
+            }
+        }
+    }
+
+    // Force TRS decomposition for any node targeted by an animation track
+    // that still only has a matrix transform.
+    for (const auto& clip : engine->animationClips) {
+        if (clip.sourceScene != path.string()) continue;
+        for (const auto& track : clip.tracks) {
+            if (track.targetNodeIndex < 0 || track.targetNodeIndex >= static_cast<int>(nodes.size())) continue;
+            auto& node = nodes[track.targetNodeIndex];
+            if (node && !node->hasLocalTRS) {
+                glm::vec3 scale, translation, skew;
+                glm::vec4 perspective;
+                glm::quat rotation;
+                if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                    if (glm::determinant(glm::mat3(node->localTransform)) < 0.0f) {
+                        scale = -scale;
+                        rotation = glm::conjugate(rotation);
+                    }
+                    node->localTranslation = translation;
+                    node->localRotation = glm::normalize(rotation);
+                    node->localScale = scale;
+                    node->hasLocalTRS = true;
+                    node->rebuildLocalTransformFromTRS();
                 }
             }
         }
@@ -2297,9 +2433,43 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadSceneAsset(VulkanEngine* engine, 
     if (ext == ".fbx" || ext == ".dae") {
         std::filesystem::path convertedPath;
         if (convertModelToGltf(p, convertedPath)) {
-            return loadGltf(engine, convertedPath.string());
+            const size_t clipCountBefore = engine->animationClips.size();
+            const size_t skeletonCountBefore = engine->skeletons.size();
+
+            auto loaded = loadGltf(engine, convertedPath.string());
+            if (loaded.has_value()) {
+                // FBX/DAE is converted into temp GLTF/GLB files, but runtime scene identity
+                // is tracked by the original source path. Remap imported animation/skeleton
+                // source path to the original file so animation-node matching works.
+                const std::string originalSource = std::filesystem::absolute(p).string();
+                for (size_t i = clipCountBefore; i < engine->animationClips.size(); ++i) {
+                    engine->animationClips[i].sourceScene = originalSource;
+                    for (auto& tr : engine->animationClips[i].tracks) {
+                        tr.sourceScene = originalSource;
+                    }
+                }
+                for (size_t i = skeletonCountBefore; i < engine->skeletons.size(); ++i) {
+                    engine->skeletons[i].sourceScene = originalSource;
+                }
+
+                const size_t newClips = engine->animationClips.size() - clipCountBefore;
+                const size_t newSkels = engine->skeletons.size() - skeletonCountBefore;
+                if (newClips > 0 || newSkels > 0) {
+                    fmt::print("[Import] {} -> GLTF: {} animation(s), {} skeleton(s)\n",
+                        p.filename().string(), newClips, newSkels);
+                } else {
+                    Yalaz::UI::Console::Warn(
+                        ext + " conversion for '" + p.filename().string() +
+                        "' produced no animation/skeleton data. "
+                        "If the file contains animations, try converting to GLTF/GLB with Blender or another tool.");
+                }
+            }
+            return loaded;
         }
         if (convertModelToObj(p, convertedPath)) {
+            Yalaz::UI::Console::Warn(
+                "FBX/DAE -> OBJ fallback used for: " + path +
+                ". OBJ does not preserve skeletal animation; import as GLTF/GLB for animation.");
             // OBJ fallback does not carry skeleton/animation data.
             // Remove any stale animation/skeleton entries for this source scene to prevent
             // mismatched clips from driving unrelated nodes with the same filename.
