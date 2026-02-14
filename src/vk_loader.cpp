@@ -501,6 +501,7 @@
 #include <limits>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -1680,24 +1681,75 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
     }
 
-    // Find the mesh node that references each skin and store its world transform.
-    // FBX-converted GLTF files have vertex data in FBX space (e.g. Z-up) and a root
-    // rotation node for axis conversion. The skinning equation (jointWorld * IBM)
-    // cancels out at bind pose, leaving vertices untransformed. We need the mesh
-    // node's world transform applied to vertices so the axis conversion takes effect.
-    // Store it in meshBindTransform; it's included in the skinning matrix later.
-    for (size_t nodeIdx = 0; nodeIdx < gltf.nodes.size(); ++nodeIdx) {
-        const auto& gltfNode = gltf.nodes[nodeIdx];
-        if (gltfNode.skinIndex.has_value() && gltfNode.meshIndex.has_value()) {
-            size_t skinIdx = gltfNode.skinIndex.value();
-            if (skinIdx < skinToSkeletonIndex.size()) {
-                int skelIdx = skinToSkeletonIndex[skinIdx];
-                if (skelIdx >= 0 && skelIdx < static_cast<int>(engine->skeletons.size())) {
-                    auto& skel = engine->skeletons[skelIdx];
-                    if (nodeIdx < nodes.size() && nodes[nodeIdx]) {
-                        skel.meshBindTransform = nodes[nodeIdx]->worldTransform;
+    // Compute meshBindTransform for each skeleton.
+    // FBX-converted GLTF files keep vertex data in FBX space (e.g. Z-up) and add a
+    // root rotation node for axis conversion. The skinning equation (jointWorld * IBM)
+    // cancels to identity at bind pose, leaving vertices un-rotated (character lays
+    // down). meshBindTransform captures the axis-conversion transform so that it's
+    // applied to vertices through the skinning matrix.
+    //
+    // Strategy: Try to find the node with both mesh+skin first. If that fails,
+    // walk up from the skeleton root to the scene root, collecting the transforms
+    // of all non-skeleton ancestor nodes. This gives us the axis conversion.
+    {
+        // Build set of skeleton joint node indices per skin for fast lookup.
+        std::vector<std::unordered_set<int>> skinJointNodes(gltf.skins.size());
+        for (size_t skinIdx = 0; skinIdx < gltf.skins.size(); ++skinIdx) {
+            for (auto j : gltf.skins[skinIdx].joints) {
+                skinJointNodes[skinIdx].insert(static_cast<int>(j));
+            }
+        }
+
+        // Method 1: Find node with both meshIndex + skinIndex.
+        for (size_t nodeIdx = 0; nodeIdx < gltf.nodes.size(); ++nodeIdx) {
+            const auto& gltfNode = gltf.nodes[nodeIdx];
+            if (gltfNode.skinIndex.has_value() && gltfNode.meshIndex.has_value()) {
+                size_t skinIdx = gltfNode.skinIndex.value();
+                if (skinIdx < skinToSkeletonIndex.size()) {
+                    int skelIdx = skinToSkeletonIndex[skinIdx];
+                    if (skelIdx >= 0 && skelIdx < static_cast<int>(engine->skeletons.size())) {
+                        auto& skel = engine->skeletons[skelIdx];
+                        if (nodeIdx < nodes.size() && nodes[nodeIdx]) {
+                            skel.meshBindTransform = nodes[nodeIdx]->worldTransform;
+                            fmt::print("  [Skin] meshBindTransform from mesh+skin node {} ('{}')\n",
+                                nodeIdx, nodeNames[nodeIdx]);
+                        }
                     }
                 }
+            }
+        }
+
+        // Method 2 (fallback): walk up from skeleton root to scene root.
+        // Collect the world transform of the nearest non-skeleton ancestor.
+        for (size_t skinIdx = 0; skinIdx < gltf.skins.size(); ++skinIdx) {
+            int skelIdx = (skinIdx < skinToSkeletonIndex.size()) ? skinToSkeletonIndex[skinIdx] : -1;
+            if (skelIdx < 0 || skelIdx >= static_cast<int>(engine->skeletons.size())) continue;
+            auto& skel = engine->skeletons[skelIdx];
+
+            // Skip if already set by method 1 (non-identity).
+            if (skel.meshBindTransform != glm::mat4(1.0f)) continue;
+
+            // Find the first joint and walk up to the first non-skeleton parent.
+            if (gltf.skins[skinIdx].joints.empty()) continue;
+            int startNode = static_cast<int>(gltf.skins[skinIdx].joints[0]);
+
+            // Walk up to skeleton root first (a joint whose parent is not a joint).
+            int current = startNode;
+            while (current >= 0 && current < static_cast<int>(parentIndices.size())) {
+                int parent = parentIndices[current];
+                if (parent < 0) break;
+                if (skinJointNodes[skinIdx].find(parent) == skinJointNodes[skinIdx].end()) break;
+                current = parent;
+            }
+            // 'current' is now the skeleton root joint.
+            // Its parent (if any) is a non-skeleton node whose worldTransform
+            // contains the axis conversion.
+            int skelRootParent = (current >= 0 && current < static_cast<int>(parentIndices.size()))
+                ? parentIndices[current] : -1;
+            if (skelRootParent >= 0 && skelRootParent < static_cast<int>(nodes.size()) && nodes[skelRootParent]) {
+                skel.meshBindTransform = nodes[skelRootParent]->worldTransform;
+                fmt::print("  [Skin] meshBindTransform from skeleton parent node {} ('{}')\n",
+                    skelRootParent, nodeNames[skelRootParent]);
             }
         }
     }
@@ -1731,6 +1783,23 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                 }
             }
         }
+    }
+
+    // Bake meshBindTransform into the inverse bind matrices.
+    // For FBX-converted files, meshBindTransform = axis conversion rotation R.
+    // IBM_new = IBM * R  makes the skinning equation produce:
+    //   bind pose:  jointWorld * IBM * R * pos = identity * R * pos = R * pos  (standing)
+    //   animated:   jointWorld * IBM * R * pos = R * Janim * Jbind^-1 * pos   (correct)
+    // For native GLTF files, R = identity, so this is a no-op.
+    for (int skelIdx : skinToSkeletonIndex) {
+        if (skelIdx < 0 || skelIdx >= static_cast<int>(engine->skeletons.size())) continue;
+        auto& skel = engine->skeletons[skelIdx];
+        if (skel.meshBindTransform == glm::mat4(1.0f)) continue; // identity, skip
+        for (auto& bone : skel.bones) {
+            bone.inverseBindMatrix = bone.inverseBindMatrix * skel.meshBindTransform;
+        }
+        fmt::print("  [Skin] Baked axis conversion into {} IBMs for skeleton '{}'\n",
+            skel.bones.size(), skel.name);
     }
     //< load_skins
 

@@ -2455,9 +2455,35 @@ void VulkanEngine::init_outline_wireframe_pipeline()
 void VulkanEngine::draw_wireframe_outline(VkCommandBuffer cmd, const RenderObject& obj, VkDescriptorSet descriptor, VkViewport viewport, VkRect2D scissor)
 {
     if (obj.indexBuffer == VK_NULL_HANDLE || obj.vertexBuffer == VK_NULL_HANDLE)
-        return;  //  Mesh yoksa çizim yapma
+        return;
 
-    // Validate outline pipeline before use
+    // For skinned meshes, use the skinned wireframe pipeline so the outline
+    // follows bone deformation and axis conversion instead of showing raw FBX vertices.
+    if (obj.isSkinned && obj.skinBufferAddress != 0 && skinningMatrixBufferAddress != 0 &&
+        _wireframeSkinnedPipeline != VK_NULL_HANDLE) {
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframeSkinnedPipeline);
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            _wireframeSkinnedPipelineLayout, 0, 1, &descriptor, 0, nullptr);
+
+        GPUSkinnedDrawPushConstants push{};
+        push.worldMatrix = obj.transform;
+        push.vertexBuffer = obj.vertexBufferAddress;
+        push.skinBuffer = obj.skinBufferAddress;
+        push.boneBuffer = skinningMatrixBufferAddress;
+        vkCmdPushConstants(cmd, _wireframeSkinnedPipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT, 0,
+            sizeof(GPUSkinnedDrawPushConstants), &push);
+
+        vkCmdBindIndexBuffer(cmd, obj.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, obj.indexCount, 1, obj.firstIndex, 0, 0);
+        return;
+    }
+
+    // Non-skinned outline
     if (_wireframeOutlinePipeline == VK_NULL_HANDLE) {
         return;
     }
@@ -2863,29 +2889,57 @@ void VulkanEngine::draw_wireframe(VkCommandBuffer cmd, VkDescriptorSet globalDes
         return;
     }
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframePipeline);
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    VkPipeline lastPipeline = VK_NULL_HANDLE;
 
     for (auto& idx : opaque_draws) {
         const RenderObject& r = drawCommands.OpaqueSurfaces[idx];
         if (!r.material || r.material->materialSet == VK_NULL_HANDLE)
             continue;
 
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframePipelineLayout,
-            0, 1, &globalDescriptor, 0, nullptr);
+        // Use skinned wireframe pipeline for skinned meshes
+        if (r.isSkinned && r.skinBufferAddress != 0 && skinningMatrixBufferAddress != 0 &&
+            _wireframeSkinnedPipeline != VK_NULL_HANDLE) {
 
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframePipelineLayout,
-            1, 1, &r.material->materialSet, 0, nullptr);
+            if (lastPipeline != _wireframeSkinnedPipeline) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframeSkinnedPipeline);
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
+                lastPipeline = _wireframeSkinnedPipeline;
+            }
 
-        vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframeSkinnedPipelineLayout,
+                0, 1, &globalDescriptor, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframeSkinnedPipelineLayout,
+                1, 1, &r.material->materialSet, 0, nullptr);
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        GPUDrawPushConstants push{};
-        push.worldMatrix = r.transform;
-        push.vertexBuffer = r.vertexBufferAddress;
+            GPUSkinnedDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
+            push.skinBuffer = r.skinBufferAddress;
+            push.boneBuffer = skinningMatrixBufferAddress;
+            vkCmdPushConstants(cmd, _wireframeSkinnedPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUSkinnedDrawPushConstants), &push);
+        } else {
+            if (lastPipeline != _wireframePipeline) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframePipeline);
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
+                lastPipeline = _wireframePipeline;
+            }
 
-        vkCmdPushConstants(cmd, _wireframePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-            sizeof(GPUDrawPushConstants), &push);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframePipelineLayout,
+                0, 1, &globalDescriptor, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _wireframePipelineLayout,
+                1, 1, &r.material->materialSet, 0, nullptr);
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+            GPUDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
+            vkCmdPushConstants(cmd, _wireframePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUDrawPushConstants), &push);
+        }
 
         vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
     }
@@ -6736,6 +6790,53 @@ void VulkanEngine::init_wireframe_pipeline() {
 
     vkDestroyShaderModule(_device, vertShader, nullptr);
     vkDestroyShaderModule(_device, fragShader, nullptr);
+
+    // Skinned wireframe pipeline: same as wireframe but uses mesh_skinned.vert
+    VkShaderModule skinnedVertShader = VK_NULL_HANDLE;
+    VkShaderModule skinnedFragShader = VK_NULL_HANDLE;
+    if (vkutil::load_shader_module("../../shaders/mesh_skinned.vert.spv", _device, &skinnedVertShader) &&
+        vkutil::load_shader_module("../../shaders/mesh.frag.spv", _device, &skinnedFragShader)) {
+
+        VkPushConstantRange skinnedPush{};
+        skinnedPush.offset = 0;
+        skinnedPush.size = sizeof(GPUSkinnedDrawPushConstants);
+        skinnedPush.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayout skinnedLayouts[] = {
+            _gpuSceneDataDescriptorLayout,
+            metalRoughMaterial.materialLayout
+        };
+
+        VkPipelineLayoutCreateInfo skinnedLayoutInfo = vkinit::pipeline_layout_create_info();
+        skinnedLayoutInfo.setLayoutCount = 2;
+        skinnedLayoutInfo.pSetLayouts = skinnedLayouts;
+        skinnedLayoutInfo.pushConstantRangeCount = 1;
+        skinnedLayoutInfo.pPushConstantRanges = &skinnedPush;
+
+        VK_CHECK(vkCreatePipelineLayout(_device, &skinnedLayoutInfo, nullptr, &_wireframeSkinnedPipelineLayout));
+
+        PipelineBuilder skinnedBuilder;
+        skinnedBuilder._pipelineLayout = _wireframeSkinnedPipelineLayout;
+        skinnedBuilder.set_shaders(skinnedVertShader, skinnedFragShader);
+        skinnedBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        skinnedBuilder.set_polygon_mode(VK_POLYGON_MODE_LINE);
+        skinnedBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+        skinnedBuilder.set_multisampling_none();
+        skinnedBuilder.disable_blending();
+        skinnedBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+        skinnedBuilder.set_color_attachment_format(_drawImage.imageFormat);
+        skinnedBuilder.set_depth_format(_depthImage.imageFormat);
+
+        skinnedBuilder._renderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+        skinnedBuilder._renderInfo.colorAttachmentCount = 1;
+        skinnedBuilder._renderInfo.pColorAttachmentFormats = &skinnedBuilder._colorAttachmentformat;
+        skinnedBuilder._renderInfo.depthAttachmentFormat = _depthImage.imageFormat;
+
+        _wireframeSkinnedPipeline = skinnedBuilder.build_pipeline(_device);
+
+        vkDestroyShaderModule(_device, skinnedVertShader, nullptr);
+        vkDestroyShaderModule(_device, skinnedFragShader, nullptr);
+    }
 }
 
 VertexInputDescription Vertex::get_vertex_description() {
@@ -8585,15 +8686,11 @@ void VulkanEngine::updateAnimations(float deltaTime) {
             if (!boneNode) continue;
 
             const glm::mat4 jointWorld = boneNode->worldTransform;
-            // glTF skinning: jointMatrix = jointGlobalTransform * inverseBindMatrix * meshBindTransform
-            // meshBindTransform is the mesh node's world transform at bind time.
-            // For FBX-converted files this contains the axis-conversion root rotation
-            // (e.g. -90° X for Z-up→Y-up). Without it, bind pose = identity, so vertices
-            // in FBX space remain un-rotated (character lays down).
-            // For native GLTF files meshBindTransform = identity (no effect).
-            // render_matrix is identity for skinned meshes (set in MeshNode::Draw),
-            // so this is the only place the mesh transform enters the pipeline.
-            skinningMatrices[boneIdx] = jointWorld * bone.inverseBindMatrix * skel.meshBindTransform;
+            // glTF skinning: jointMatrix = jointGlobalTransform * inverseBindMatrix
+            // The IBM is pre-multiplied by meshBindTransform at load time (see loadGltf)
+            // so that the axis conversion (FBX Z-up → Y-up) is baked in once.
+            // render_matrix is identity for skinned meshes (set in MeshNode::Draw).
+            skinningMatrices[boneIdx] = jointWorld * bone.inverseBindMatrix;
         }
 
         if (skinningMatrixBuffer.buffer == VK_NULL_HANDLE) {
@@ -8956,6 +9053,8 @@ void VulkanEngine::cleanup_reloadable_pipelines() {
     destroyLayout(_wireframeOutlinePipelineLayout);
     destroyPipeline(_wireframePipeline);
     destroyLayout(_wireframePipelineLayout);
+    destroyPipeline(_wireframeSkinnedPipeline);
+    destroyLayout(_wireframeSkinnedPipelineLayout);
     destroyPipeline(_solidPipeline);
     destroyLayout(_solidPipelineLayout);
     destroyPipeline(_shadedPipeline);

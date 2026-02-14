@@ -485,6 +485,8 @@ public:
     GridSettings _gridSettings;  // Dynamic grid configuration
     VkPipeline _wireframePipeline = VK_NULL_HANDLE;
     VkPipelineLayout _wireframePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline _wireframeSkinnedPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout _wireframeSkinnedPipelineLayout = VK_NULL_HANDLE;
     void init_wireframe_pipeline();
 
     // View mode pipelines
