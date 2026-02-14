@@ -2,8 +2,6 @@ cmake_minimum_required(VERSION 3.15)
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
-# All targets created here go under "third_party" folder in IDE
-set(CMAKE_FOLDER "third_party")
 
 # Vulkan should already be found in the parent CMakeLists.txt
 # Only search if Vulkan::Vulkan target doesn't exist
@@ -31,7 +29,7 @@ endif()
 
 if (_FASTGLTF_VENDOR_OK)
     message(STATUS "Using vendored fastgltf")
-    add_subdirectory(fastgltf)
+    add_subdirectory(fastgltf EXCLUDE_FROM_ALL)
 else()
     message(STATUS "Vendored fastgltf broken. Fetching from GitHub...")
     FetchContent_Declare(fastgltf

@@ -15,9 +15,6 @@ project(Yalaz_Engine
 
 cmake_policy(SET CMP0079 NEW)
 
-# Group targets into folders in IDE (hides third_party from top-level)
-set_property(GLOBAL PROPERTY USE_FOLDERS ON)
-set(CMAKE_FOLDER "third_party")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -196,10 +193,13 @@ endforeach()
 # =============================================================
 # SUBDIRECTORIES
 # =============================================================
-set(CMAKE_FOLDER "third_party")
-add_subdirectory(third_party)
-set(CMAKE_FOLDER "")
+# EXCLUDE_FROM_ALL hides all third_party targets from the default build target list.
+# They are still built when Yalaz_Engine needs them (as link dependencies).
+add_subdirectory(third_party EXCLUDE_FROM_ALL)
 add_subdirectory(src)
+
+# Set Yalaz_Engine as the default startup project (Visual Studio)
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Yalaz_Engine)
 
 # =============================================================
 # SHADER COMPILATION
@@ -257,8 +257,8 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
     list(APPEND SPIRV_BINARY_FILES "${SPIRV}")
 endforeach()
 
-add_custom_target(Shaders ALL DEPENDS ${SPIRV_BINARY_FILES})
-add_dependencies(Yalaz_Engine Shaders)
+# Shaders are built as part of Yalaz_Engine (no separate target in IDE)
+target_sources(Yalaz_Engine PRIVATE ${SPIRV_BINARY_FILES})
 
 # =============================================================
 # INSTALL RULES FOR RELEASE PACKAGING
@@ -325,171 +325,158 @@ if(YALAZ_INCLUDE_ASSETS AND EXISTS "${PROJECT_SOURCE_DIR}/assets")
 endif()
 
 # =============================================================
-# RELEASE FOLDER TARGET
+# RELEASE FOLDER TARGET (only created with -DYALAZ_BUILD_RELEASE_TARGETS=ON)
+# Run: cmake -B build -DYALAZ_BUILD_RELEASE_TARGETS=ON
+#      cmake --build build -t release
 # =============================================================
-# Creates a ready-to-distribute release folder
+option(YALAZ_BUILD_RELEASE_TARGETS "Create release packaging targets" OFF)
 
-set(RELEASE_DIR "${PROJECT_SOURCE_DIR}/release")
+if(YALAZ_BUILD_RELEASE_TARGETS)
+    set(RELEASE_DIR "${PROJECT_SOURCE_DIR}/release")
 
-# Custom target to create release folder
-add_custom_target(create_release
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}/bin"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}/shaders"
-    COMMENT "Creating release directory structure..."
-)
+    add_custom_target(create_release
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}/bin"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}/shaders"
+        COMMENT "Creating release directory structure..."
+    )
 
-# Copy executable to release folder
-add_custom_target(release_executable
-    DEPENDS Yalaz_Engine create_release
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:Yalaz_Engine>
-        "${RELEASE_DIR}/bin/"
-    COMMENT "Copying executable to release folder..."
-)
-
-# Copy SDL2 to release folder
-add_custom_target(release_sdl2
-    DEPENDS Yalaz_Engine create_release
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:SDL2::SDL2>
-        "${RELEASE_DIR}/bin/"
-    COMMENT "Copying SDL2 to release folder..."
-)
-
-# Copy only compiled shaders (.spv) to release folder
-add_custom_target(release_shaders
-    DEPENDS Shaders create_release
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}/shaders"
-    COMMAND ${CMAKE_COMMAND}
-        -DSOURCE_DIR="${PROJECT_SOURCE_DIR}/shaders"
-        -DDEST_DIR="${RELEASE_DIR}/shaders"
-        -P "${PROJECT_SOURCE_DIR}/cmake/CopyShaders.cmake"
-    COMMENT "Copying compiled shaders to release folder..."
-)
-
-# Platform-specific release dependencies
-if(APPLE)
-    # Copy MoltenVK/Vulkan libraries for macOS
-    add_custom_target(release_vulkan
-        DEPENDS create_release
+    add_custom_target(release_executable
+        DEPENDS Yalaz_Engine create_release
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${VULKAN_SDK_PATH}/lib/libMoltenVK.dylib"
+            $<TARGET_FILE:Yalaz_Engine>
             "${RELEASE_DIR}/bin/"
+        COMMENT "Copying executable to release folder..."
+    )
+
+    add_custom_target(release_sdl2
+        DEPENDS Yalaz_Engine create_release
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${VULKAN_SDK_PATH}/lib/libvulkan.1.dylib"
+            $<TARGET_FILE:SDL2::SDL2>
             "${RELEASE_DIR}/bin/"
-        COMMENT "Copying Vulkan libraries to release folder..."
+        COMMENT "Copying SDL2 to release folder..."
     )
 
-    # Create launcher script
-    add_custom_target(release_launcher
-        DEPENDS create_release
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PROJECT_SOURCE_DIR}/scripts/run-yalaz.sh"
-            "${RELEASE_DIR}/Yalaz-Engine.command"
-        COMMAND chmod +x "${RELEASE_DIR}/Yalaz-Engine.command"
-        COMMENT "Creating macOS launcher..."
+    add_custom_target(release_shaders
+        DEPENDS Yalaz_Engine create_release
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIR}/shaders"
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_DIR="${PROJECT_SOURCE_DIR}/shaders"
+            -DDEST_DIR="${RELEASE_DIR}/shaders"
+            -P "${PROJECT_SOURCE_DIR}/cmake/CopyShaders.cmake"
+        COMMENT "Copying compiled shaders to release folder..."
     )
 
-    # Fix RPATH for release executable
-    add_custom_target(release_fix_rpath
-        DEPENDS release_executable release_sdl2
-        COMMAND install_name_tool -change
-            "@rpath/$<TARGET_FILE_NAME:SDL2::SDL2>"
-            "@executable_path/$<TARGET_FILE_NAME:SDL2::SDL2>"
-            "${RELEASE_DIR}/bin/$<TARGET_FILE_NAME:Yalaz_Engine>"
-        COMMENT "Fixing RPATH for standalone distribution..."
-    )
-
-    # Create symlink for easier access
-    add_custom_target(release_symlink
-        DEPENDS release_executable
-        COMMAND ${CMAKE_COMMAND} -E create_symlink
-            "Yalaz_Engine-${YALAZ_VERSION}"
-            "${RELEASE_DIR}/bin/Yalaz_Engine"
-        COMMENT "Creating executable symlink..."
-    )
-
-    # Main release target for macOS
-    add_custom_target(release
-        DEPENDS release_executable release_sdl2 release_shaders release_vulkan release_launcher release_fix_rpath release_symlink
-        COMMENT "Release folder created at: ${RELEASE_DIR}"
-    )
-
-elseif(WIN32)
-    # Create Windows launcher
-    add_custom_target(release_launcher
-        DEPENDS create_release
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PROJECT_SOURCE_DIR}/scripts/run-yalaz.bat"
-            "${RELEASE_DIR}/Yalaz-Engine.bat"
-        COMMENT "Creating Windows launcher..."
-    )
-
-    # Copy MinGW runtime DLLs if using MinGW
-    if(MINGW)
-        get_filename_component(MINGW_BIN_PATH ${CMAKE_CXX_COMPILER} DIRECTORY)
-        add_custom_target(release_mingw_runtime
+    if(APPLE)
+        add_custom_target(release_vulkan
             DEPENDS create_release
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${MINGW_BIN_PATH}/libgcc_s_seh-1.dll"
-                "${RELEASE_DIR}/bin/" || true
+                "${VULKAN_SDK_PATH}/lib/libMoltenVK.dylib"
+                "${RELEASE_DIR}/bin/"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${MINGW_BIN_PATH}/libstdc++-6.dll"
-                "${RELEASE_DIR}/bin/" || true
+                "${VULKAN_SDK_PATH}/lib/libvulkan.1.dylib"
+                "${RELEASE_DIR}/bin/"
+            COMMENT "Copying Vulkan libraries to release folder..."
+        )
+
+        add_custom_target(release_launcher
+            DEPENDS create_release
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${MINGW_BIN_PATH}/libwinpthread-1.dll"
-                "${RELEASE_DIR}/bin/" || true
-            COMMENT "Copying MinGW runtime DLLs..."
+                "${PROJECT_SOURCE_DIR}/scripts/run-yalaz.sh"
+                "${RELEASE_DIR}/Yalaz-Engine.command"
+            COMMAND chmod +x "${RELEASE_DIR}/Yalaz-Engine.command"
+            COMMENT "Creating macOS launcher..."
+        )
+
+        add_custom_target(release_fix_rpath
+            DEPENDS release_executable release_sdl2
+            COMMAND install_name_tool -change
+                "@rpath/$<TARGET_FILE_NAME:SDL2::SDL2>"
+                "@executable_path/$<TARGET_FILE_NAME:SDL2::SDL2>"
+                "${RELEASE_DIR}/bin/$<TARGET_FILE_NAME:Yalaz_Engine>"
+            COMMENT "Fixing RPATH for standalone distribution..."
+        )
+
+        add_custom_target(release_symlink
+            DEPENDS release_executable
+            COMMAND ${CMAKE_COMMAND} -E create_symlink
+                "Yalaz_Engine-${YALAZ_VERSION}"
+                "${RELEASE_DIR}/bin/Yalaz_Engine"
+            COMMENT "Creating executable symlink..."
+        )
+
+        add_custom_target(release
+            DEPENDS release_executable release_sdl2 release_shaders release_vulkan release_launcher release_fix_rpath release_symlink
+            COMMENT "Release folder created at: ${RELEASE_DIR}"
+        )
+
+    elseif(WIN32)
+        add_custom_target(release_launcher
+            DEPENDS create_release
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PROJECT_SOURCE_DIR}/scripts/run-yalaz.bat"
+                "${RELEASE_DIR}/Yalaz-Engine.bat"
+            COMMENT "Creating Windows launcher..."
+        )
+
+        if(MINGW)
+            get_filename_component(MINGW_BIN_PATH ${CMAKE_CXX_COMPILER} DIRECTORY)
+            add_custom_target(release_mingw_runtime
+                DEPENDS create_release
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${MINGW_BIN_PATH}/libgcc_s_seh-1.dll"
+                    "${RELEASE_DIR}/bin/" || true
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${MINGW_BIN_PATH}/libstdc++-6.dll"
+                    "${RELEASE_DIR}/bin/" || true
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${MINGW_BIN_PATH}/libwinpthread-1.dll"
+                    "${RELEASE_DIR}/bin/" || true
+                COMMENT "Copying MinGW runtime DLLs..."
+            )
+        endif()
+
+        add_custom_target(release
+            DEPENDS release_executable release_sdl2 release_shaders release_launcher
+            $<$<BOOL:${MINGW}>:release_mingw_runtime>
+            COMMENT "Release folder created at: ${RELEASE_DIR}"
+        )
+
+    elseif(UNIX)
+        add_custom_target(release_launcher
+            DEPENDS create_release
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PROJECT_SOURCE_DIR}/scripts/run-yalaz.sh"
+                "${RELEASE_DIR}/yalaz-engine.sh"
+            COMMAND chmod +x "${RELEASE_DIR}/yalaz-engine.sh"
+            COMMENT "Creating Linux launcher..."
+        )
+
+        add_custom_target(release_symlink
+            DEPENDS release_executable
+            COMMAND ${CMAKE_COMMAND} -E create_symlink
+                "Yalaz_Engine-${YALAZ_VERSION}"
+                "${RELEASE_DIR}/bin/Yalaz_Engine"
+            COMMENT "Creating executable symlink..."
+        )
+
+        add_custom_target(release
+            DEPENDS release_executable release_sdl2 release_shaders release_launcher release_symlink
+            COMMENT "Release folder created at: ${RELEASE_DIR}"
         )
     endif()
 
-    # Main release target for Windows
-    add_custom_target(release
-        DEPENDS release_executable release_sdl2 release_shaders release_launcher
-        $<$<BOOL:${MINGW}>:release_mingw_runtime>
-        COMMENT "Release folder created at: ${RELEASE_DIR}"
-    )
-
-elseif(UNIX)
-    # Create Linux launcher
-    add_custom_target(release_launcher
-        DEPENDS create_release
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PROJECT_SOURCE_DIR}/scripts/run-yalaz.sh"
-            "${RELEASE_DIR}/yalaz-engine.sh"
-        COMMAND chmod +x "${RELEASE_DIR}/yalaz-engine.sh"
-        COMMENT "Creating Linux launcher..."
-    )
-
-    # Create symlink for easier access
-    add_custom_target(release_symlink
-        DEPENDS release_executable
-        COMMAND ${CMAKE_COMMAND} -E create_symlink
-            "Yalaz_Engine-${YALAZ_VERSION}"
-            "${RELEASE_DIR}/bin/Yalaz_Engine"
-        COMMENT "Creating executable symlink..."
-    )
-
-    # Main release target for Linux
-    add_custom_target(release
-        DEPENDS release_executable release_sdl2 release_shaders release_launcher release_symlink
-        COMMENT "Release folder created at: ${RELEASE_DIR}"
-    )
-endif()
-
-# Optional: Include assets in release
-if(YALAZ_INCLUDE_ASSETS AND EXISTS "${PROJECT_SOURCE_DIR}/assets")
-    add_custom_target(release_assets
-        DEPENDS create_release
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${PROJECT_SOURCE_DIR}/assets"
-            "${RELEASE_DIR}/assets"
-        COMMENT "Copying assets to release folder..."
-    )
-    add_dependencies(release release_assets)
-endif()
+    if(YALAZ_INCLUDE_ASSETS AND EXISTS "${PROJECT_SOURCE_DIR}/assets")
+        add_custom_target(release_assets
+            DEPENDS create_release
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${PROJECT_SOURCE_DIR}/assets"
+                "${RELEASE_DIR}/assets"
+            COMMENT "Copying assets to release folder..."
+        )
+        add_dependencies(release release_assets)
+    endif()
+endif() # YALAZ_BUILD_RELEASE_TARGETS
 
 # =============================================================
 # PACKAGING (CPack)

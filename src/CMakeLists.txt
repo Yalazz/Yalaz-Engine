@@ -298,8 +298,7 @@ elseif(UNIX)
     endif()
 endif()
 
-# Shader dependency
-add_dependencies(Yalaz_Engine Shaders)
+# Shader dependency (shaders are compiled via target_sources in root CMakeLists.txt)
 
 # =============================================================
 # POST-BUILD: COPY RUNTIME DEPENDENCIES
