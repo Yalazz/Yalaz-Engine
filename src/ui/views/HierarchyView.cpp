@@ -523,6 +523,15 @@ void HierarchyView::RenderSceneNodes() {
 
             ImGuiTreeNodeFlags sceneFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
             bool isSceneSelected = (m_Engine->selectedObjectName == sceneName);
+            if (!isSceneSelected && scene && m_Engine->selectedNode) {
+                for (const auto& [nodeName, node] : scene->nodes) {
+                    (void)nodeName;
+                    if (node && node.get() == m_Engine->selectedNode) {
+                        isSceneSelected = true;
+                        break;
+                    }
+                }
+            }
             if (isSceneSelected) sceneFlags |= ImGuiTreeNodeFlags_Selected;
 
             bool sceneOpen = ImGui::TreeNodeEx(sceneName.c_str(), sceneFlags);
@@ -530,36 +539,105 @@ void HierarchyView::RenderSceneNodes() {
             if (ImGui::IsItemClicked()) {
                 m_Engine->selectedObjectName = sceneName;
                 m_Engine->selectedPrimitiveIndex = -1;
+                m_Engine->selectedLightIndex = -1;
+
+                // Selecting scene/main entry should target the whole imported asset.
+                // Use first top node as representative selection for inspector/gizmo.
+                if (scene && !scene->topNodes.empty() && scene->topNodes[0]) {
+                    m_Engine->selectedNode = scene->topNodes[0].get();
+                } else {
+                    m_Engine->selectedNode = nullptr;
+                }
             }
 
             if (sceneOpen && scene) {
-                for (auto& [nodeName, node] : scene->nodes) {
-                    ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanAvailWidth;
+                if (ImGui::TreeNodeEx(("Nodes##" + sceneName).c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (auto& [nodeName, node] : scene->nodes) {
+                        ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanAvailWidth;
 
-                    bool isNodeSelected = m_Engine->selectedNode &&
-                        (m_Engine->selectedNode == node.get());
-                    if (isNodeSelected) nodeFlags |= ImGuiTreeNodeFlags_Selected;
+                        bool isNodeSelected = m_Engine->selectedNode &&
+                            (m_Engine->selectedNode == node.get());
+                        if (isNodeSelected) nodeFlags |= ImGuiTreeNodeFlags_Selected;
 
-                    bool nodeItemOpen = ImGui::TreeNodeEx(nodeName.c_str(), nodeFlags);
+                        bool nodeItemOpen = ImGui::TreeNodeEx(nodeName.c_str(), nodeFlags);
 
-                    if (ImGui::IsItemClicked()) {
-                        m_Engine->selectedNode = node.get();  // Assign any Node, not just MeshNode
-                        m_Engine->selectedObjectName = nodeName;
-                        m_Engine->selectedPrimitiveIndex = -1;
-                        m_Engine->selectedLightIndex = -1;  // Clear light selection
-                    }
-
-                    // Context menu
-                    if (node && ImGui::BeginPopupContextItem()) {
-                        if (ImGui::MenuItem("Focus Camera")) {
-                            glm::vec3 pos = glm::vec3(node->worldTransform[3]);
-                            m_Engine->mainCamera.position = pos + glm::vec3(0, 2, 5);
+                        if (ImGui::IsItemClicked()) {
+                            m_Engine->selectedNode = node.get();
+                            m_Engine->selectedObjectName = nodeName;
+                            m_Engine->selectedPrimitiveIndex = -1;
+                            m_Engine->selectedLightIndex = -1;
                         }
-                        ImGui::EndPopup();
-                    }
 
-                    if (nodeItemOpen) ImGui::TreePop();
+                        if (node && ImGui::BeginPopupContextItem()) {
+                            if (ImGui::MenuItem("Focus Camera")) {
+                                glm::vec3 pos = glm::vec3(node->worldTransform[3]);
+                                m_Engine->mainCamera.position = pos + glm::vec3(0, 2, 5);
+                            }
+                            ImGui::EndPopup();
+                        }
+
+                        if (nodeItemOpen) ImGui::TreePop();
+                    }
+                    ImGui::TreePop();
                 }
+
+                if (!scene->cameras.empty() && ImGui::TreeNodeEx(("Cameras##" + sceneName).c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (int camIdx = 0; camIdx < static_cast<int>(scene->cameras.size()); ++camIdx) {
+                        auto& cam = scene->cameras[camIdx];
+                        std::string cameraLabel = "Cam " + std::to_string(camIdx) + ": " + cam.name;
+                        bool isActive = m_Engine->useGLTFCamera &&
+                            m_Engine->currentGLTFCameraScene == sceneName &&
+                            m_Engine->currentGLTFCameraIndex == camIdx;
+
+                        ImGuiTreeNodeFlags camFlags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanAvailWidth;
+                        if (isActive) camFlags |= ImGuiTreeNodeFlags_Selected;
+
+                        bool camOpen = ImGui::TreeNodeEx(cameraLabel.c_str(), camFlags);
+                        if (ImGui::IsItemClicked()) {
+                            m_Engine->selectedPrimitiveIndex = -1;
+                            m_Engine->selectedLightIndex = -1;
+                            m_Engine->selectedNode = cam.sourceNode;
+                            m_Engine->selectedObjectName = cam.name;
+                            m_Engine->applyGLTFCamera(sceneName, camIdx);
+                        }
+                        if (camOpen) ImGui::TreePop();
+                    }
+                    ImGui::TreePop();
+                }
+
+                if (!scene->lights.empty() && ImGui::TreeNodeEx(("Lights##" + sceneName).c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (int lightIdx = 0; lightIdx < static_cast<int>(scene->lights.size()); ++lightIdx) {
+                        auto& light = scene->lights[lightIdx];
+                        std::string lightLabel = "Light " + std::to_string(lightIdx) + ": " + light.name;
+
+                        bool isSelected = false;
+                        if (light.runtimePointLightIndex >= 0) {
+                            isSelected = (m_Engine->selectedLightIndex == light.runtimePointLightIndex);
+                        } else if (light.sourceNode != nullptr) {
+                            isSelected = (m_Engine->selectedNode == light.sourceNode);
+                        }
+
+                        ImGuiTreeNodeFlags lightFlags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanAvailWidth;
+                        if (isSelected) lightFlags |= ImGuiTreeNodeFlags_Selected;
+
+                        bool lightOpen = ImGui::TreeNodeEx(lightLabel.c_str(), lightFlags);
+                        if (ImGui::IsItemClicked()) {
+                            m_Engine->selectedPrimitiveIndex = -1;
+                            m_Engine->selectedNode = light.sourceNode;
+                            m_Engine->selectedObjectName = light.name;
+
+                            if (light.runtimePointLightIndex >= 0 &&
+                                light.runtimePointLightIndex < static_cast<int>(m_Engine->scenePointLights.size())) {
+                                m_Engine->selectedLightIndex = light.runtimePointLightIndex;
+                            } else {
+                                m_Engine->selectedLightIndex = -1;
+                            }
+                        }
+                        if (lightOpen) ImGui::TreePop();
+                    }
+                    ImGui::TreePop();
+                }
+
                 ImGui::TreePop();
             }
         }

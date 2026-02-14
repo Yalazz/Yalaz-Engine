@@ -44,7 +44,7 @@ public:
 
     /**
      * @brief Load a GLTF scene
-     * @param filePath Path to .gltf or .glb file
+     * @param filePath Path to scene file (.yscene) that may reference .gltf/.glb/.obj/.fbx/.dae assets
      * @param sceneName Identifier for the scene
      * @return true if loaded successfully
      */

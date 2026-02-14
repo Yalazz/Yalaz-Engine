@@ -40,6 +40,7 @@ struct GLTFCamera {
     glm::vec3 position = glm::vec3(0.0f);
     glm::vec3 forward = glm::vec3(0.0f, 0.0f, -1.0f);
     glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+    Node* sourceNode = nullptr;  // Node that owns this camera in the loaded scene graph
 
     // Helper to get view matrix
     glm::mat4 getViewMatrix() const {
@@ -59,6 +60,18 @@ struct GLTFCamera {
     }
 };
 
+struct GLTFLight {
+    std::string name;
+    int type = 1; // 0=directional, 1=point, 2=spot
+    glm::vec3 position = glm::vec3(0.0f);
+    glm::vec3 direction = glm::vec3(0.0f, -1.0f, 0.0f);
+    glm::vec3 color = glm::vec3(1.0f);
+    float intensity = 1.0f;
+    float range = 25.0f;
+    Node* sourceNode = nullptr;
+    int runtimePointLightIndex = -1;
+};
+
 struct GeoSurface {
     uint32_t startIndex;
     uint32_t count;
@@ -70,6 +83,9 @@ struct MeshAsset {
     std::string name;
     std::vector<GeoSurface> surfaces;
     GPUMeshBuffers meshBuffers;
+    AllocatedBuffer skinBuffer;
+    VkDeviceAddress skinBufferAddress = 0;
+    bool hasSkinData = false;
 
     // CPU-side vertex data for path tracing (optional, populated on demand)
     std::vector<Vertex> cpuVertices;
@@ -84,9 +100,11 @@ struct LoadedGLTF : public IRenderable {
     std::unordered_map<std::string, std::shared_ptr<Node>> nodes;
     std::unordered_map<std::string, AllocatedImage> images;
     std::unordered_map<std::string, std::shared_ptr<GLTFMaterial>> materials;
+    std::vector<std::shared_ptr<Node>> indexedNodes; // Stable GLTF node-index to Node mapping
 
     // GLTF cameras loaded from the scene
     std::vector<GLTFCamera> cameras;
+    std::vector<GLTFLight> lights;
 
     // nodes that dont have a parent, for iterating through the file in tree order
     std::vector<std::shared_ptr<Node>> topNodes;
@@ -112,3 +130,10 @@ private:
 std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::string_view filePath);
 
 std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::string_view filePath);
+
+// Unified scene/model loader used by UI + scene restore.
+// Supports: .gltf, .glb, .obj, .fbx, .dae and .mtl (via matching .obj).
+std::optional<std::shared_ptr<LoadedGLTF>> loadSceneAsset(VulkanEngine* engine, std::string_view filePath);
+
+// Lightweight CPU thumbnail preview generator for model files.
+bool generateModelPreviewRGBA(std::string_view filePath, int maxSize, std::vector<uint8_t>& outRGBA, int& outW, int& outH);

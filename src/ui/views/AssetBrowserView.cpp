@@ -153,7 +153,7 @@ void AssetBrowserView::RenderLoadedScenes() {
     if (m_Engine->loadedScenes.empty()) {
         ImGui::TextDisabled("No scenes loaded");
         ImGui::Spacing();
-        ImGui::TextWrapped("Click on .gltf or .glb files to load scenes.");
+        ImGui::TextWrapped("Double-click model files (.gltf/.glb/.obj/.fbx/.dae/.mtl) to load scenes.");
         return;
     }
 
@@ -212,7 +212,16 @@ void AssetBrowserView::RenderLoadedScenes() {
     if (!sceneToRemove.empty()) {
         // Defer scene destruction to start of next frame (after GPU fence wait)
         // This prevents destroying resources while the current command buffer still references them
-        m_Engine->_pendingSceneUnloads.push_back(sceneToRemove);
+        bool alreadyQueued = false;
+        for (const auto& queued : m_Engine->_pendingSceneUnloads) {
+            if (queued == sceneToRemove) {
+                alreadyQueued = true;
+                break;
+            }
+        }
+        if (!alreadyQueued) {
+            m_Engine->_pendingSceneUnloads.push_back(sceneToRemove);
+        }
 
         if (m_SelectedScene == sceneToRemove) {
             m_SelectedScene.clear();
@@ -356,7 +365,7 @@ void AssetBrowserView::RenderAssetCard(const AssetEntry& asset, float size) {
     // Draw content based on type
     bool hasImageThumbnail = false;
 
-    if (asset.type == AssetType::Texture || asset.type == AssetType::HDRI) {
+    if (asset.type == AssetType::Texture || asset.type == AssetType::HDRI || asset.type == AssetType::Model) {
         // Try to show actual image thumbnail
         ThumbnailEntry* thumb = GetOrLoadThumbnail(asset);
         if (thumb && thumb->loaded && thumb->imguiDescriptor != VK_NULL_HANDLE) {
@@ -680,53 +689,61 @@ ThumbnailEntry* AssetBrowserView::GetOrLoadThumbnail(const AssetEntry& asset) {
     entry.loaded = false;
     entry.failed = false;
 
-    // Only load image thumbnails for supported formats
-    if (asset.type != AssetType::Texture && asset.type != AssetType::HDRI) {
+    // Load thumbnails for textures/hdr and model files
+    if (asset.type != AssetType::Texture && asset.type != AssetType::HDRI && asset.type != AssetType::Model) {
         entry.failed = true;
         m_ThumbnailCache[asset.path] = entry;
         return &m_ThumbnailCache[asset.path];
     }
 
-    // Load image with stb_image
-    int width, height, channels;
-    unsigned char* data = stbi_load(asset.path.c_str(), &width, &height, &channels, 4);
-    if (!data) {
-        entry.failed = true;
-        m_ThumbnailCache[asset.path] = entry;
-        return &m_ThumbnailCache[asset.path];
-    }
-
-    // Downsample to thumbnail resolution on CPU
+    int width = 0, height = 0;
+    std::vector<uint8_t> thumbData;
     int thumbW = THUMB_RES;
     int thumbH = THUMB_RES;
 
-    // Maintain aspect ratio
-    float aspect = (float)width / (float)height;
-    if (aspect > 1.0f) {
-        thumbH = std::max(1, (int)(THUMB_RES / aspect));
-    } else {
-        thumbW = std::max(1, (int)(THUMB_RES * aspect));
-    }
-
-    std::vector<uint8_t> thumbData(thumbW * thumbH * 4);
-
-    float xStep = (float)width / thumbW;
-    float yStep = (float)height / thumbH;
-
-    for (int y = 0; y < thumbH; y++) {
-        for (int x = 0; x < thumbW; x++) {
-            int srcX = std::min((int)(x * xStep), width - 1);
-            int srcY = std::min((int)(y * yStep), height - 1);
-            int srcIdx = (srcY * width + srcX) * 4;
-            int dstIdx = (y * thumbW + x) * 4;
-            thumbData[dstIdx + 0] = data[srcIdx + 0];
-            thumbData[dstIdx + 1] = data[srcIdx + 1];
-            thumbData[dstIdx + 2] = data[srcIdx + 2];
-            thumbData[dstIdx + 3] = data[srcIdx + 3];
+    if (asset.type == AssetType::Model) {
+        if (!generateModelPreviewRGBA(asset.path, THUMB_RES, thumbData, thumbW, thumbH)) {
+            entry.failed = true;
+            m_ThumbnailCache[asset.path] = entry;
+            return &m_ThumbnailCache[asset.path];
         }
-    }
+    } else {
+        // Load image with stb_image
+        int channels = 0;
+        unsigned char* data = stbi_load(asset.path.c_str(), &width, &height, &channels, 4);
+        if (!data) {
+            entry.failed = true;
+            m_ThumbnailCache[asset.path] = entry;
+            return &m_ThumbnailCache[asset.path];
+        }
 
-    stbi_image_free(data);
+        // Maintain aspect ratio
+        float aspect = (float)width / (float)height;
+        if (aspect > 1.0f) {
+            thumbH = std::max(1, (int)(THUMB_RES / aspect));
+        } else {
+            thumbW = std::max(1, (int)(THUMB_RES * aspect));
+        }
+
+        thumbData.resize(thumbW * thumbH * 4);
+
+        float xStep = (float)width / thumbW;
+        float yStep = (float)height / thumbH;
+
+        for (int y = 0; y < thumbH; y++) {
+            for (int x = 0; x < thumbW; x++) {
+                int srcX = std::min((int)(x * xStep), width - 1);
+                int srcY = std::min((int)(y * yStep), height - 1);
+                int srcIdx = (srcY * width + srcX) * 4;
+                int dstIdx = (y * thumbW + x) * 4;
+                thumbData[dstIdx + 0] = data[srcIdx + 0];
+                thumbData[dstIdx + 1] = data[srcIdx + 1];
+                thumbData[dstIdx + 2] = data[srcIdx + 2];
+                thumbData[dstIdx + 3] = data[srcIdx + 3];
+            }
+        }
+        stbi_image_free(data);
+    }
 
     // Upload to GPU
     VkExtent3D imageSize{};
@@ -800,23 +817,8 @@ void AssetBrowserView::HandleAssetClick(const AssetEntry& asset) {
     std::string ext = fs::path(asset.name).extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    if (ext == ".gltf" || ext == ".glb") {
-        auto result = loadGltf(m_Engine, asset.path);
-        if (result.has_value()) {
-            std::string sceneName = fs::path(asset.name).stem().string();
-
-            int counter = 1;
-            std::string baseName = sceneName;
-            while (m_Engine->loadedScenes.find(sceneName) != m_Engine->loadedScenes.end()) {
-                sceneName = baseName + "_" + std::to_string(counter++);
-            }
-
-            m_Engine->loadedScenes[sceneName] = result.value();
-            m_SelectedScene = sceneName;
-            m_ShowLoadedScenes = true;
-        }
-    } else if (ext == ".obj") {
-        auto result = loadObj(m_Engine, asset.path);
+    if (ext == ".gltf" || ext == ".glb" || ext == ".obj" || ext == ".fbx" || ext == ".dae" || ext == ".mtl") {
+        auto result = loadSceneAsset(m_Engine, asset.path);
         if (result.has_value()) {
             std::string sceneName = fs::path(asset.name).stem().string();
             int counter = 1;
@@ -825,6 +827,7 @@ void AssetBrowserView::HandleAssetClick(const AssetEntry& asset) {
                 sceneName = baseName + "_" + std::to_string(counter++);
             }
             m_Engine->loadedScenes[sceneName] = result.value();
+            m_Engine->sceneFilePaths[sceneName] = asset.path;
             m_SelectedScene = sceneName;
             m_ShowLoadedScenes = true;
         }
@@ -843,7 +846,7 @@ void AssetBrowserView::RenderAssetContextMenu(const AssetEntry& asset) {
         std::string ext = fs::path(asset.name).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-        if (ext == ".gltf" || ext == ".glb" || ext == ".obj") {
+        if (ext == ".gltf" || ext == ".glb" || ext == ".obj" || ext == ".fbx" || ext == ".dae" || ext == ".mtl") {
             if (ImGui::MenuItem("Load Scene")) {
                 HandleAssetClick(asset);
             }
@@ -921,7 +924,7 @@ void AssetBrowserView::RefreshDirectory() {
 }
 
 AssetType AssetBrowserView::GetAssetType(const std::string& ext) {
-    if (ext == ".gltf" || ext == ".glb" || ext == ".obj" || ext == ".fbx") {
+    if (ext == ".gltf" || ext == ".glb" || ext == ".obj" || ext == ".fbx" || ext == ".dae") {
         return AssetType::Model;
     }
     if (ext == ".hdr" || ext == ".exr") {

@@ -42,6 +42,11 @@ void LogStorage::AddLog(LogLevel level, const std::string& msg) {
     printf("%s %s %s\n", buf, prefix, msg.c_str());
 }
 
+std::vector<LogEntry> LogStorage::GetLogsSnapshot() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_Logs;
+}
+
 // =============================================================================
 // Console Namespace Functions
 // =============================================================================
@@ -181,8 +186,10 @@ void ConsoleView::RenderLogs() {
         LogStorage::Get().Clear();
     }
 
+    const auto logs = LogStorage::Get().GetLogsSnapshot();
+
     ImGui::SameLine();
-    ImGui::TextDisabled("(%zu entries)", LogStorage::Get().GetLogs().size());
+    ImGui::TextDisabled("(%zu entries)", logs.size());
 
     ImGui::Separator();
 
@@ -191,9 +198,6 @@ void ConsoleView::RenderLogs() {
 
     std::string lowerFilter = m_FilterBuffer;
     std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
-
-    // Read from global storage
-    const auto& logs = LogStorage::Get().GetLogs();
 
     for (const auto& log : logs) {
         // Level filter
@@ -209,8 +213,8 @@ void ConsoleView::RenderLogs() {
         }
 
         // Color based on level
-        ImVec4 color;
-        const char* prefix;
+        ImVec4 color = ImVec4(0.9f, 0.9f, 0.9f, 1.0f);
+        const char* prefix = "[INFO]";
         switch (log.level) {
             case LogLevel::Info:
                 color = ImVec4(0.9f, 0.9f, 0.9f, 1.0f);

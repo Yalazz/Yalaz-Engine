@@ -110,7 +110,7 @@ bool SceneManager::SaveScene(const std::string& filePath) {
         json sceneData;
 
         // Header
-        sceneData["version"] = "1.1";
+        sceneData["version"] = "1.2";
         sceneData["engine"] = "Yalaz Engine";
 
         // Save loaded GLTF scenes
@@ -204,6 +204,83 @@ bool SceneManager::SaveScene(const std::string& filePath) {
             cameraData["pitch"] = m_Engine->mainCamera.pitch;
             cameraData["yaw"] = m_Engine->mainCamera.yaw;
             sceneData["camera"] = cameraData;
+
+            // Save animation runtime + graph state
+            json animationData;
+            animationData["activeAnimationIndex"] = m_Engine->activeAnimationIndex;
+            animationData["activeSkeletonIndex"] = m_Engine->activeSkeletonIndex;
+
+            json clipsArray = json::array();
+            for (const auto& clip : m_Engine->animationClips) {
+                json clipData;
+                clipData["name"] = clip.name;
+                clipData["sourceScene"] = clip.sourceScene;
+                clipData["skeletonIndex"] = clip.skeletonIndex;
+                clipData["duration"] = clip.duration;
+                clipData["currentTime"] = clip.currentTime;
+                clipData["isPlaying"] = clip.isPlaying;
+                clipData["loop"] = clip.loop;
+                clipData["pingPong"] = clip.pingPong;
+                clipData["reverse"] = clip.reverse;
+                clipData["speed"] = clip.speed;
+                clipsArray.push_back(clipData);
+            }
+            animationData["clips"] = clipsArray;
+
+            const auto& graph = m_Engine->animationGraph;
+            json graphData;
+            graphData["enabled"] = graph.enabled;
+            graphData["activeState"] = graph.activeState;
+            graphData["nextState"] = graph.nextState;
+            graphData["blending"] = graph.blending;
+            graphData["blendDuration"] = graph.blendDuration;
+            graphData["blendElapsed"] = graph.blendElapsed;
+
+            json graphStates = json::array();
+            for (const auto& s : graph.states) {
+                json stateData;
+                stateData["name"] = s.name;
+                stateData["clipIndex"] = s.clipIndex;
+                stateData["isDefault"] = s.isDefault;
+                stateData["positionX"] = s.positionX;
+                stateData["positionY"] = s.positionY;
+                if (s.clipIndex >= 0 && s.clipIndex < static_cast<int>(m_Engine->animationClips.size())) {
+                    const auto& clip = m_Engine->animationClips[s.clipIndex];
+                    stateData["clipName"] = clip.name;
+                    stateData["clipSourceScene"] = clip.sourceScene;
+                }
+                graphStates.push_back(stateData);
+            }
+            graphData["states"] = graphStates;
+
+            json graphTransitions = json::array();
+            for (const auto& t : graph.transitions) {
+                json trData;
+                trData["fromState"] = t.fromState;
+                trData["toState"] = t.toState;
+                trData["parameter"] = t.parameter;
+                trData["comparison"] = t.comparison;
+                trData["threshold"] = t.threshold;
+                trData["hasExitTime"] = t.hasExitTime;
+                trData["exitTime"] = t.exitTime;
+                trData["blendTime"] = t.blendTime;
+                trData["enabled"] = t.enabled;
+                graphTransitions.push_back(trData);
+            }
+            graphData["transitions"] = graphTransitions;
+
+            json graphParameters = json::array();
+            for (const auto& p : graph.parameters) {
+                json paramData;
+                paramData["name"] = p.name;
+                paramData["value"] = p.value;
+                paramData["isBool"] = p.isBool;
+                graphParameters.push_back(paramData);
+            }
+            graphData["parameters"] = graphParameters;
+
+            animationData["graph"] = graphData;
+            sceneData["animation"] = animationData;
         }
 
         // Create directory if needed
@@ -355,7 +432,7 @@ bool SceneManager::LoadScene(const std::string& filePath) {
             UI::Console::Log("  Loaded camera position");
         }
 
-        // Load GLTF scenes
+        // Load referenced model scenes
         if (sceneData.contains("scenes")) {
             for (const auto& sceneEntry : sceneData["scenes"]) {
                 std::string name = sceneEntry.value("name", "");
@@ -363,25 +440,207 @@ bool SceneManager::LoadScene(const std::string& filePath) {
 
                 if (name.empty() || gltfFile.empty()) continue;
 
-                // Check if GLTF file exists
+                // Check if scene file exists
                 if (!fs::exists(gltfFile)) {
-                    UI::Console::Warn("GLTF file not found, skipping: " + gltfFile);
+                    UI::Console::Warn("Scene file not found, skipping: " + gltfFile);
                     continue;
                 }
 
                 // Store the file path
                 m_SceneFilePaths[name] = gltfFile;
 
-                // Actually load the GLTF file
-                UI::Console::Log("  Loading GLTF: " + gltfFile);
-                auto gltfScene = loadGltf(m_Engine, gltfFile);
+                // Actually load the scene/model file
+                UI::Console::Log("  Loading scene asset: " + gltfFile);
+                auto gltfScene = loadSceneAsset(m_Engine, gltfFile);
                 if (gltfScene.has_value()) {
                     m_Engine->loadedScenes[name] = *gltfScene;
                     UI::Console::Log("    Loaded successfully");
+
+                    // Restore per-node local transforms
+                    if (sceneEntry.contains("nodes") && sceneEntry["nodes"].is_array()) {
+                        auto loadedIt = m_Engine->loadedScenes.find(name);
+                        if (loadedIt != m_Engine->loadedScenes.end() && loadedIt->second) {
+                            auto& loadedScene = loadedIt->second;
+                            for (const auto& nodeData : sceneEntry["nodes"]) {
+                                if (!nodeData.contains("name") || !nodeData.contains("localTransform")) continue;
+                                if (!nodeData["localTransform"].is_array() || nodeData["localTransform"].size() != 16) continue;
+
+                                const std::string nodeName = nodeData["name"].get<std::string>();
+                                auto nodeIt = loadedScene->nodes.find(nodeName);
+                                if (nodeIt == loadedScene->nodes.end() || !nodeIt->second) continue;
+
+                                glm::mat4 local(1.0f);
+                                for (int i = 0; i < 16; ++i) {
+                                    local[i / 4][i % 4] = nodeData["localTransform"][i].get<float>();
+                                }
+                                nodeIt->second->localTransform = local;
+                            }
+
+                            for (auto& top : loadedScene->topNodes) {
+                                if (top) top->refreshTransform(glm::mat4(1.0f));
+                            }
+                        }
+                    }
                 } else {
-                    UI::Console::Error("    Failed to load GLTF");
+                    UI::Console::Error("    Failed to load scene asset");
                 }
             }
+        }
+
+        // Restore animation runtime state + graph
+        if (sceneData.contains("animation") && sceneData["animation"].is_object()) {
+            const auto& anim = sceneData["animation"];
+
+            auto findClipIndex = [&](const std::string& clipName, const std::string& clipSource) -> int {
+                if (!clipName.empty() && !clipSource.empty()) {
+                    for (int i = 0; i < static_cast<int>(m_Engine->animationClips.size()); ++i) {
+                        const auto& c = m_Engine->animationClips[i];
+                        if (c.name == clipName && c.sourceScene == clipSource) return i;
+                    }
+                }
+                if (!clipName.empty()) {
+                    for (int i = 0; i < static_cast<int>(m_Engine->animationClips.size()); ++i) {
+                        const auto& c = m_Engine->animationClips[i];
+                        if (c.name == clipName) return i;
+                    }
+                }
+                return -1;
+            };
+
+            if (anim.contains("clips") && anim["clips"].is_array()) {
+                for (auto& clip : m_Engine->animationClips) {
+                    clip.isPlaying = false;
+                }
+
+                for (const auto& savedClip : anim["clips"]) {
+                    std::string clipName = savedClip.value("name", "");
+                    std::string clipSource = savedClip.value("sourceScene", "");
+                    int clipIndex = findClipIndex(clipName, clipSource);
+                    if (clipIndex < 0 || clipIndex >= static_cast<int>(m_Engine->animationClips.size())) continue;
+
+                    auto& clip = m_Engine->animationClips[clipIndex];
+                    clip.loop = savedClip.value("loop", clip.loop);
+                    clip.pingPong = savedClip.value("pingPong", clip.pingPong);
+                    clip.reverse = savedClip.value("reverse", clip.reverse);
+                    clip.speed = savedClip.value("speed", clip.speed);
+                    clip.currentTime = savedClip.value("currentTime", clip.currentTime);
+                    if (clip.duration > 0.0f) {
+                        clip.currentTime = glm::clamp(clip.currentTime, 0.0f, clip.duration);
+                    } else {
+                        clip.currentTime = 0.0f;
+                    }
+                    clip.isPlaying = savedClip.value("isPlaying", false);
+                }
+            }
+
+            if (anim.contains("activeAnimationIndex")) {
+                int active = anim.value("activeAnimationIndex", -1);
+                m_Engine->activeAnimationIndex = (active >= 0 && active < static_cast<int>(m_Engine->animationClips.size())) ? active : -1;
+            }
+            if (anim.contains("activeSkeletonIndex")) {
+                int activeSkel = anim.value("activeSkeletonIndex", -1);
+                m_Engine->activeSkeletonIndex = (activeSkel >= 0 && activeSkel < static_cast<int>(m_Engine->skeletons.size())) ? activeSkel : -1;
+            }
+
+            if (anim.contains("graph") && anim["graph"].is_object()) {
+                const auto& graphData = anim["graph"];
+                auto& graph = m_Engine->animationGraph;
+                graph.states.clear();
+                graph.transitions.clear();
+                graph.parameters.clear();
+
+                if (graphData.contains("states") && graphData["states"].is_array()) {
+                    for (const auto& stateData : graphData["states"]) {
+                        AnimationGraphStateData state;
+                        state.name = stateData.value("name", "State");
+                        state.isDefault = stateData.value("isDefault", false);
+                        state.positionX = stateData.value("positionX", 120.0f);
+                        state.positionY = stateData.value("positionY", 100.0f);
+
+                        std::string clipName = stateData.value("clipName", "");
+                        std::string clipSource = stateData.value("clipSourceScene", "");
+                        int clipIndex = findClipIndex(clipName, clipSource);
+                        if (clipIndex < 0) {
+                            int rawIndex = stateData.value("clipIndex", -1);
+                            if (rawIndex >= 0 && rawIndex < static_cast<int>(m_Engine->animationClips.size())) {
+                                clipIndex = rawIndex;
+                            }
+                        }
+                        state.clipIndex = clipIndex;
+
+                        if (state.clipIndex >= 0 && state.clipIndex < static_cast<int>(m_Engine->animationClips.size())) {
+                            graph.states.push_back(state);
+                        }
+                    }
+                }
+
+                if (graphData.contains("transitions") && graphData["transitions"].is_array()) {
+                    for (const auto& trData : graphData["transitions"]) {
+                        AnimationGraphTransitionData tr;
+                        tr.fromState = trData.value("fromState", -1);
+                        tr.toState = trData.value("toState", -1);
+                        tr.parameter = trData.value("parameter", "speed");
+                        tr.comparison = trData.value("comparison", 0);
+                        tr.threshold = trData.value("threshold", 0.5f);
+                        tr.hasExitTime = trData.value("hasExitTime", true);
+                        tr.exitTime = trData.value("exitTime", 0.9f);
+                        tr.blendTime = trData.value("blendTime", 0.2f);
+                        tr.enabled = trData.value("enabled", true);
+                        if (tr.fromState >= 0 && tr.fromState < static_cast<int>(graph.states.size()) &&
+                            tr.toState >= 0 && tr.toState < static_cast<int>(graph.states.size())) {
+                            graph.transitions.push_back(tr);
+                        }
+                    }
+                }
+
+                if (graphData.contains("parameters") && graphData["parameters"].is_array()) {
+                    for (const auto& pData : graphData["parameters"]) {
+                        AnimationGraphParameter p;
+                        p.name = pData.value("name", "");
+                        p.value = pData.value("value", 0.0f);
+                        p.isBool = pData.value("isBool", false);
+                        if (!p.name.empty()) graph.parameters.push_back(p);
+                    }
+                }
+                if (graph.parameters.empty()) {
+                    graph.parameters.push_back({"speed", 0.0f, false});
+                    graph.parameters.push_back({"isGrounded", 1.0f, true});
+                }
+
+                graph.enabled = graphData.value("enabled", false);
+                graph.activeState = graphData.value("activeState", -1);
+                graph.nextState = graphData.value("nextState", -1);
+                graph.blending = graphData.value("blending", false);
+                graph.blendDuration = graphData.value("blendDuration", 0.0f);
+                graph.blendElapsed = graphData.value("blendElapsed", 0.0f);
+
+                if (graph.activeState < 0 || graph.activeState >= static_cast<int>(graph.states.size())) {
+                    graph.activeState = graph.states.empty() ? -1 : 0;
+                }
+                if (graph.nextState < 0 || graph.nextState >= static_cast<int>(graph.states.size())) {
+                    graph.nextState = -1;
+                    graph.blending = false;
+                }
+            }
+
+            if (m_Engine->activeAnimationIndex < 0 || m_Engine->activeAnimationIndex >= static_cast<int>(m_Engine->animationClips.size())) {
+                for (int i = 0; i < static_cast<int>(m_Engine->animationClips.size()); ++i) {
+                    if (m_Engine->animationClips[i].isPlaying) {
+                        m_Engine->activeAnimationIndex = i;
+                        break;
+                    }
+                }
+            }
+            if (m_Engine->activeAnimationIndex >= 0 &&
+                m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size()) &&
+                m_Engine->activeSkeletonIndex < 0) {
+                int skel = m_Engine->animationClips[m_Engine->activeAnimationIndex].skeletonIndex;
+                if (skel >= 0 && skel < static_cast<int>(m_Engine->skeletons.size())) {
+                    m_Engine->activeSkeletonIndex = skel;
+                }
+            }
+
+            m_Engine->updateAnimations(0.0f);
         }
 
         AddRecentScene(filePath);

@@ -4,6 +4,7 @@
 #pragma once
 #include <vk_types.h>
 #include <vector>
+#include <array>
 #include <memory>
 #include "vk_mem_alloc.h"
 #include <deque>
@@ -194,27 +195,38 @@ struct ReflectionProbe {
 struct AnimationKeyframeData {
     float time = 0.0f;
     glm::vec4 value = glm::vec4(0.0f);
+    glm::vec4 inTangent = glm::vec4(0.0f);
+    glm::vec4 outTangent = glm::vec4(0.0f);
+    bool hasTangents = false;
     int interpolation = 1;  // 0=Step, 1=Linear, 2=Cubic
 };
 
 struct AnimationTrackData {
+    std::string sourceScene;
     std::string targetNode;
+    int targetNodeIndex = -1;
+    int targetBoneIndex = -1;
     std::string property;  // "translation", "rotation", "scale"
     std::vector<AnimationKeyframeData> keyframes;
 };
 
 struct AnimationClipData {
     std::string name;
+    std::string sourceScene;
+    int skeletonIndex = -1;
     float duration = 0.0f;
     float currentTime = 0.0f;
     bool isPlaying = false;
     bool loop = true;
+    bool pingPong = false;
+    bool reverse = false;
     float speed = 1.0f;
     std::vector<AnimationTrackData> tracks;
 };
 
 struct SkeletonBoneData {
     std::string name;
+    int nodeIndex = -1;
     int parentIndex = -1;
     glm::vec3 localPosition = glm::vec3(0.0f);
     glm::quat localRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -224,7 +236,47 @@ struct SkeletonBoneData {
 
 struct SkeletonData {
     std::string name;
+    std::string sourceScene;
     std::vector<SkeletonBoneData> bones;
+};
+
+struct AnimationGraphParameter {
+    std::string name;
+    float value = 0.0f;
+    bool isBool = false;
+};
+
+struct AnimationGraphStateData {
+    std::string name;
+    int clipIndex = -1;
+    bool isDefault = false;
+    float positionX = 0.0f;
+    float positionY = 0.0f;
+};
+
+struct AnimationGraphTransitionData {
+    int fromState = -1;
+    int toState = -1;
+    std::string parameter = "speed";
+    int comparison = 0; // 0: >, 1: <, 2: >=, 3: <=, 4: ==, 5: !=
+    float threshold = 0.5f;
+    bool hasExitTime = true;
+    float exitTime = 0.9f;
+    float blendTime = 0.2f;
+    bool enabled = true;
+};
+
+struct AnimationGraphRuntime {
+    bool enabled = false;
+    std::vector<AnimationGraphStateData> states;
+    std::vector<AnimationGraphTransitionData> transitions;
+    std::vector<AnimationGraphParameter> parameters;
+
+    int activeState = -1;
+    int nextState = -1;
+    bool blending = false;
+    float blendDuration = 0.0f;
+    float blendElapsed = 0.0f;
 };
 
 // Physics System Structures
@@ -306,6 +358,10 @@ struct ShaderUniformInfo {
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
+    MaterialPipeline transparentDoubleSidedPipeline;
+    MaterialPipeline opaqueSkinnedPipeline;
+    MaterialPipeline transparentSkinnedPipeline;
+    MaterialPipeline transparentDoubleSidedSkinnedPipeline;
 
     VkDescriptorSetLayout materialLayout;
 
@@ -335,7 +391,7 @@ struct GLTFMetallic_Roughness {
     void build_pipelines(VulkanEngine* engine);
     void clear_resources(VkDevice device);
 
-    MaterialInstance write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
+    MaterialInstance write_material(VkDevice device, MaterialPass pass, bool doubleSided, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
 };
 
 
@@ -346,8 +402,12 @@ public:
     // =========================================================================
     std::vector<AnimationClipData> animationClips;
     std::vector<SkeletonData> skeletons;
+    AnimationGraphRuntime animationGraph;
     int activeAnimationIndex = -1;
     int activeSkeletonIndex = -1;
+    AllocatedBuffer skinningMatrixBuffer;
+    VkDeviceAddress skinningMatrixBufferAddress = 0;
+    std::array<glm::mat4, 1024> skinningMatrices{};
 
     void updateAnimations(float deltaTime);
     void playAnimation(int index);
@@ -892,6 +952,7 @@ public:
     int currentBackgroundEffect{ 0 };
 
     GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
+    AllocatedBuffer uploadSkinBuffer(std::span<SkinVertexData> skinData);
 
     AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
 

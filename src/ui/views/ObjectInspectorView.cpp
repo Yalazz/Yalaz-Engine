@@ -20,6 +20,8 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <algorithm>
+#include <functional>
 #include <cstring>
 #include <cstdlib>
 
@@ -927,9 +929,31 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         return;
     }
 
+    if (m_LastInspectedNode != node) {
+        m_LastInspectedNode = node;
+        m_SelectedSkeletonIndex = -1;
+        m_SelectedBoneIndex = -1;
+    }
+
     SectionHeader("Scene Node");
 
     ImGui::Text("Name: %s", m_Engine->selectedObjectName.c_str());
+
+    LoadedGLTF* ownerScene = nullptr;
+    std::string ownerSceneName;
+    int selectedNodeIndex = -1;
+    for (auto& [sceneName, scene] : m_Engine->loadedScenes) {
+        if (!scene) continue;
+        for (int ni = 0; ni < static_cast<int>(scene->indexedNodes.size()); ++ni) {
+            if (scene->indexedNodes[ni] && scene->indexedNodes[ni].get() == node) {
+                ownerScene = scene.get();
+                ownerSceneName = sceneName;
+                selectedNodeIndex = ni;
+                break;
+            }
+        }
+        if (ownerScene) break;
+    }
 
     // Focus button
     ImGui::SameLine(ImGui::GetWindowWidth() - 110);
@@ -941,16 +965,51 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
     ImGui::Spacing();
     ImGui::Separator();
 
+    auto refreshNodeWorldFromLocal = [&]() {
+        glm::mat4 parentMatrix = glm::mat4(1.0f);
+        if (auto parent = node->parent.lock()) {
+            parentMatrix = parent->worldTransform;
+        }
+        node->refreshTransform(parentMatrix);
+    };
+
+    auto applyLocalTRS = [&](const glm::vec3& translation, const glm::vec3& eulerDeg, const glm::vec3& scale) {
+        glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
+        glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerDeg)));
+        glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
+        glm::mat4 newLocal = translationMat * rotationMat * scaleMat;
+
+        if (m_ApplyTransformToWholeAsset && ownerScene && !ownerScene->topNodes.empty()) {
+            glm::mat4 delta = newLocal * glm::inverse(node->localTransform);
+            for (auto& top : ownerScene->topNodes) {
+                if (!top) continue;
+                top->localTransform = delta * top->localTransform;
+            }
+            for (auto& top : ownerScene->topNodes) {
+                if (top) top->refreshTransform(glm::mat4(1.0f));
+            }
+        } else {
+            node->localTransform = newLocal;
+            refreshNodeWorldFromLocal();
+        }
+    };
+
     // Transform - NOW EDITABLE
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent();
+
+        if (ownerScene) {
+            ImGui::Checkbox("Apply To Whole Asset", &m_ApplyTransformToWholeAsset);
+            ImGui::TextDisabled("Edits affect all nodes in this imported GLTF scene.");
+            ImGui::Spacing();
+        }
 
         // Extract transform components from matrix
         glm::vec3 scale, translation, skew;
         glm::vec4 perspective;
         glm::quat rotation;
 
-        if (glm::decompose(node->worldTransform, scale, rotation, translation, skew, perspective)) {
+        if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
             glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
 
             // Store original values to detect changes
@@ -966,45 +1025,24 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
                            scale != origScale);
 
             if (changed) {
-                // Reconstruct transform matrix from edited components
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
-                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
-
-                // Update the node's world transform
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-
-                // Also update local transform for proper hierarchy
-                node->localTransform = node->worldTransform;
+                applyLocalTRS(translation, eulerRot, scale);
             }
 
             // Quick transform buttons
             ImGui::Spacing();
             if (ImGui::Button("Reset Position")) {
                 translation = glm::vec3(0.0f);
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
-                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-                node->localTransform = node->worldTransform;
+                applyLocalTRS(translation, eulerRot, scale);
             }
             ImGui::SameLine();
             if (ImGui::Button("Reset Rotation")) {
                 eulerRot = glm::vec3(0.0f);
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
-                glm::mat4 rotationMat = glm::mat4(1.0f);
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-                node->localTransform = node->worldTransform;
+                applyLocalTRS(translation, eulerRot, scale);
             }
             ImGui::SameLine();
             if (ImGui::Button("Reset Scale")) {
                 scale = glm::vec3(1.0f);
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
-                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f));
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-                node->localTransform = node->worldTransform;
+                applyLocalTRS(translation, eulerRot, scale);
             }
 
             // Snap buttons
@@ -1013,20 +1051,12 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
             ImGui::SameLine();
             if (ImGui::Button("Grid 1##node")) {
                 translation = glm::round(translation);
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
-                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-                node->localTransform = node->worldTransform;
+                applyLocalTRS(translation, eulerRot, scale);
             }
             ImGui::SameLine();
             if (ImGui::Button("Grid 0.5##node")) {
                 translation = glm::round(translation * 2.0f) / 2.0f;
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
-                glm::mat4 rotationMat = glm::mat4(glm::quat(glm::radians(eulerRot)));
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-                node->localTransform = node->worldTransform;
+                applyLocalTRS(translation, eulerRot, scale);
             }
 
         } else {
@@ -1042,6 +1072,334 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         ImGui::Indent();
         RenderGLTFMaterialEditor();
         ImGui::Unindent();
+    }
+
+    // GLTF scene data panels (camera/animation) for this node
+    {
+        if (ownerScene) {
+            // Camera panel
+            if (!ownerScene->cameras.empty()) {
+                std::vector<int> nodeCameraIndices;
+                nodeCameraIndices.reserve(ownerScene->cameras.size());
+                for (int camIdx = 0; camIdx < static_cast<int>(ownerScene->cameras.size()); ++camIdx) {
+                    if (ownerScene->cameras[camIdx].sourceNode == node) {
+                        nodeCameraIndices.push_back(camIdx);
+                    }
+                }
+
+                if (!nodeCameraIndices.empty() && ImGui::CollapsingHeader("GLTF Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::Indent();
+
+                    for (int camIdx : nodeCameraIndices) {
+                        GLTFCamera& cam = ownerScene->cameras[camIdx];
+                        ImGui::PushID(camIdx);
+                        ImGui::SeparatorText(cam.name.c_str());
+
+                        bool isActive = m_Engine->useGLTFCamera &&
+                            m_Engine->currentGLTFCameraScene == ownerSceneName &&
+                            m_Engine->currentGLTFCameraIndex == camIdx;
+                        ImGui::Text("Active: %s", isActive ? "Yes" : "No");
+                        ImGui::Text("Type: %s", cam.isPerspective ? "Perspective" : "Orthographic");
+
+                        bool cameraChanged = false;
+                        if (cam.isPerspective) {
+                            cameraChanged |= ImGui::DragFloat("FOV", &cam.fov, 0.1f, 1.0f, 179.0f, "%.1f deg");
+                        } else {
+                            cameraChanged |= ImGui::DragFloat("Ortho Width", &cam.orthoWidth, 0.05f, 0.01f, 10000.0f, "%.2f");
+                            cameraChanged |= ImGui::DragFloat("Ortho Height", &cam.orthoHeight, 0.05f, 0.01f, 10000.0f, "%.2f");
+                        }
+                        cameraChanged |= ImGui::DragFloat("Near", &cam.nearPlane, 0.001f, 0.001f, cam.farPlane - 0.001f, "%.4f");
+                        cameraChanged |= ImGui::DragFloat("Far", &cam.farPlane, 0.1f, cam.nearPlane + 0.001f, 1000000.0f, "%.2f");
+                        cam.fov = glm::clamp(cam.fov, 1.0f, 179.0f);
+                        cam.nearPlane = glm::max(cam.nearPlane, 0.001f);
+                        cam.farPlane = glm::max(cam.farPlane, cam.nearPlane + 0.001f);
+                        cam.orthoWidth = glm::max(cam.orthoWidth, 0.01f);
+                        cam.orthoHeight = glm::max(cam.orthoHeight, 0.01f);
+
+                        if (cameraChanged && isActive) {
+                            m_Engine->applyGLTFCamera(ownerSceneName, camIdx);
+                        }
+
+                        if (ImGui::Button("Use This Camera", ImVec2(-1, 0))) {
+                            m_Engine->applyGLTFCamera(ownerSceneName, camIdx);
+                        }
+                        if (isActive && ImGui::Button("Back To Free Camera", ImVec2(-1, 0))) {
+                            m_Engine->resetToFreeCamera();
+                        }
+
+                        ImGui::PopID();
+                    }
+
+                    ImGui::Unindent();
+                }
+            }
+
+            // Light panel
+            if (!ownerScene->lights.empty()) {
+                std::vector<GLTFLight*> nodeLights;
+                for (auto& l : ownerScene->lights) {
+                    if (l.sourceNode == node) nodeLights.push_back(&l);
+                }
+
+                if (!nodeLights.empty() && ImGui::CollapsingHeader("GLTF Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::Indent();
+                    for (size_t li = 0; li < nodeLights.size(); ++li) {
+                        GLTFLight* l = nodeLights[li];
+                        ImGui::PushID(static_cast<int>(li));
+                        ImGui::SeparatorText(l->name.c_str());
+
+                        static const char* kTypes[] = { "Directional", "Point", "Spot" };
+                        int type = std::clamp(l->type, 0, 2);
+                        ImGui::Combo("Type", &type, kTypes, IM_ARRAYSIZE(kTypes));
+                        l->type = type;
+
+                        bool changed = false;
+                        changed |= ImGui::DragFloat3("Position", &l->position.x, 0.01f);
+                        changed |= ImGui::ColorEdit3("Color", &l->color.x, ImGuiColorEditFlags_Float);
+                        changed |= ImGui::DragFloat("Intensity", &l->intensity, 0.05f, 0.0f, 1000.0f, "%.2f");
+                        changed |= ImGui::DragFloat("Range", &l->range, 0.1f, 0.01f, 100000.0f, "%.2f");
+
+                        if (l->runtimePointLightIndex >= 0 &&
+                            l->runtimePointLightIndex < static_cast<int>(m_Engine->scenePointLights.size())) {
+                            PointLight& pl = m_Engine->scenePointLights[l->runtimePointLightIndex];
+                            if (changed) {
+                                pl.position = l->position;
+                                pl.color = l->color;
+                                pl.intensity = l->intensity;
+                                pl.radius = l->range;
+                            }
+                        } else if (l->type == 0 && changed) {
+                            glm::vec3 dir = glm::normalize(l->direction);
+                            if (glm::length(dir) < 0.0001f) dir = glm::vec3(0.0f, -1.0f, 0.0f);
+                            m_Engine->sceneData.sunlightDirection = glm::vec4(-dir, l->intensity);
+                            m_Engine->sceneData.sunlightColor = glm::vec4(l->color, 1.0f);
+                        }
+
+                        ImGui::PopID();
+                    }
+                    ImGui::Unindent();
+                }
+            }
+
+            // Animation panel for selected node
+            if (selectedNodeIndex >= 0) {
+                std::vector<int> nodeClipIndices;
+                for (int ci = 0; ci < static_cast<int>(m_Engine->animationClips.size()); ++ci) {
+                    const auto& clip = m_Engine->animationClips[ci];
+                    bool affectsNode = false;
+                    for (const auto& track : clip.tracks) {
+                        if (track.targetNodeIndex == selectedNodeIndex || track.targetNode == m_Engine->selectedObjectName) {
+                            affectsNode = true;
+                            break;
+                        }
+                    }
+                    if (affectsNode) nodeClipIndices.push_back(ci);
+                }
+
+                if (!nodeClipIndices.empty() && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::Indent();
+
+                    int activeClip = m_Engine->activeAnimationIndex;
+                    if (std::find(nodeClipIndices.begin(), nodeClipIndices.end(), activeClip) == nodeClipIndices.end()) {
+                        activeClip = nodeClipIndices.front();
+                        m_Engine->activeAnimationIndex = activeClip;
+                    }
+
+                    const char* currentName = m_Engine->animationClips[activeClip].name.c_str();
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::BeginCombo("Clip", currentName)) {
+                        for (int ci : nodeClipIndices) {
+                            bool selected = (ci == activeClip);
+                            if (ImGui::Selectable(m_Engine->animationClips[ci].name.c_str(), selected)) {
+                                m_Engine->activeAnimationIndex = ci;
+                                if (m_Engine->animationClips[ci].skeletonIndex >= 0) {
+                                    m_Engine->activeSkeletonIndex = m_Engine->animationClips[ci].skeletonIndex;
+                                }
+                                activeClip = ci;
+                            }
+                            if (selected) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    auto& clip = m_Engine->animationClips[activeClip];
+                    if (ImGui::Button("Play", ImVec2(56, 0))) m_Engine->playAnimation(activeClip);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Pause", ImVec2(56, 0))) clip.isPlaying = false;
+                    ImGui::SameLine();
+                    if (ImGui::Button("Stop", ImVec2(56, 0))) m_Engine->stopAnimation(activeClip);
+
+                    if (clip.duration > 0.0f) {
+                        float t = clip.currentTime;
+                        if (ImGui::SliderFloat("Time", &t, 0.0f, clip.duration, "%.3fs")) {
+                            clip.currentTime = t;
+                            m_Engine->updateAnimations(0.0f);
+                        }
+                    }
+                    ImGui::Checkbox("Loop", &clip.loop);
+                    ImGui::SameLine();
+                    ImGui::Checkbox("PingPong", &clip.pingPong);
+                    ImGui::SliderFloat("Speed", &clip.speed, 0.1f, 3.0f, "%.2fx");
+
+                    ImGui::Text("Tracks: %d", static_cast<int>(clip.tracks.size()));
+                    if (clip.skeletonIndex >= 0 && clip.skeletonIndex < static_cast<int>(m_Engine->skeletons.size())) {
+                        const auto& skel = m_Engine->skeletons[clip.skeletonIndex];
+                        ImGui::Text("Skeleton: %s (%d bones)", skel.name.c_str(), static_cast<int>(skel.bones.size()));
+                    }
+
+                    ImGui::Unindent();
+                }
+            }
+
+            if (selectedNodeIndex >= 0 && !m_Engine->skeletons.empty() &&
+                ImGui::CollapsingHeader("Skeleton / Bones", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent();
+
+                std::vector<int> candidateSkeletons;
+                candidateSkeletons.reserve(m_Engine->skeletons.size());
+                for (int si = 0; si < static_cast<int>(m_Engine->skeletons.size()); ++si) {
+                    const auto& skel = m_Engine->skeletons[si];
+                    bool referencesNode = false;
+                    for (const auto& bone : skel.bones) {
+                        if (bone.nodeIndex == selectedNodeIndex) {
+                            referencesNode = true;
+                            break;
+                        }
+                    }
+                    if (referencesNode) {
+                        candidateSkeletons.push_back(si);
+                    }
+                }
+
+                if (candidateSkeletons.empty() && m_Engine->activeSkeletonIndex >= 0 &&
+                    m_Engine->activeSkeletonIndex < static_cast<int>(m_Engine->skeletons.size())) {
+                    candidateSkeletons.push_back(m_Engine->activeSkeletonIndex);
+                }
+
+                if (candidateSkeletons.empty()) {
+                    ImGui::TextDisabled("No skeleton mapped to this node.");
+                } else {
+                    auto skeletonInCandidates = [&candidateSkeletons](int skeletonIndex) {
+                        return std::find(candidateSkeletons.begin(), candidateSkeletons.end(), skeletonIndex) != candidateSkeletons.end();
+                    };
+
+                    if (!skeletonInCandidates(m_SelectedSkeletonIndex)) {
+                        if (skeletonInCandidates(m_Engine->activeSkeletonIndex)) {
+                            m_SelectedSkeletonIndex = m_Engine->activeSkeletonIndex;
+                        } else {
+                            m_SelectedSkeletonIndex = candidateSkeletons.front();
+                        }
+                        m_SelectedBoneIndex = -1;
+                    }
+
+                    const auto& activeSkeleton = m_Engine->skeletons[m_SelectedSkeletonIndex];
+                    ImGui::Text("Bones: %d", static_cast<int>(activeSkeleton.bones.size()));
+
+                    std::string selectedSkeletonName = activeSkeleton.name.empty() ?
+                        ("Skeleton " + std::to_string(m_SelectedSkeletonIndex)) : activeSkeleton.name;
+                    if (ImGui::BeginCombo("Skeleton", selectedSkeletonName.c_str())) {
+                        for (int si : candidateSkeletons) {
+                            const auto& sk = m_Engine->skeletons[si];
+                            std::string label = sk.name.empty() ? ("Skeleton " + std::to_string(si)) : sk.name;
+                            bool selected = (si == m_SelectedSkeletonIndex);
+                            if (ImGui::Selectable(label.c_str(), selected)) {
+                                m_SelectedSkeletonIndex = si;
+                                m_SelectedBoneIndex = -1;
+                            }
+                            if (selected) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    std::vector<std::vector<int>> boneChildren(activeSkeleton.bones.size());
+                    for (int bi = 0; bi < static_cast<int>(activeSkeleton.bones.size()); ++bi) {
+                        int parentIndex = activeSkeleton.bones[bi].parentIndex;
+                        if (parentIndex >= 0 && parentIndex < static_cast<int>(activeSkeleton.bones.size())) {
+                            boneChildren[parentIndex].push_back(bi);
+                        }
+                    }
+
+                    std::function<void(int)> renderBoneTree = [&](int boneIndex) {
+                        const auto& bone = activeSkeleton.bones[boneIndex];
+                        bool hasChildren = !boneChildren[boneIndex].empty();
+                        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
+                        if (!hasChildren) flags |= ImGuiTreeNodeFlags_Leaf;
+                        if (m_SelectedBoneIndex == boneIndex) flags |= ImGuiTreeNodeFlags_Selected;
+
+                        std::string boneLabel = bone.name.empty() ?
+                            ("Bone " + std::to_string(boneIndex)) : bone.name;
+                        bool open = ImGui::TreeNodeEx((boneLabel + "##bone_" + std::to_string(boneIndex)).c_str(), flags);
+                        if (ImGui::IsItemClicked()) {
+                            m_SelectedBoneIndex = boneIndex;
+                        }
+                        if (open) {
+                            for (int childIndex : boneChildren[boneIndex]) {
+                                renderBoneTree(childIndex);
+                            }
+                            ImGui::TreePop();
+                        }
+                    };
+
+                    if (ImGui::TreeNode("Bone Hierarchy")) {
+                        for (int bi = 0; bi < static_cast<int>(activeSkeleton.bones.size()); ++bi) {
+                            if (activeSkeleton.bones[bi].parentIndex < 0) {
+                                renderBoneTree(bi);
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+
+                    if (m_SelectedBoneIndex >= 0 && m_SelectedBoneIndex < static_cast<int>(activeSkeleton.bones.size())) {
+                        const auto& selectedBone = activeSkeleton.bones[m_SelectedBoneIndex];
+                        ImGui::Separator();
+                        ImGui::Text("Selected Bone: %s",
+                            selectedBone.name.empty() ? "(unnamed)" : selectedBone.name.c_str());
+                        ImGui::Text("Bone Index: %d  Node Index: %d", m_SelectedBoneIndex, selectedBone.nodeIndex);
+
+                        Node* boneNode = nullptr;
+                        if (selectedBone.nodeIndex >= 0 &&
+                            selectedBone.nodeIndex < static_cast<int>(ownerScene->indexedNodes.size()) &&
+                            ownerScene->indexedNodes[selectedBone.nodeIndex]) {
+                            boneNode = ownerScene->indexedNodes[selectedBone.nodeIndex].get();
+                        }
+
+                        if (!boneNode) {
+                            ImGui::TextDisabled("Bone node not available in scene.");
+                        } else {
+                            glm::vec3 scale, translation, skew;
+                            glm::vec4 perspective;
+                            glm::quat rotation;
+                            if (glm::decompose(boneNode->localTransform, scale, rotation, translation, skew, perspective)) {
+                                glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
+                                glm::vec3 oldTranslation = translation;
+                                glm::vec3 oldEuler = eulerRot;
+                                glm::vec3 oldScale = scale;
+
+                                ImGui::DragFloat3("Bone Position", &translation.x, 0.01f);
+                                ImGui::DragFloat3("Bone Rotation", &eulerRot.x, 0.25f);
+                                ImGui::DragFloat3("Bone Scale", &scale.x, 0.01f, 0.001f, 1000.0f);
+
+                                bool changed = (translation != oldTranslation) || (eulerRot != oldEuler) || (scale != oldScale);
+                                if (changed) {
+                                    glm::mat4 t = glm::translate(glm::mat4(1.0f), translation);
+                                    glm::mat4 r = glm::mat4(glm::quat(glm::radians(eulerRot)));
+                                    glm::mat4 s = glm::scale(glm::mat4(1.0f), scale);
+                                    boneNode->localTransform = t * r * s;
+                                    for (auto& top : ownerScene->topNodes) {
+                                        if (top) top->refreshTransform(glm::mat4(1.0f));
+                                    }
+                                    m_Engine->updateAnimations(0.0f);
+                                }
+                            } else {
+                                ImGui::TextDisabled("Unable to decompose selected bone transform.");
+                            }
+                        }
+                    }
+                }
+
+                ImGui::Unindent();
+            }
+        }
     }
 
     // Mesh info
@@ -1077,6 +1435,28 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         // Children info
         ImGui::Text("Children: %zu", node->children.size());
 
+        if (meshNode && meshNode->mesh && ImGui::TreeNode("Skinning Debug")) {
+            ImGui::Text("Skinned Mesh: %s", meshNode->mesh->hasSkinData ? "Yes" : "No");
+            ImGui::Text("Skin Buffer Address: 0x%llX", static_cast<unsigned long long>(meshNode->mesh->skinBufferAddress));
+            ImGui::Text("Bone Buffer Address: 0x%llX", static_cast<unsigned long long>(m_Engine->skinningMatrixBufferAddress));
+            ImGui::Text("Active Clip: %d", m_Engine->activeAnimationIndex);
+            if (m_Engine->activeAnimationIndex >= 0 &&
+                m_Engine->activeAnimationIndex < static_cast<int>(m_Engine->animationClips.size())) {
+                const auto& clip = m_Engine->animationClips[m_Engine->activeAnimationIndex];
+                ImGui::Text("Clip Name: %s", clip.name.c_str());
+                ImGui::Text("Clip Playing: %s", clip.isPlaying ? "Yes" : "No");
+            }
+            ImGui::Text("Active Skeleton: %d", m_Engine->activeSkeletonIndex);
+            if (m_Engine->activeSkeletonIndex >= 0 &&
+                m_Engine->activeSkeletonIndex < static_cast<int>(m_Engine->skeletons.size())) {
+                const auto& skel = m_Engine->skeletons[m_Engine->activeSkeletonIndex];
+                ImGui::Text("Bone Count: %d", static_cast<int>(skel.bones.size()));
+            } else {
+                ImGui::Text("Bone Count: 0");
+            }
+            ImGui::TreePop();
+        }
+
         ImGui::Unindent();
     }
 
@@ -1105,19 +1485,16 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
             glm::vec3 scale, translation, skew;
             glm::vec4 perspective;
             glm::quat rotation;
-            if (glm::decompose(node->worldTransform, scale, rotation, translation, skew, perspective)) {
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f));
-                glm::mat4 rotationMat = glm::mat4(rotation);
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), scale);
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-                node->localTransform = node->worldTransform;
+            if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
+                applyLocalTRS(glm::vec3(0.0f), eulerRot, scale);
             }
         }
 
         // Reset all transforms
         if (ImGui::Button("Reset Transform", ImVec2(-1, 0))) {
-            node->worldTransform = glm::mat4(1.0f);
             node->localTransform = glm::mat4(1.0f);
+            refreshNodeWorldFromLocal();
         }
 
         // Scale to unit size
@@ -1125,12 +1502,9 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
             glm::vec3 scale, translation, skew;
             glm::vec4 perspective;
             glm::quat rotation;
-            if (glm::decompose(node->worldTransform, scale, rotation, translation, skew, perspective)) {
-                glm::mat4 translationMat = glm::translate(glm::mat4(1.0f), translation);
-                glm::mat4 rotationMat = glm::mat4(rotation);
-                glm::mat4 scaleMat = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f));
-                node->worldTransform = translationMat * rotationMat * scaleMat;
-                node->localTransform = node->worldTransform;
+            if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
+                applyLocalTRS(translation, eulerRot, glm::vec3(1.0f));
             }
         }
 
@@ -1138,23 +1512,43 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
         ImGui::Spacing();
         ImGui::TextDisabled("Uniform Scale:");
         if (ImGui::Button("0.5x", ImVec2(50, 0))) {
-            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(0.5f));
-            node->localTransform = node->worldTransform;
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
+                applyLocalTRS(translation, eulerRot, scale * 0.5f);
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("2x", ImVec2(50, 0))) {
-            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(2.0f));
-            node->localTransform = node->worldTransform;
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
+                applyLocalTRS(translation, eulerRot, scale * 2.0f);
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("0.1x", ImVec2(50, 0))) {
-            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(0.1f));
-            node->localTransform = node->worldTransform;
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
+                applyLocalTRS(translation, eulerRot, scale * 0.1f);
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("10x", ImVec2(50, 0))) {
-            node->worldTransform = glm::scale(node->worldTransform, glm::vec3(10.0f));
-            node->localTransform = node->worldTransform;
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            if (glm::decompose(node->localTransform, scale, rotation, translation, skew, perspective)) {
+                glm::vec3 eulerRot = glm::degrees(glm::eulerAngles(rotation));
+                applyLocalTRS(translation, eulerRot, scale * 10.0f);
+            }
         }
 
         ImGui::Unindent();
@@ -1257,6 +1651,9 @@ void ObjectInspectorView::RenderGLTFMaterialEditor() {
     glm::vec3 emission = glm::vec3(constants->extra[0]);
     float emissionStrength = constants->extra[0].w;
     float reflectionIntensity = constants->extra[1].x;
+    uint32_t emissiveTexID = constants->emissiveTexID;
+    uint32_t emissiveTexBackup = static_cast<uint32_t>(std::max(constants->extra[12].x, 0.0f));
+    bool useEmissiveTexture = (emissiveTexID > 0);
 
     vmaUnmapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation);
 
@@ -1290,6 +1687,16 @@ void ObjectInspectorView::RenderGLTFMaterialEditor() {
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
     if (ImGui::SliderFloat("##GLTFRoughness", &roughness, 0.0f, 1.0f, "")) changed = true;
     ImGui::PopStyleColor();
+
+    ImGui::Text("Normal Strength");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+    ImGui::TextDisabled("%.0f%%", normalStrength * 100);
+    if (ImGui::SliderFloat("##GLTFNormalStrength", &normalStrength, 0.0f, 2.0f, "")) changed = true;
+
+    ImGui::Text("Occlusion");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+    ImGui::TextDisabled("%.0f%%", ao * 100);
+    if (ImGui::SliderFloat("##GLTFAO", &ao, 0.0f, 1.0f, "")) changed = true;
 
     // Reflection
     ImGui::Spacing();
@@ -1325,6 +1732,15 @@ void ObjectInspectorView::RenderGLTFMaterialEditor() {
     }
     if (ImGui::SliderFloat("Strength##GLTFEm", &emissionStrength, 0.0f, 10.0f, "%.2f")) {
         changed = true;
+    }
+    if (ImGui::Checkbox("Use Emissive Texture", &useEmissiveTexture)) {
+        changed = true;
+        if (!useEmissiveTexture) {
+            emissiveTexBackup = emissiveTexID;
+            emissiveTexID = 0;
+        } else if (emissiveTexID == 0 && emissiveTexBackup > 0) {
+            emissiveTexID = emissiveTexBackup;
+        }
     }
 
     ImGui::Spacing();
@@ -1374,6 +1790,8 @@ void ObjectInspectorView::RenderGLTFMaterialEditor() {
             writeConstants->metal_rough_factors = glm::vec4(metallic, roughness, ao, normalStrength);
             writeConstants->extra[0] = glm::vec4(emission, emissionStrength);
             writeConstants->extra[1].x = reflectionIntensity;
+            writeConstants->emissiveTexID = useEmissiveTexture ? emissiveTexID : 0;
+            writeConstants->extra[12].x = static_cast<float>(emissiveTexBackup);
 
             vmaUnmapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation);
 

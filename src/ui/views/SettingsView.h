@@ -52,6 +52,7 @@ struct GraphicsSettings {
     // Display
     int windowMode = 1;          // 0=Windowed, 1=Borderless, 2=Fullscreen
     int resolutionIndex = 0;
+    float renderScale = 1.0f;    // Internal render resolution scale
     bool vsync = true;
 
     // Quality

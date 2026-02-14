@@ -73,6 +73,8 @@ void SettingsView::ApplyToEngine() {
     m_Engine->snapPositionValue = std::max(0.01f, m_Editor.snapValue);
 
     // Apply render settings used by renderer/runtime
+    m_Engine->renderScale = std::clamp(m_Graphics.renderScale, 0.5f, 1.0f);
+
     auto& rs = m_Engine->_renderSettings;
     rs.bloomEnabled = m_Graphics.bloom;
     rs.bloomIntensity = m_Graphics.bloomIntensity;
@@ -132,6 +134,7 @@ void SettingsView::SaveSettings(const std::string& path) {
         // Graphics
         j["graphics"]["windowMode"] = m_Graphics.windowMode;
         j["graphics"]["resolutionIndex"] = m_Graphics.resolutionIndex;
+        j["graphics"]["renderScale"] = m_Graphics.renderScale;
         j["graphics"]["vsync"] = m_Graphics.vsync;
         j["graphics"]["qualityPreset"] = m_Graphics.qualityPreset;
         j["graphics"]["shadowQuality"] = m_Graphics.shadowQuality;
@@ -182,6 +185,7 @@ void SettingsView::LoadSettings(const std::string& path) {
             auto& g = j["graphics"];
             m_Graphics.windowMode = g.value("windowMode", 1);
             m_Graphics.resolutionIndex = g.value("resolutionIndex", 0);
+            m_Graphics.renderScale = g.value("renderScale", 1.0f);
             m_Graphics.vsync = g.value("vsync", true);
             m_Graphics.qualityPreset = g.value("qualityPreset", 2);
             m_Graphics.shadowQuality = g.value("shadowQuality", 2);
@@ -237,6 +241,66 @@ void SettingsView::ApplyQualityPreset(int preset) {
     m_Graphics.depthOfField = p.depthOfField;
     m_Graphics.qualityPreset = preset;
 
+    // Drive visible render-quality differences immediately.
+    switch (preset) {
+        case 0: // Low
+            m_Graphics.bloom = false;
+            m_Graphics.ambientOcclusion = false;
+            m_Graphics.screenSpaceReflections = false;
+            m_Graphics.shadowDistance = 60.0f;
+            m_Graphics.anisotropicFiltering = 1;
+            m_Graphics.msaaSamples = 2;
+            m_Graphics.renderScale = 0.6f;
+            m_Graphics.taaSharpness = 0.15f;
+            m_Graphics.bloomIntensity = 0.2f;
+            m_Graphics.aoRadius = 0.25f;
+            m_Graphics.aoIntensity = 0.4f;
+            break;
+        case 1: // Medium
+            m_Graphics.bloom = true;
+            m_Graphics.ambientOcclusion = true;
+            m_Graphics.screenSpaceReflections = false;
+            m_Graphics.shadowDistance = 120.0f;
+            m_Graphics.anisotropicFiltering = 4;
+            m_Graphics.msaaSamples = 2;
+            m_Graphics.renderScale = 0.75f;
+            m_Graphics.taaSharpness = 0.3f;
+            m_Graphics.bloomIntensity = 0.35f;
+            m_Graphics.aoRadius = 0.4f;
+            m_Graphics.aoIntensity = 0.75f;
+            break;
+        case 2: // High
+            m_Graphics.bloom = true;
+            m_Graphics.ambientOcclusion = true;
+            m_Graphics.screenSpaceReflections = true;
+            m_Graphics.shadowDistance = 200.0f;
+            m_Graphics.anisotropicFiltering = 8;
+            m_Graphics.msaaSamples = 4;
+            m_Graphics.renderScale = 0.9f;
+            m_Graphics.taaSharpness = 0.5f;
+            m_Graphics.bloomIntensity = 0.5f;
+            m_Graphics.aoRadius = 0.5f;
+            m_Graphics.aoIntensity = 1.0f;
+            break;
+        case 3: // Ultra
+            m_Graphics.bloom = true;
+            m_Graphics.ambientOcclusion = true;
+            m_Graphics.screenSpaceReflections = true;
+            m_Graphics.shadowDistance = 320.0f;
+            m_Graphics.anisotropicFiltering = 16;
+            m_Graphics.msaaSamples = 8;
+            m_Graphics.renderScale = 1.0f;
+            m_Graphics.taaSharpness = 0.7f;
+            m_Graphics.bloomIntensity = 0.65f;
+            m_Graphics.aoRadius = 0.65f;
+            m_Graphics.aoIntensity = 1.2f;
+            break;
+        default:
+            break;
+    }
+
+    ApplyToEngine();
+
     m_HasUnsavedChanges = true;
 }
 
@@ -284,8 +348,37 @@ void SettingsView::OnRenderToolbar() {
 void SettingsView::OnRenderContent() {
     ImGui::BeginChild("SettingsContent", ImVec2(0, 0), true);
 
+    if (m_Engine) {
+        const auto& rs = m_Engine->_renderSettings;
+        m_Graphics.bloom = rs.bloomEnabled;
+        m_Graphics.bloomIntensity = rs.bloomIntensity;
+        m_Graphics.bloomThreshold = rs.bloomThreshold;
+        m_Graphics.renderScale = m_Engine->renderScale;
+        m_Graphics.ambientOcclusion = rs.ssaoEnabled;
+        m_Graphics.aoRadius = rs.ssaoRadius;
+        m_Graphics.aoIntensity = rs.ssaoIntensity;
+        if (rs.ssaoSamples <= 8) m_Graphics.aoQuality = 0;
+        else if (rs.ssaoSamples <= 16) m_Graphics.aoQuality = 1;
+        else m_Graphics.aoQuality = 2;
+        m_Graphics.screenSpaceReflections = rs.ssrEnabled;
+        m_Graphics.exposure = rs.exposure;
+        m_Graphics.gamma = rs.gamma;
+        m_Graphics.contrast = rs.contrast;
+        m_Graphics.saturation = rs.saturation;
+        m_Graphics.taaSharpness = rs.sharpness;
+
+        m_Editor.showGrid = m_Engine->_showGrid;
+        m_Editor.gridSize = m_Engine->_gridSettings.baseGridSize;
+        m_Editor.gridOpacity = m_Engine->_gridSettings.gridOpacity;
+        m_Editor.snapToGrid = m_Engine->snapEnabled;
+        m_Editor.snapValue = m_Engine->snapPositionValue;
+        m_Editor.cameraMoveSpeed = m_Engine->mainCamera.moveSpeed;
+    }
+
     switch (m_CurrentCategory) {
         case SettingsCategory::Rendering:
+            RenderGraphicsSettings();
+            ImGui::Separator();
             RenderRenderingSettings();
             break;
         case SettingsCategory::Editor:
@@ -357,6 +450,14 @@ void SettingsView::RenderGraphicsSettings() {
     if (ImGui::Combo("##Resolution", &m_Graphics.resolutionIndex,
                      resNames.data(), static_cast<int>(resNames.size()))) {
         m_HasUnsavedChanges = true;
+    }
+
+    ImGui::Text("Render Scale");
+    ImGui::SameLine(150);
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::SliderFloat("##RenderScale", &m_Graphics.renderScale, 0.5f, 1.0f, "%.2fx")) {
+        m_HasUnsavedChanges = true;
+        m_Graphics.qualityPreset = 4; // Custom
     }
 
     // VSync

@@ -17,6 +17,8 @@
 #include "EditorView.h"
 #include "HierarchyView.h"  // For PrimitiveFaceConfig
 
+struct Node;
+
 namespace Yalaz::UI {
 
 class ObjectInspectorView : public EditorView {
@@ -48,6 +50,10 @@ private:
     // Name editing buffer
     char m_NameBuffer[256] = "";
     int m_LastEditedIndex = -1;
+    Node* m_LastInspectedNode = nullptr;
+    int m_SelectedSkeletonIndex = -1;
+    int m_SelectedBoneIndex = -1;
+    bool m_ApplyTransformToWholeAsset = true;
 };
 
 } // namespace Yalaz::UI

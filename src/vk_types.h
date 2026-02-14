@@ -263,6 +263,7 @@ struct MaterialInstance {
     MaterialPipeline* pipeline;
     VkDescriptorSet materialSet;
     MaterialPass passType;
+    bool doubleSided = false;
 };
 
 struct UniformBufferObject {
@@ -287,6 +288,11 @@ struct Vertex {
     glm::vec4 tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // xyz = tangent dir, w = handedness
 
     static VertexInputDescription get_vertex_description();
+};
+
+struct SkinVertexData {
+    glm::ivec4 joints = glm::ivec4(0);
+    glm::vec4 weights = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
 };
 
 
@@ -339,6 +345,13 @@ struct GPUDrawPushConstants {
     glm::vec4 baseColor;           // 16 bytes, offset 96-111
 };  // Total: 112 bytes - matches GLSL std430 layout
 static_assert(sizeof(GPUDrawPushConstants) == 112, "GPUDrawPushConstants must be 112 bytes for GPU alignment");
+
+struct GPUSkinnedDrawPushConstants {
+    glm::mat4 worldMatrix;
+    VkDeviceAddress vertexBuffer;
+    VkDeviceAddress skinBuffer;
+    VkDeviceAddress boneBuffer;
+};
 
 // =============================================================================
 // GRID PUSH CONSTANTS - For dynamic infinite grid rendering
@@ -444,6 +457,8 @@ struct RenderObject {
 
     VkBuffer vertexBuffer;
     VkDeviceAddress vertexBufferAddress;
+    VkDeviceAddress skinBufferAddress = 0;
+    bool isSkinned = false;
 
     std::string name;
 
@@ -519,8 +534,9 @@ struct Node : public IRenderable {
 
     virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx)
     {
+        glm::mat4 nodeMatrix = topMatrix * localTransform;
         for (auto& c : children) {
-            c->Draw(topMatrix, ctx);
+            c->Draw(nodeMatrix, ctx);
         }
     }
 };

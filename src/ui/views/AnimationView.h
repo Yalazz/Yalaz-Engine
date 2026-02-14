@@ -169,6 +169,10 @@ private:
     void RenderPreviewPanel();
     void RenderStateMachine();
     void HandleTimelineInput();
+    void EnsureGraphInitialized();
+    void UpdateAutoGraphPath();
+    void SaveStateMachineGraph(const std::string& path);
+    void LoadStateMachineGraph(const std::string& path);
 
     float TimeToPixel(float time);
     float PixelToTime(float pixel);
@@ -189,6 +193,8 @@ private:
     int m_SelectedTrackIndex = -1;
     int m_SelectedBoneIndex = -1;
     int m_SelectedStateIndex = -1;
+    int m_SelectedTransitionIndex = -1;
+    int m_DraggingStateIndex = -1;
 
     float m_TrackHeight = 24.0f;
     float m_PreviewPanelWidth = 250.0f;
@@ -196,6 +202,9 @@ private:
 
     ImVec2 m_TimelinePos = {0, 0};
     ImVec2 m_TimelineSize = {0, 0};
+    char m_GraphPath[260] = "animation_state_machine.json";
+    char m_NewParamName[64] = "speed";
+    std::string m_LastAutoGraphScene;
 };
 
 } // namespace Yalaz::UI

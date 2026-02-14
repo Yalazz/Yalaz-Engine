@@ -27,13 +27,17 @@
 #include "imgui_impl_vulkan.h"
 
 #include <unordered_set>  // Benzersiz shader pipeline'larını saklamak için
+#include <unordered_map>
 #include <vector>         //  Görünür objeleri saklamak için
 #include <string>         //  Objelerin isimlerini saklamak için
 
 #include <ImGuizmo.h>
+#include <glm/gtx/matrix_decompose.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 // Professional UI System
 #include "ui/EditorUI.h"
+#include "ui/views/ConsoleView.h"
 
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
@@ -203,35 +207,6 @@ void VulkanEngine::init()
         shaderPipelines.push_back(gridShader);
     }
 
-    // Create demo animation for AnimationView
-    AnimationClipData walkClip;
-    walkClip.name = "Walk";
-    walkClip.duration = 1.0f;
-    walkClip.loop = true;
-    walkClip.speed = 1.0f;
-    AnimationTrackData hipTrack;
-    hipTrack.targetNode = "Hips";
-    hipTrack.property = "translation";
-    hipTrack.keyframes.push_back({0.0f, glm::vec4(0, 1, 0, 0), 2});
-    hipTrack.keyframes.push_back({0.5f, glm::vec4(0, 1.1f, 0, 0), 2});
-    hipTrack.keyframes.push_back({1.0f, glm::vec4(0, 1, 0, 0), 2});
-    walkClip.tracks.push_back(hipTrack);
-    animationClips.push_back(walkClip);
-
-    // Create demo skeleton
-    SkeletonData humanSkeleton;
-    humanSkeleton.name = "Humanoid";
-    humanSkeleton.bones.push_back({"Root", -1, glm::vec3(0, 0, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"Hips", 0, glm::vec3(0, 1, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"Spine", 1, glm::vec3(0, 0.3f, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"Chest", 2, glm::vec3(0, 0.3f, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"Head", 3, glm::vec3(0, 0.3f, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"LeftArm", 3, glm::vec3(0.2f, 0, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"RightArm", 3, glm::vec3(-0.2f, 0, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"LeftLeg", 1, glm::vec3(0.1f, 0, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    humanSkeleton.bones.push_back({"RightLeg", 1, glm::vec3(-0.1f, 0, 0), glm::quat(1, 0, 0, 0), glm::vec3(1)});
-    skeletons.push_back(humanSkeleton);
-
     // everything went fine
     _isInitialized = true;
 
@@ -375,6 +350,12 @@ void VulkanEngine::cleanup()
         if (pointLightBuffer.buffer != VK_NULL_HANDLE) {
             destroy_buffer(pointLightBuffer);
             pointLightBuffer.buffer = VK_NULL_HANDLE;
+        }
+
+        if (skinningMatrixBuffer.buffer != VK_NULL_HANDLE) {
+            destroy_buffer(skinningMatrixBuffer);
+            skinningMatrixBuffer = {};
+            skinningMatrixBufferAddress = 0;
         }
 
         // Default GLTF material data buffer
@@ -1973,6 +1954,8 @@ void VulkanEngine::update_imgui()
 {
     // === PROFESSIONAL OOP UI SYSTEM ===
     // Blender 4.0 Dark Theme with proper panel architecture
+    float uiDeltaTime = stats.frametime > 0.0f ? (stats.frametime / 1000.0f) : (1.0f / 60.0f);
+    Yalaz::UI::EditorUI::Get().Update(uiDeltaTime);
     Yalaz::UI::EditorUI::Get().Render();
 
     // Keep gizmo for now (will integrate into UI system later)
@@ -2095,13 +2078,27 @@ void VulkanEngine::draw_node_gizmo()
 
     // Update transform when using gizmo
     if (ImGuizmo::IsUsing()) {
-        selectedNode->localTransform = model;
+        auto sceneIt = loadedScenes.find(selectedObjectName);
+        if (sceneIt != loadedScenes.end() && sceneIt->second) {
+            // Scene/root selection: apply gizmo delta to whole imported asset.
+            glm::mat4 oldLocal = selectedNode->localTransform;
+            glm::mat4 delta = model * glm::inverse(oldLocal);
+            for (auto& top : sceneIt->second->topNodes) {
+                if (!top) continue;
+                top->localTransform = delta * top->localTransform;
+            }
+            for (auto& top : sceneIt->second->topNodes) {
+                if (top) top->refreshTransform(glm::mat4(1.0f));
+            }
+        } else {
+            selectedNode->localTransform = model;
 
-        glm::mat4 parentMatrix = glm::mat4(1.0f);
-        if (auto p = selectedNode->parent.lock()) {
-            parentMatrix = p->worldTransform;
+            glm::mat4 parentMatrix = glm::mat4(1.0f);
+            if (auto p = selectedNode->parent.lock()) {
+                parentMatrix = p->worldTransform;
+            }
+            selectedNode->refreshTransform(parentMatrix);
         }
-        selectedNode->refreshTransform(parentMatrix);
     }
 
     // Compact gizmo toolbar overlay (top-center of viewport)
@@ -2707,14 +2704,43 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
     VkRect2D scissor = { {0, 0}, _windowExtent };
 
+    // Sort transparent surfaces back-to-front from active camera for stable alpha blending.
+    if (drawCommands.TransparentSurfaces.size() > 1) {
+        const glm::vec3 camPos = mainCamera.position;
+        std::stable_sort(drawCommands.TransparentSurfaces.begin(), drawCommands.TransparentSurfaces.end(),
+            [&](const RenderObject& a, const RenderObject& b) {
+                const glm::vec3 aCenter = glm::vec3(a.transform * glm::vec4(a.bounds.origin, 1.0f));
+                const glm::vec3 bCenter = glm::vec3(b.transform * glm::vec4(b.bounds.origin, 1.0f));
+                return glm::length2(aCenter - camPos) > glm::length2(bCenter - camPos);
+            });
+    }
+
     // === Seçili Obje için Outline ===
     if (_showOutline)
     {
+        auto selectedSceneIt = loadedScenes.find(selectedObjectName);
+        const bool sceneSelectionActive = (selectedSceneIt != loadedScenes.end() && selectedSceneIt->second != nullptr);
+
+        auto isNodeInSelectedScene = [&](const MeshNode* meshNode) -> bool {
+            if (!sceneSelectionActive || !meshNode) return false;
+            for (const auto& [nodeName, nodePtr] : selectedSceneIt->second->nodes) {
+                (void)nodeName;
+                if (nodePtr && nodePtr.get() == meshNode) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         for (uint32_t drawID : opaque_draws)
         {
             const RenderObject& obj = drawCommands.OpaqueSurfaces[drawID];
 
-            if (selectedNode && obj.nodePointer == dynamic_cast<MeshNode*>(selectedNode))
+            const bool singleNodeSelected =
+                (selectedNode && obj.nodePointer == dynamic_cast<MeshNode*>(selectedNode));
+            const bool wholeSceneSelected = isNodeInSelectedScene(obj.nodePointer);
+
+            if (singleNodeSelected || wholeSceneSelected)
             {
                 /*fmt::println("Seçili obje çiziliyor (outline): {}", obj.name);*/
                 draw_wireframe_outline(cmd, obj, globalDescriptor, viewport, scissor);
@@ -2885,8 +2911,8 @@ void VulkanEngine::draw_shaded(
     VkRect2D scissor,
     const std::vector<uint32_t>& opaque_draws)
 {
-    MaterialPipeline* lastPipeline = nullptr;
     MaterialInstance* lastMaterial = nullptr;
+    MaterialPipeline* lastBoundPipeline = nullptr;
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
 
     auto draw = [&](const RenderObject& r) {
@@ -2894,21 +2920,33 @@ void VulkanEngine::draw_shaded(
             return;
 
         MaterialPipeline* pipeline = r.material->pipeline;
-
-        if (r.material != lastMaterial) {
-            lastMaterial = r.material;
-
-            if (pipeline != lastPipeline) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
-                    0, 1, &globalDescriptor, 0, nullptr);
-
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                lastPipeline = pipeline;
+        if (r.isSkinned && r.skinBufferAddress != 0 && skinningMatrixBufferAddress != 0) {
+            if (r.material->passType == MaterialPass::Transparent) {
+                pipeline = r.material->doubleSided
+                    ? &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline
+                    : &metalRoughMaterial.transparentSkinnedPipeline;
+            } else {
+                pipeline = &metalRoughMaterial.opaqueSkinnedPipeline;
             }
+            if (!pipeline || pipeline->pipeline == VK_NULL_HANDLE || pipeline->layout == VK_NULL_HANDLE) {
+                pipeline = r.material->pipeline; // fallback to static pipeline
+            }
+        }
 
+        bool pipelineChanged = (pipeline != lastBoundPipeline);
+        bool materialChanged = (r.material != lastMaterial);
+
+        if (pipelineChanged) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
+                0, 1, &globalDescriptor, 0, nullptr);
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+            lastBoundPipeline = pipeline;
+        }
+
+        if (pipelineChanged || materialChanged) {
+            lastMaterial = r.material;
             if (r.material->materialSet != VK_NULL_HANDLE) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
                     1, 1, &r.material->materialSet, 0, nullptr);
@@ -2920,12 +2958,31 @@ void VulkanEngine::draw_shaded(
             vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
         }
 
-        GPUDrawPushConstants push{};
-        push.worldMatrix = r.transform;
-        push.vertexBuffer = r.vertexBufferAddress;
+        if (r.isSkinned && pipeline == &metalRoughMaterial.opaqueSkinnedPipeline) {
+            GPUSkinnedDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
+            push.skinBuffer = r.skinBufferAddress;
+            push.boneBuffer = skinningMatrixBufferAddress;
+            vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUSkinnedDrawPushConstants), &push);
+        } else if (r.isSkinned && (pipeline == &metalRoughMaterial.transparentSkinnedPipeline ||
+            pipeline == &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline)) {
+            GPUSkinnedDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
+            push.skinBuffer = r.skinBufferAddress;
+            push.boneBuffer = skinningMatrixBufferAddress;
+            vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUSkinnedDrawPushConstants), &push);
+        } else {
+            GPUDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
 
-        vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-            sizeof(GPUDrawPushConstants), &push);
+            vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUDrawPushConstants), &push);
+        }
 
         stats.drawcall_count++;
         stats.triangle_count += r.indexCount / 3;
@@ -3132,21 +3189,35 @@ void VulkanEngine::draw_rendered(
             return;
 
         MaterialPipeline* pipeline = r.material->pipeline;
-
-        if (r.material != lastMaterial) {
-            lastMaterial = r.material;
-
-            if (pipeline != lastPipeline) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
-                    0, 1, &globalDescriptor, 0, nullptr);
-
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                lastPipeline = pipeline;
+        if (r.isSkinned && r.skinBufferAddress != 0 && skinningMatrixBufferAddress != 0) {
+            if (r.material->passType == MaterialPass::Transparent) {
+                pipeline = r.material->doubleSided
+                    ? &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline
+                    : &metalRoughMaterial.transparentSkinnedPipeline;
+            } else {
+                pipeline = &metalRoughMaterial.opaqueSkinnedPipeline;
             }
+            if (!pipeline || pipeline->pipeline == VK_NULL_HANDLE || pipeline->layout == VK_NULL_HANDLE) {
+                pipeline = r.material->pipeline;
+            }
+        }
 
+        bool pipelineChanged = (pipeline != lastPipeline);
+        bool materialChanged = (r.material != lastMaterial);
+
+        if (pipelineChanged) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
+                0, 1, &globalDescriptor, 0, nullptr);
+
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+            lastPipeline = pipeline;
+        }
+
+        if (pipelineChanged || materialChanged) {
+            lastMaterial = r.material;
             if (r.material->materialSet != VK_NULL_HANDLE) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
                     1, 1, &r.material->materialSet, 0, nullptr);
@@ -3158,12 +3229,30 @@ void VulkanEngine::draw_rendered(
             vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
         }
 
-        GPUDrawPushConstants push{};
-        push.worldMatrix = r.transform;
-        push.vertexBuffer = r.vertexBufferAddress;
-
-        vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-            sizeof(GPUDrawPushConstants), &push);
+        if (r.isSkinned && pipeline == &metalRoughMaterial.opaqueSkinnedPipeline) {
+            GPUSkinnedDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
+            push.skinBuffer = r.skinBufferAddress;
+            push.boneBuffer = skinningMatrixBufferAddress;
+            vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUSkinnedDrawPushConstants), &push);
+        } else if (r.isSkinned && (pipeline == &metalRoughMaterial.transparentSkinnedPipeline ||
+            pipeline == &metalRoughMaterial.transparentDoubleSidedSkinnedPipeline)) {
+            GPUSkinnedDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
+            push.skinBuffer = r.skinBufferAddress;
+            push.boneBuffer = skinningMatrixBufferAddress;
+            vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUSkinnedDrawPushConstants), &push);
+        } else {
+            GPUDrawPushConstants push{};
+            push.worldMatrix = r.transform;
+            push.vertexBuffer = r.vertexBufferAddress;
+            vkCmdPushConstants(cmd, pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(GPUDrawPushConstants), &push);
+        }
 
         stats.drawcall_count++;
         stats.triangle_count += r.indexCount / 3;
@@ -5191,10 +5280,16 @@ void VulkanEngine::processPendingSceneUnloads() {
     // At this point the GPU fence has been waited on, so all previous frames
     // that referenced these scene resources have finished executing.
     // Safe to destroy now.
+    vkDeviceWaitIdle(_device);
 
     for (auto& sceneName : _pendingSceneUnloads) {
         auto it = loadedScenes.find(sceneName);
         if (it == loadedScenes.end()) continue;
+        std::string scenePath;
+        auto pathIt = sceneFilePaths.find(sceneName);
+        if (pathIt != sceneFilePaths.end()) {
+            scenePath = pathIt->second;
+        }
 
         // Clear selection if it belongs to this scene
         // nodes map contains ALL nodes (including children), so flat iteration suffices
@@ -5203,6 +5298,8 @@ void VulkanEngine::processPendingSceneUnloads() {
                 if (node.get() == selectedNode) {
                     selectedNode = nullptr;
                     selectedObjectName.clear();
+                    selectedPrimitiveIndex = -1;
+                    selectedLightIndex = -1;
                     break;
                 }
             }
@@ -5215,6 +5312,49 @@ void VulkanEngine::processPendingSceneUnloads() {
 
         // Now safe to destroy the scene (shared_ptr → clearAll → destroys GPU resources)
         loadedScenes.erase(it);
+        sceneFilePaths.erase(sceneName);
+
+        if (!scenePath.empty()) {
+            auto fileNameOnly = [](const std::string& p) -> std::string {
+                size_t s1 = p.find_last_of('/');
+                size_t s2 = p.find_last_of('\\');
+                size_t pos = std::string::npos;
+                if (s1 == std::string::npos) pos = s2;
+                else if (s2 == std::string::npos) pos = s1;
+                else pos = std::max(s1, s2);
+                return (pos == std::string::npos) ? p : p.substr(pos + 1);
+            };
+            const std::string unloadedFile = fileNameOnly(scenePath);
+
+            animationClips.erase(
+                std::remove_if(animationClips.begin(), animationClips.end(),
+                    [&](const AnimationClipData& c) {
+                        if (c.sourceScene.empty()) return false;
+                        if (c.sourceScene == scenePath) return true;
+                        return fileNameOnly(c.sourceScene) == unloadedFile;
+                    }),
+                animationClips.end());
+
+            skeletons.erase(
+                std::remove_if(skeletons.begin(), skeletons.end(),
+                    [&](const SkeletonData& s) {
+                        if (s.sourceScene.empty()) return false;
+                        if (s.sourceScene == scenePath) return true;
+                        return fileNameOnly(s.sourceScene) == unloadedFile;
+                    }),
+                skeletons.end());
+
+            if (animationClips.empty()) {
+                activeAnimationIndex = -1;
+            } else if (activeAnimationIndex >= static_cast<int>(animationClips.size())) {
+                activeAnimationIndex = 0;
+            }
+            if (skeletons.empty()) {
+                activeSkeletonIndex = -1;
+            } else if (activeSkeletonIndex >= static_cast<int>(skeletons.size())) {
+                activeSkeletonIndex = 0;
+            }
+        }
 
         if (_pathTracer) {
             _pathTracer->notifySceneChanged();
@@ -5229,6 +5369,7 @@ void VulkanEngine::update_scene() {
     float dt = stats.frametime / 1000.f; // frametime is in ms, convert to seconds
     if (dt <= 0.f) dt = 1.f / 60.f;     // fallback for first frame
     mainCamera.update(dt);
+    updateAnimations(dt);
 
     glm::mat4 view = mainCamera.getViewMatrix();
 
@@ -5568,6 +5709,40 @@ GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<V
 
     newSurface.indexCount = static_cast<uint32_t>(indices.size());
     return newSurface;
+}
+
+AllocatedBuffer VulkanEngine::uploadSkinBuffer(std::span<SkinVertexData> skinData)
+{
+    const size_t skinBufferSize = skinData.size() * sizeof(SkinVertexData);
+    if (skinBufferSize == 0) {
+        return {};
+    }
+
+    AllocatedBuffer gpuBuffer = create_buffer(
+        skinBufferSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+
+    AllocatedBuffer staging = create_buffer(
+        skinBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY);
+
+    void* data = staging.allocation->GetMappedData();
+    memcpy(data, skinData.data(), skinBufferSize);
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        VkBufferCopy copy{};
+        copy.srcOffset = 0;
+        copy.dstOffset = 0;
+        copy.size = skinBufferSize;
+        vkCmdCopyBuffer(cmd, staging.buffer, gpuBuffer.buffer, 1, &copy);
+        });
+
+    destroy_buffer(staging);
+    return gpuBuffer;
 }
 
 FrameData& VulkanEngine::get_current_frame()
@@ -7652,17 +7827,27 @@ VkShaderModule VulkanEngine::load_shader_module(const char* filePath) {
 
 void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 {
-    fmt::print("[Pipelines] Baslatiliyor...\n");
+    Yalaz::UI::Console::Log("[Pipelines] Baslatiliyor...");
 
     // Shader modüllerini yükle
-    VkShaderModule meshFragShader;
+    VkShaderModule meshFragShader = VK_NULL_HANDLE;
     if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", engine->_device, &meshFragShader)) {
-        fmt::print("[Pipelines] mesh_pbr.frag.spv yuklenemedi!\n");
+        Yalaz::UI::Console::Error("[Pipelines] mesh_pbr.frag.spv yuklenemedi!");
+        throw std::runtime_error("Failed to load ../../shaders/mesh.frag.spv");
     }
 
-    VkShaderModule meshVertexShader;
+    VkShaderModule meshVertexShader = VK_NULL_HANDLE;
     if (!vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &meshVertexShader)) {
-        fmt::print("[Pipelines] mesh.vert.spv yuklenemedi!\n");
+        Yalaz::UI::Console::Error("[Pipelines] mesh.vert.spv yuklenemedi!");
+        vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
+        throw std::runtime_error("Failed to load ../../shaders/mesh.vert.spv");
+    }
+
+    VkShaderModule meshSkinnedVertexShader = VK_NULL_HANDLE;
+    bool hasSkinnedVertexShader = true;
+    if (!vkutil::load_shader_module("../../shaders/mesh_skinned.vert.spv", engine->_device, &meshSkinnedVertexShader)) {
+        Yalaz::UI::Console::Warn("[Pipelines] mesh_skinned.vert.spv yuklenemedi!");
+        hasSkinnedVertexShader = false;
     }
 
     // Push constant tanımı (shader'da 176 byte kullanılıyor)
@@ -7678,7 +7863,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     matrixRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
     // Descriptor layout tanımı
-    fmt::print("[Pipelines] Descriptor layout olusturuluyor...\n");
+    Yalaz::UI::Console::Log("[Pipelines] Descriptor layout olusturuluyor...");
     DescriptorLayoutBuilder layoutBuilder;
     layoutBuilder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT); // SceneData
     layoutBuilder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // colorTex
@@ -7703,9 +7888,27 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 
     opaquePipeline.layout = newLayout;
     transparentPipeline.layout = newLayout;
+    transparentDoubleSidedPipeline.layout = newLayout;
+
+    VkPushConstantRange skinnedPushRange{};
+    skinnedPushRange.offset = 0;
+    skinnedPushRange.size = sizeof(GPUSkinnedDrawPushConstants);
+    skinnedPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkPipelineLayoutCreateInfo skinned_layout_info = vkinit::pipeline_layout_create_info();
+    skinned_layout_info.setLayoutCount = 2;
+    skinned_layout_info.pSetLayouts = layouts;
+    skinned_layout_info.pPushConstantRanges = &skinnedPushRange;
+    skinned_layout_info.pushConstantRangeCount = 1;
+
+    VkPipelineLayout skinnedLayout;
+    VK_CHECK(vkCreatePipelineLayout(engine->_device, &skinned_layout_info, nullptr, &skinnedLayout));
+    opaqueSkinnedPipeline.layout = skinnedLayout;
+    transparentSkinnedPipeline.layout = skinnedLayout;
+    transparentDoubleSidedSkinnedPipeline.layout = skinnedLayout;
 
     // PipelineBuilder kuruluyor
-    fmt::print("[Pipelines] Pipeline yapisi insa ediliyor...\n");
+    Yalaz::UI::Console::Log("[Pipelines] Pipeline yapisi insa ediliyor...");
     PipelineBuilder pipelineBuilder;
     pipelineBuilder.set_shaders(meshVertexShader, meshFragShader);
     pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
@@ -7727,21 +7930,62 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     pipelineBuilder._renderInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
 
     // Opaque pipeline
-    fmt::print("[Pipelines] Opaque pipeline olusturuluyor...\n");
+    Yalaz::UI::Console::Log("[Pipelines] Opaque pipeline olusturuluyor...");
     opaquePipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
+    opaquePipeline.name = "gltf_opaque";
 
-    // Transparent pipeline (alpha blending for glass, water, etc.)
-    fmt::print("[Pipelines] Transparent pipeline olusturuluyor...\n");
+    // Transparent pipeline (default single-sided to avoid "double rendered" look)
+    Yalaz::UI::Console::Log("[Pipelines] Transparent pipeline olusturuluyor...");
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
     pipelineBuilder.enable_blending_alphablend();  // Use alpha blend, not additive
     pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);  // Read depth, but don't write
     pipelineBuilder._depthStencil.depthWriteEnable = VK_FALSE;  // Don't write to depth for transparency
     transparentPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
+    transparentPipeline.name = "gltf_transparent";
+
+    // Double-sided transparent variant (for materials explicitly marked doubleSided in glTF)
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    transparentDoubleSidedPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
+    transparentDoubleSidedPipeline.name = "gltf_transparent_double_sided";
+
+    // Skinned variants use same fragment/material path with skinned vertex shader
+    if (hasSkinnedVertexShader) {
+        pipelineBuilder.set_shaders(meshSkinnedVertexShader, meshFragShader);
+        pipelineBuilder.disable_blending();
+        pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+        pipelineBuilder._depthStencil.depthWriteEnable = VK_TRUE;
+        pipelineBuilder._pipelineLayout = skinnedLayout;
+        opaqueSkinnedPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
+        opaqueSkinnedPipeline.name = "gltf_opaque_skinned";
+
+        pipelineBuilder.enable_blending_alphablend();
+        pipelineBuilder.set_cull_mode(VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE);
+        pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+        pipelineBuilder._depthStencil.depthWriteEnable = VK_FALSE;
+        transparentSkinnedPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
+        transparentSkinnedPipeline.name = "gltf_transparent_skinned";
+
+        pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+        transparentDoubleSidedSkinnedPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
+        transparentDoubleSidedSkinnedPipeline.name = "gltf_transparent_skinned_double_sided";
+    } else {
+        // Skinned draw path will automatically fall back to static pipelines in draw_shaded().
+        opaqueSkinnedPipeline.pipeline = VK_NULL_HANDLE;
+        transparentSkinnedPipeline.pipeline = VK_NULL_HANDLE;
+        transparentDoubleSidedSkinnedPipeline.pipeline = VK_NULL_HANDLE;
+        opaqueSkinnedPipeline.name = "gltf_opaque_skinned_missing";
+        transparentSkinnedPipeline.name = "gltf_transparent_skinned_missing";
+        transparentDoubleSidedSkinnedPipeline.name = "gltf_transparent_skinned_double_sided_missing";
+    }
 
     // Shader modüllerini temizle
     vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
     vkDestroyShaderModule(engine->_device, meshVertexShader, nullptr);
+    if (meshSkinnedVertexShader != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(engine->_device, meshSkinnedVertexShader, nullptr);
+    }
 
-    fmt::print("[Pipelines] Basariyla tamamlandi.\n");
+    Yalaz::UI::Console::Log("[Pipelines] Basariyla tamamlandi.");
 }
 
 void GLTFMetallic_Roughness::clear_resources(VkDevice device)
@@ -7754,6 +7998,7 @@ void GLTFMetallic_Roughness::clear_resources(VkDevice device)
 MaterialInstance GLTFMetallic_Roughness::write_material(
     VkDevice device,
     MaterialPass pass,
+    bool doubleSided,
     const MaterialResources& resources,
     DescriptorAllocatorGrowable& descriptorAllocator)
 {
@@ -7761,7 +8006,12 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
 
     MaterialInstance matData;
     matData.passType = pass;
-    matData.pipeline = (pass == MaterialPass::Transparent) ? &transparentPipeline : &opaquePipeline;
+    matData.doubleSided = doubleSided;
+    if (pass == MaterialPass::Transparent) {
+        matData.pipeline = doubleSided ? &transparentDoubleSidedPipeline : &transparentPipeline;
+    } else {
+        matData.pipeline = &opaquePipeline;
+    }
 
     // Descriptor set oluştur
     matData.materialSet = descriptorAllocator.allocate(device, materialLayout);
@@ -7806,7 +8056,7 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
     if (!mesh || mesh->meshBuffers.indexBuffer.buffer == VK_NULL_HANDLE)
         return;  // 🎯 Mesh veya index buffer yoksa RenderObject oluşturulmaz
 
-    glm::mat4 nodeMatrix = topMatrix * worldTransform;
+    glm::mat4 nodeMatrix = topMatrix * localTransform;
 
     for (auto& s : mesh->surfaces)
     {
@@ -7817,6 +8067,8 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
         def.indexBuffer = mesh->meshBuffers.indexBuffer.buffer;
         def.vertexBuffer = mesh->meshBuffers.vertexBuffer.buffer;
         def.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
+        def.isSkinned = mesh->hasSkinData && mesh->skinBufferAddress != 0;
+        def.skinBufferAddress = mesh->skinBufferAddress;
 
         def.material = &s.material->data;
         def.bounds = s.bounds;
@@ -7831,7 +8083,7 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
             ctx.OpaqueSurfaces.push_back(def);
     }
 
-    Node::Draw(nodeMatrix, ctx);  // Alt node'ları recursive çiz
+    Node::Draw(topMatrix, ctx);  // Alt node'ları recursive çiz
 }
 
 // TextureCache::AddTexture is now defined inline in vk_types.h
@@ -7841,9 +8093,262 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
 // =============================================================================
 
 void VulkanEngine::updateAnimations(float deltaTime) {
-    for (auto& clip : animationClips) {
-        if (clip.isPlaying) {
-            clip.currentTime += deltaTime * clip.speed;
+    auto sampleTrack = [](const AnimationTrackData& track, float time) -> glm::vec4 {
+        if (track.keyframes.empty()) return glm::vec4(0.0f);
+        if (track.keyframes.size() == 1) return track.keyframes[0].value;
+
+        if (time <= track.keyframes.front().time) return track.keyframes.front().value;
+        if (time >= track.keyframes.back().time) return track.keyframes.back().value;
+
+        size_t k1 = 1;
+        while (k1 < track.keyframes.size() && track.keyframes[k1].time < time) {
+            ++k1;
+        }
+        size_t k0 = (k1 > 0) ? (k1 - 1) : 0;
+        if (k1 >= track.keyframes.size()) return track.keyframes.back().value;
+
+        const auto& a = track.keyframes[k0];
+        const auto& b = track.keyframes[k1];
+        float dt = std::max(0.000001f, b.time - a.time);
+        float t = glm::clamp((time - a.time) / dt, 0.0f, 1.0f);
+
+        if (a.interpolation == 0) {
+            return a.value;
+        }
+
+        if (a.interpolation == 2 && a.hasTangents && b.hasTangents) {
+            float t2 = t * t;
+            float t3 = t2 * t;
+            float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+            float h10 = t3 - 2.0f * t2 + t;
+            float h01 = -2.0f * t3 + 3.0f * t2;
+            float h11 = t3 - t2;
+            glm::vec4 m0 = a.outTangent * dt;
+            glm::vec4 m1 = b.inTangent * dt;
+            return h00 * a.value + h10 * m0 + h01 * b.value + h11 * m1;
+        }
+
+        if (track.property == "rotation") {
+            glm::quat qa = glm::normalize(glm::quat(a.value.w, a.value.x, a.value.y, a.value.z));
+            glm::quat qb = glm::normalize(glm::quat(b.value.w, b.value.x, b.value.y, b.value.z));
+            glm::quat q = glm::normalize(glm::slerp(qa, qb, t));
+            return glm::vec4(q.x, q.y, q.z, q.w);
+        }
+
+        return glm::mix(a.value, b.value, t);
+    };
+
+    auto evalTransitionCondition = [](int cmp, float lhs, float rhs) -> bool {
+        switch (cmp) {
+            case 0: return lhs > rhs;
+            case 1: return lhs < rhs;
+            case 2: return lhs >= rhs;
+            case 3: return lhs <= rhs;
+            case 4: return std::abs(lhs - rhs) <= 0.0001f;
+            case 5: return std::abs(lhs - rhs) > 0.0001f;
+            default: return false;
+        }
+    };
+
+    auto findGraphParameter = [&](const std::string& name) -> float {
+        for (const auto& p : animationGraph.parameters) {
+            if (p.name == name) return p.value;
+        }
+        return 0.0f;
+    };
+
+    if (animationGraph.enabled && !animationGraph.states.empty()) {
+        auto isStateValid = [&](int stateIndex) {
+            return stateIndex >= 0 && stateIndex < static_cast<int>(animationGraph.states.size()) &&
+                animationGraph.states[stateIndex].clipIndex >= 0 &&
+                animationGraph.states[stateIndex].clipIndex < static_cast<int>(animationClips.size());
+        };
+
+        if (!isStateValid(animationGraph.activeState)) {
+            animationGraph.activeState = -1;
+            for (int si = 0; si < static_cast<int>(animationGraph.states.size()); ++si) {
+                if (animationGraph.states[si].isDefault && isStateValid(si)) {
+                    animationGraph.activeState = si;
+                    break;
+                }
+            }
+            if (animationGraph.activeState < 0) {
+                for (int si = 0; si < static_cast<int>(animationGraph.states.size()); ++si) {
+                    if (isStateValid(si)) {
+                        animationGraph.activeState = si;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (isStateValid(animationGraph.activeState)) {
+            const int activeClipIndex = animationGraph.states[animationGraph.activeState].clipIndex;
+            activeAnimationIndex = activeClipIndex;
+            for (int ci = 0; ci < static_cast<int>(animationClips.size()); ++ci) {
+                animationClips[ci].isPlaying = (ci == activeClipIndex) ||
+                    (animationGraph.blending && isStateValid(animationGraph.nextState) &&
+                        ci == animationGraph.states[animationGraph.nextState].clipIndex);
+            }
+
+            auto& activeClip = animationClips[activeClipIndex];
+            if (activeClip.skeletonIndex >= 0) {
+                activeSkeletonIndex = activeClip.skeletonIndex;
+            }
+
+            if (!animationGraph.blending) {
+                for (const auto& tr : animationGraph.transitions) {
+                    if (!tr.enabled || tr.fromState != animationGraph.activeState) continue;
+                    if (!isStateValid(tr.toState)) continue;
+                    if (activeClip.duration <= 0.0f) continue;
+
+                    const float normalizedTime = activeClip.duration > 0.0f
+                        ? glm::clamp(activeClip.currentTime / activeClip.duration, 0.0f, 1.0f)
+                        : 0.0f;
+                    if (tr.hasExitTime && normalizedTime < tr.exitTime) continue;
+
+                    float paramValue = findGraphParameter(tr.parameter);
+                    if (!evalTransitionCondition(tr.comparison, paramValue, tr.threshold)) continue;
+
+                    if (tr.blendTime > 0.0001f) {
+                        animationGraph.blending = true;
+                        animationGraph.nextState = tr.toState;
+                        animationGraph.blendDuration = tr.blendTime;
+                        animationGraph.blendElapsed = 0.0f;
+
+                        int nextClipIndex = animationGraph.states[tr.toState].clipIndex;
+                        if (nextClipIndex >= 0 && nextClipIndex < static_cast<int>(animationClips.size())) {
+                            animationClips[nextClipIndex].currentTime = 0.0f;
+                            animationClips[nextClipIndex].isPlaying = true;
+                        }
+                    } else {
+                        int nextClipIndex = animationGraph.states[tr.toState].clipIndex;
+                        if (nextClipIndex >= 0 && nextClipIndex < static_cast<int>(animationClips.size())) {
+                            activeClip.isPlaying = false;
+                            activeClip.currentTime = 0.0f;
+                            activeAnimationIndex = nextClipIndex;
+                            animationGraph.activeState = tr.toState;
+                            animationClips[nextClipIndex].isPlaying = true;
+                            animationClips[nextClipIndex].currentTime = 0.0f;
+                            if (animationClips[nextClipIndex].skeletonIndex >= 0) {
+                                activeSkeletonIndex = animationClips[nextClipIndex].skeletonIndex;
+                            }
+                        }
+                    }
+                    break;
+                }
+            } else {
+                animationGraph.blendElapsed += std::max(0.0f, deltaTime);
+                if (animationGraph.blendElapsed >= animationGraph.blendDuration && isStateValid(animationGraph.nextState)) {
+                    int oldClipIndex = animationGraph.states[animationGraph.activeState].clipIndex;
+                    int newClipIndex = animationGraph.states[animationGraph.nextState].clipIndex;
+                    if (oldClipIndex >= 0 && oldClipIndex < static_cast<int>(animationClips.size())) {
+                        animationClips[oldClipIndex].isPlaying = false;
+                    }
+                    if (newClipIndex >= 0 && newClipIndex < static_cast<int>(animationClips.size())) {
+                        activeAnimationIndex = newClipIndex;
+                        animationClips[newClipIndex].isPlaying = true;
+                        if (animationClips[newClipIndex].skeletonIndex >= 0) {
+                            activeSkeletonIndex = animationClips[newClipIndex].skeletonIndex;
+                        }
+                    }
+                    animationGraph.activeState = animationGraph.nextState;
+                    animationGraph.nextState = -1;
+                    animationGraph.blending = false;
+                    animationGraph.blendDuration = 0.0f;
+                    animationGraph.blendElapsed = 0.0f;
+                }
+            }
+        }
+    }
+
+    std::vector<float> clipWeights(animationClips.size(), 0.0f);
+    if (animationGraph.enabled && animationGraph.blending &&
+        animationGraph.activeState >= 0 && animationGraph.activeState < static_cast<int>(animationGraph.states.size()) &&
+        animationGraph.nextState >= 0 && animationGraph.nextState < static_cast<int>(animationGraph.states.size())) {
+        int fromClip = animationGraph.states[animationGraph.activeState].clipIndex;
+        int toClip = animationGraph.states[animationGraph.nextState].clipIndex;
+        float alpha = (animationGraph.blendDuration > 0.0001f)
+            ? glm::clamp(animationGraph.blendElapsed / animationGraph.blendDuration, 0.0f, 1.0f)
+            : 1.0f;
+        if (fromClip >= 0 && fromClip < static_cast<int>(clipWeights.size())) clipWeights[fromClip] = 1.0f - alpha;
+        if (toClip >= 0 && toClip < static_cast<int>(clipWeights.size())) clipWeights[toClip] = alpha;
+    } else if (activeAnimationIndex >= 0 && activeAnimationIndex < static_cast<int>(clipWeights.size())) {
+        clipWeights[activeAnimationIndex] = 1.0f;
+    } else {
+        for (size_t ci = 0; ci < animationClips.size(); ++ci) {
+            if (animationClips[ci].isPlaying) clipWeights[ci] = 1.0f;
+        }
+    }
+
+    auto fileNameOnly = [](const std::string& p) -> std::string {
+        size_t s1 = p.find_last_of('/');
+        size_t s2 = p.find_last_of('\\');
+        size_t pos = std::string::npos;
+        if (s1 == std::string::npos) pos = s2;
+        else if (s2 == std::string::npos) pos = s1;
+        else pos = std::max(s1, s2);
+        return (pos == std::string::npos) ? p : p.substr(pos + 1);
+    };
+    auto sceneMatchesSource = [&](const std::string& sceneName, const std::string& sourceScene) -> bool {
+        if (sourceScene.empty()) return true;
+        if (sceneName == sourceScene) return true;
+
+        auto itPath = sceneFilePaths.find(sceneName);
+        if (itPath == sceneFilePaths.end()) return false;
+
+        const std::string& scenePath = itPath->second;
+        if (scenePath == sourceScene) return true;
+
+        const std::string sourceFile = fileNameOnly(sourceScene);
+        const std::string sceneFile = fileNameOnly(scenePath);
+        return (!sourceFile.empty() && sourceFile == sceneFile);
+    };
+
+    struct NodePose {
+        bool valid = false;
+        bool dirtyT = false;
+        bool dirtyR = false;
+        bool dirtyS = false;
+        glm::vec3 baseT = glm::vec3(0.0f);
+        glm::quat baseR = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        glm::vec3 baseS = glm::vec3(1.0f);
+        glm::vec3 tAccum = glm::vec3(0.0f);
+        float tWeight = 0.0f;
+        glm::vec3 sAccum = glm::vec3(0.0f);
+        float sWeight = 0.0f;
+        glm::quat rValue = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        float rWeight = 0.0f;
+    };
+    std::unordered_map<Node*, NodePose> pendingPoses;
+
+    for (size_t clipIndex = 0; clipIndex < animationClips.size(); ++clipIndex) {
+        auto& clip = animationClips[clipIndex];
+        if (!clip.isPlaying) {
+            continue;
+        }
+
+        float delta = deltaTime * clip.speed;
+        if (clip.reverse) delta = -delta;
+        if (clip.duration > 0.0f) {
+            clip.currentTime += delta;
+        } else {
+            clip.currentTime = 0.0f;
+        }
+
+        if (clip.duration > 0.0f && clip.pingPong) {
+            if (clip.currentTime > clip.duration) {
+                clip.currentTime = clip.duration - (clip.currentTime - clip.duration);
+                clip.reverse = true;
+            } else if (clip.currentTime < 0.0f) {
+                clip.currentTime = -clip.currentTime;
+                clip.reverse = false;
+                if (!clip.loop) {
+                    clip.currentTime = 0.0f;
+                    clip.isPlaying = false;
+                }
+            }
+        } else if (clip.duration > 0.0f) {
             if (clip.currentTime >= clip.duration) {
                 if (clip.loop) {
                     clip.currentTime = fmod(clip.currentTime, clip.duration);
@@ -7851,15 +8356,315 @@ void VulkanEngine::updateAnimations(float deltaTime) {
                     clip.currentTime = clip.duration;
                     clip.isPlaying = false;
                 }
+            } else if (clip.currentTime < 0.0f) {
+                if (clip.loop) {
+                    while (clip.currentTime < 0.0f) {
+                        clip.currentTime += clip.duration;
+                    }
+                } else {
+                    clip.currentTime = 0.0f;
+                    clip.isPlaying = false;
+                }
             }
+        }
+
+        const float weight = (clipIndex < clipWeights.size()) ? clipWeights[clipIndex] : 0.0f;
+        if (weight <= 0.0f) continue;
+
+        for (const auto& track : clip.tracks) {
+            Node* targetNode = nullptr;
+            if (track.targetNodeIndex >= 0) {
+                for (auto& [sceneName, scene] : loadedScenes) {
+                    if (!scene || !sceneMatchesSource(sceneName, clip.sourceScene)) continue;
+                    if (track.targetNodeIndex < static_cast<int>(scene->indexedNodes.size())) {
+                        auto& candidate = scene->indexedNodes[track.targetNodeIndex];
+                        if (candidate) {
+                            targetNode = candidate.get();
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!targetNode && track.targetNodeIndex >= 0) {
+                for (auto& [sceneName, scene] : loadedScenes) {
+                    if (!scene) continue;
+                    if (track.targetNodeIndex < static_cast<int>(scene->indexedNodes.size())) {
+                        auto& candidate = scene->indexedNodes[track.targetNodeIndex];
+                        if (candidate) {
+                            targetNode = candidate.get();
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!targetNode && !track.targetNode.empty()) {
+                for (auto& [sceneName, scene] : loadedScenes) {
+                    if (!scene || !sceneMatchesSource(sceneName, clip.sourceScene)) continue;
+                    auto it = scene->nodes.find(track.targetNode);
+                    if (it != scene->nodes.end() && it->second) {
+                        targetNode = it->second.get();
+                        break;
+                    }
+                }
+            }
+            if (!targetNode && !track.targetNode.empty()) {
+                for (auto& [sceneName, scene] : loadedScenes) {
+                    if (!scene) continue;
+                    auto it = scene->nodes.find(track.targetNode);
+                    if (it != scene->nodes.end() && it->second) {
+                        targetNode = it->second.get();
+                        break;
+                    }
+                }
+            }
+            if (!targetNode) continue;
+
+            auto& pose = pendingPoses[targetNode];
+            if (!pose.valid) {
+                glm::vec3 scale, translation, skew;
+                glm::vec4 perspective;
+                glm::quat rotation;
+                if (glm::decompose(targetNode->localTransform, scale, rotation, translation, skew, perspective)) {
+                    pose.baseT = translation;
+                    pose.baseR = rotation;
+                    pose.baseS = scale;
+                    pose.valid = true;
+                }
+            }
+            if (!pose.valid) continue;
+
+            glm::vec4 sampled = sampleTrack(track, clip.currentTime);
+            if (track.property == "translation") {
+                pose.tAccum += glm::vec3(sampled) * weight;
+                pose.tWeight += weight;
+                pose.dirtyT = true;
+            } else if (track.property == "scale") {
+                pose.sAccum += glm::vec3(sampled) * weight;
+                pose.sWeight += weight;
+                pose.dirtyS = true;
+            } else if (track.property == "rotation") {
+                glm::quat q = glm::normalize(glm::quat(sampled.w, sampled.x, sampled.y, sampled.z));
+                if (pose.rWeight <= 0.0f) {
+                    pose.rValue = q;
+                    pose.rWeight = weight;
+                } else {
+                    float total = pose.rWeight + weight;
+                    float t = weight / total;
+                    if (glm::dot(pose.rValue, q) < 0.0f) {
+                        q = -q;
+                    }
+                    pose.rValue = glm::normalize(glm::slerp(pose.rValue, q, t));
+                    pose.rWeight = total;
+                }
+                pose.dirtyR = true;
+            }
+        }
+    }
+
+    for (auto& [node, pose] : pendingPoses) {
+        if (!pose.valid || (!pose.dirtyT && !pose.dirtyR && !pose.dirtyS)) continue;
+        glm::vec3 tVal = pose.dirtyT && pose.tWeight > 0.0f ? (pose.tAccum / pose.tWeight) : pose.baseT;
+        glm::quat rVal = pose.dirtyR && pose.rWeight > 0.0f ? glm::normalize(pose.rValue) : pose.baseR;
+        glm::vec3 sVal = pose.dirtyS && pose.sWeight > 0.0f ? (pose.sAccum / pose.sWeight) : pose.baseS;
+
+        glm::mat4 t = glm::translate(glm::mat4(1.0f), tVal);
+        glm::mat4 r = glm::toMat4(rVal);
+        glm::mat4 s = glm::scale(glm::mat4(1.0f), sVal);
+        node->localTransform = t * r * s;
+    }
+
+    for (auto& [sceneName, scene] : loadedScenes) {
+        if (!scene) continue;
+        for (auto& top : scene->topNodes) {
+            if (top) top->refreshTransform(glm::mat4(1.0f));
+        }
+    }
+
+    // Build active skeleton matrices for GPU skinning.
+    if (activeSkeletonIndex >= 0 && activeSkeletonIndex < static_cast<int>(skeletons.size())) {
+        const SkeletonData& skel = skeletons[activeSkeletonIndex];
+        const std::string activeSourceScene =
+            (activeAnimationIndex >= 0 && activeAnimationIndex < static_cast<int>(animationClips.size()))
+            ? animationClips[activeAnimationIndex].sourceScene : std::string();
+        glm::mat4 skinnedMeshWorldInv = glm::mat4(1.0f);
+        bool hasSkinnedMeshWorld = false;
+
+        // glTF joint matrices are evaluated in scene/world space.
+        // If there is exactly one skinned mesh in the active source scene, convert to that mesh local skin space.
+        // For multi-skinned scenes, applying one mesh inverse to all skeletons corrupts transforms.
+        int skinnedMeshCandidates = 0;
+        std::vector<glm::mat4> skinnedMeshWorlds;
+        skinnedMeshWorlds.reserve(16);
+        for (auto& [sceneName, scene] : loadedScenes) {
+            if (!scene || !sceneMatchesSource(sceneName, activeSourceScene)) continue;
+            for (const auto& [nodeName, nodePtr] : scene->nodes) {
+                auto* meshNode = dynamic_cast<MeshNode*>(nodePtr.get());
+                if (!meshNode || !meshNode->mesh) continue;
+                if (!meshNode->mesh->hasSkinData) continue;
+                ++skinnedMeshCandidates;
+                skinnedMeshWorlds.push_back(meshNode->worldTransform);
+                if (skinnedMeshCandidates == 1) {
+                    skinnedMeshWorldInv = glm::inverse(meshNode->worldTransform);
+                    hasSkinnedMeshWorld = true;
+                }
+            }
+        }
+        if (skinnedMeshCandidates > 1) {
+            auto matrixNearlyEqual = [](const glm::mat4& a, const glm::mat4& b, float eps) {
+                for (int c = 0; c < 4; ++c) {
+                    for (int r = 0; r < 4; ++r) {
+                        if (std::abs(a[c][r] - b[c][r]) > eps) return false;
+                    }
+                }
+                return true;
+            };
+
+            bool allSame = true;
+            const glm::mat4& ref = skinnedMeshWorlds.front();
+            for (size_t i = 1; i < skinnedMeshWorlds.size(); ++i) {
+                if (!matrixNearlyEqual(ref, skinnedMeshWorlds[i], 0.0005f)) {
+                    allSame = false;
+                    break;
+                }
+            }
+            // Common glTF case: one skinned character split into multiple mesh surfaces/nodes
+            // with identical world transforms. Keep mesh-space conversion enabled for correct size.
+            if (!allSame) {
+                hasSkinnedMeshWorld = false;
+            }
+        }
+
+        for (auto& m : skinningMatrices) {
+            m = glm::mat4(1.0f);
+        }
+
+        if (skel.bones.size() > skinningMatrices.size()) {
+            fmt::print("[Animation] Skeleton '{}' has {} bones, truncated to {}.\n",
+                skel.name, skel.bones.size(), skinningMatrices.size());
+        }
+
+        for (size_t boneIdx = 0; boneIdx < skel.bones.size() && boneIdx < skinningMatrices.size(); ++boneIdx) {
+            const SkeletonBoneData& bone = skel.bones[boneIdx];
+            if (bone.nodeIndex < 0) continue;
+
+            Node* boneNode = nullptr;
+            for (auto& [sceneName, scene] : loadedScenes) {
+                if (!scene || !sceneMatchesSource(sceneName, activeSourceScene)) continue;
+                if (bone.nodeIndex < static_cast<int>(scene->indexedNodes.size())) {
+                    auto& n = scene->indexedNodes[bone.nodeIndex];
+                    if (n) {
+                        boneNode = n.get();
+                        break;
+                    }
+                }
+            }
+            if (!boneNode) {
+                for (auto& [sceneName, scene] : loadedScenes) {
+                    if (!scene) continue;
+                    if (bone.nodeIndex < static_cast<int>(scene->indexedNodes.size())) {
+                        auto& n = scene->indexedNodes[bone.nodeIndex];
+                        if (n) {
+                            boneNode = n.get();
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!boneNode) continue;
+
+            const glm::mat4 jointWorld = boneNode->worldTransform;
+            skinningMatrices[boneIdx] = (hasSkinnedMeshWorld ? skinnedMeshWorldInv : glm::mat4(1.0f))
+                * jointWorld
+                * bone.inverseBindMatrix;
+        }
+
+        if (skinningMatrixBuffer.buffer == VK_NULL_HANDLE) {
+            skinningMatrixBuffer = create_buffer(
+                sizeof(glm::mat4) * skinningMatrices.size(),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU);
+            VkBufferDeviceAddressInfo addrInfo{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                .buffer = skinningMatrixBuffer.buffer
+            };
+            skinningMatrixBufferAddress = vkGetBufferDeviceAddress(_device, &addrInfo);
+        }
+
+        if (skinningMatrixBuffer.info.pMappedData) {
+            memcpy(skinningMatrixBuffer.info.pMappedData, skinningMatrices.data(),
+                sizeof(glm::mat4) * skinningMatrices.size());
+            vmaFlushAllocation(_allocator, skinningMatrixBuffer.allocation, 0,
+                sizeof(glm::mat4) * skinningMatrices.size());
         }
     }
 }
 
 void VulkanEngine::playAnimation(int index) {
     if (index >= 0 && index < static_cast<int>(animationClips.size())) {
+        for (auto& clip : animationClips) {
+            clip.isPlaying = false;
+        }
+        animationClips[index].currentTime = 0.0f;
+        animationClips[index].reverse = false;
+        if (std::abs(animationClips[index].speed) < 0.0001f) {
+            animationClips[index].speed = 1.0f;
+        }
+        if (animationClips[index].duration > 0.0f &&
+            animationClips[index].currentTime >= animationClips[index].duration) {
+            animationClips[index].currentTime = 0.0f;
+            animationClips[index].reverse = false;
+        }
         animationClips[index].isPlaying = true;
         activeAnimationIndex = index;
+
+        auto fileNameOnly = [](const std::string& p) -> std::string {
+            size_t s1 = p.find_last_of('/');
+            size_t s2 = p.find_last_of('\\');
+            size_t pos = std::string::npos;
+            if (s1 == std::string::npos) pos = s2;
+            else if (s2 == std::string::npos) pos = s1;
+            else pos = std::max(s1, s2);
+            return (pos == std::string::npos) ? p : p.substr(pos + 1);
+        };
+
+        if (animationClips[index].skeletonIndex < 0 && !animationClips[index].sourceScene.empty()) {
+            const std::string clipScene = animationClips[index].sourceScene;
+            const std::string clipFile = fileNameOnly(clipScene);
+            for (int si = 0; si < static_cast<int>(skeletons.size()); ++si) {
+                const std::string& skSrc = skeletons[si].sourceScene;
+                if (skSrc.empty()) continue;
+                if (skSrc == clipScene || fileNameOnly(skSrc) == clipFile) {
+                    animationClips[index].skeletonIndex = si;
+                    break;
+                }
+            }
+        }
+
+        if (animationClips[index].skeletonIndex >= 0 &&
+            animationClips[index].skeletonIndex < static_cast<int>(skeletons.size())) {
+            activeSkeletonIndex = animationClips[index].skeletonIndex;
+        } else if (!skeletons.empty()) {
+            activeSkeletonIndex = 0;
+        }
+
+        // Manual play should always play the selected clip directly.
+        // Runtime graph can be re-enabled from Animation panel when needed.
+        if (animationGraph.enabled) {
+            animationGraph.enabled = false;
+            bool stateMatched = false;
+            for (int si = 0; si < static_cast<int>(animationGraph.states.size()); ++si) {
+                if (animationGraph.states[si].clipIndex == index) {
+                    animationGraph.activeState = si;
+                    stateMatched = true;
+                    break;
+                }
+            }
+            if (!stateMatched) animationGraph.activeState = -1;
+            animationGraph.nextState = -1;
+            animationGraph.blending = false;
+            animationGraph.blendDuration = 0.0f;
+            animationGraph.blendElapsed = 0.0f;
+        }
     }
 }
 
@@ -7872,6 +8677,18 @@ void VulkanEngine::stopAnimation(int index) {
 
 void VulkanEngine::addAnimationClip(const AnimationClipData& clip) {
     animationClips.push_back(clip);
+    if (animationGraph.parameters.empty()) {
+        animationGraph.parameters.push_back({"speed", 0.0f, false});
+        animationGraph.parameters.push_back({"isGrounded", 1.0f, true});
+    }
+    AnimationGraphStateData state;
+    state.name = clip.name;
+    state.clipIndex = static_cast<int>(animationClips.size()) - 1;
+    state.isDefault = animationGraph.states.empty();
+    const int index = static_cast<int>(animationGraph.states.size());
+    state.positionX = 120.0f + static_cast<float>(index % 4) * 180.0f;
+    state.positionY = 100.0f + static_cast<float>(index / 4) * 120.0f;
+    animationGraph.states.push_back(state);
 }
 
 // =============================================================================
@@ -8114,6 +8931,15 @@ void VulkanEngine::init_post_processing() {
 }
 
 void VulkanEngine::cleanup_post_processing() {
+    if (_gBufferNormals.image != VK_NULL_HANDLE) {
+        destroy_image(_gBufferNormals);
+        _gBufferNormals = {};
+    }
+    if (_gBufferMetalRough.image != VK_NULL_HANDLE) {
+        destroy_image(_gBufferMetalRough);
+        _gBufferMetalRough = {};
+    }
+
     if (_bloomPass) {
         _bloomPass.reset();
     }

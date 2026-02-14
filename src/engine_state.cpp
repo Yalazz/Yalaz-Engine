@@ -556,20 +556,13 @@ void loadEngineState(VulkanEngine& engine, const std::string& filepath) {
 
         for (auto& [name, pathVal] : root["scenes"].items()) {
             std::string path = pathVal.get<std::string>();
-            auto gltfScene = loadGltf(&engine, path);
-            if (gltfScene.has_value()) {
-                engine.loadedScenes[name] = *gltfScene;
+            auto scene = loadSceneAsset(&engine, path);
+            if (scene.has_value()) {
+                engine.loadedScenes[name] = *scene;
                 engine.sceneFilePaths[name] = path;
                 fmt::print("[INFO] Loaded scene: {} from {}\n", name, path);
             } else {
-                auto objScene = loadObj(&engine, path);
-                if (objScene.has_value()) {
-                    engine.loadedScenes[name] = *objScene;
-                    engine.sceneFilePaths[name] = path;
-                    fmt::print("[INFO] Loaded OBJ scene: {} from {}\n", name, path);
-                } else {
-                    fmt::print("[WARN] Failed to load scene: {} from {}\n", name, path);
-                }
+                fmt::print("[WARN] Failed to load scene: {} from {}\n", name, path);
             }
         }
     }

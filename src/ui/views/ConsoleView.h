@@ -34,6 +34,7 @@ public:
 
     void AddLog(LogLevel level, const std::string& msg);
     const std::vector<LogEntry>& GetLogs() const { return m_Logs; }
+    std::vector<LogEntry> GetLogsSnapshot() const;
     void Clear() { std::lock_guard<std::mutex> lock(m_Mutex); m_Logs.clear(); }
 
 private:

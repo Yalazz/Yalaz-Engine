@@ -496,10 +496,14 @@
 #include <vk_loader.h>
 #include <fstream>
 #include <algorithm>
+#include <cstdlib>
+#include <cctype>
+#include <sstream>
 
 #include "vk_engine.h"
 #include "vk_initializers.h"
 #include "vk_types.h"
+#include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtx/quaternion.hpp>
 
 #include <fastgltf/glm_element_traits.hpp>
@@ -509,6 +513,114 @@
 
 #include "tiny_obj_loader.h"
 #include "ui/views/ConsoleView.h"
+
+namespace {
+std::string toLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+std::string shellQuote(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\\\"";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+bool runCommand(const std::string& cmd) {
+    int rc = std::system(cmd.c_str());
+    return rc == 0;
+}
+
+bool convertModelToGlb(const std::filesystem::path& inputPath, std::filesystem::path& outGlbPath) {
+    try {
+        const auto absIn = std::filesystem::absolute(inputPath).string();
+        std::hash<std::string> h;
+        const auto hash = h(absIn);
+
+        auto cacheDir = std::filesystem::temp_directory_path() / "yalaz_import_cache";
+        std::filesystem::create_directories(cacheDir);
+        outGlbPath = cacheDir / (inputPath.stem().string() + "_" + std::to_string(hash) + ".glb");
+
+        if (std::filesystem::exists(outGlbPath) && std::filesystem::file_size(outGlbPath) > 0) {
+            return true;
+        }
+
+        const std::string inQ = shellQuote(absIn);
+        const std::string outQ = shellQuote(outGlbPath.string());
+
+        // Assimp CLI primary path.
+        if (runCommand("assimp export " + inQ + " " + outQ + " -f glb2")) {
+            return std::filesystem::exists(outGlbPath);
+        }
+
+        // Secondary common tool name on Windows.
+        if (runCommand("assimp.exe export " + inQ + " " + outQ + " -f glb2")) {
+            return std::filesystem::exists(outGlbPath);
+        }
+
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool collectObjPoints(const std::string& path, std::vector<glm::vec3>& points) {
+    tinyobj::ObjReader reader;
+    tinyobj::ObjReaderConfig cfg;
+    cfg.mtl_search_path = std::filesystem::path(path).parent_path().string();
+    if (!reader.ParseFromFile(path, cfg)) return false;
+
+    const auto& attrib = reader.GetAttrib();
+    if (attrib.vertices.empty()) return false;
+    points.reserve(attrib.vertices.size() / 3);
+    for (size_t i = 0; i + 2 < attrib.vertices.size(); i += 3) {
+        points.emplace_back(attrib.vertices[i + 0], attrib.vertices[i + 1], attrib.vertices[i + 2]);
+    }
+    return !points.empty();
+}
+
+bool collectGltfPoints(const std::string& path, std::vector<glm::vec3>& points) {
+    fastgltf::Parser parser(fastgltf::Extensions::KHR_lights_punctual);
+    constexpr auto options = fastgltf::Options::DontRequireValidAssetMember
+        | fastgltf::Options::AllowDouble
+        | fastgltf::Options::LoadGLBBuffers
+        | fastgltf::Options::LoadExternalBuffers;
+
+    fastgltf::GltfDataBuffer data;
+    data.loadFromFile(path);
+
+    fastgltf::Asset gltf;
+    auto type = fastgltf::determineGltfFileType(&data);
+    if (type == fastgltf::GltfType::glTF) {
+        auto load = parser.loadGLTF(&data, std::filesystem::path(path).parent_path(), options);
+        if (load.error() != fastgltf::Error::None) return false;
+        gltf = std::move(load.get());
+    } else if (type == fastgltf::GltfType::GLB) {
+        auto load = parser.loadBinaryGLTF(&data, std::filesystem::path(path).parent_path(), options);
+        if (load.error() != fastgltf::Error::None) return false;
+        gltf = std::move(load.get());
+    } else {
+        return false;
+    }
+
+    for (auto& mesh : gltf.meshes) {
+        for (auto& prim : mesh.primitives) {
+            auto posIt = prim.findAttribute("POSITION");
+            if (posIt == prim.attributes.end()) continue;
+            auto& posAccessor = gltf.accessors[posIt->second];
+            size_t base = points.size();
+            points.resize(base + posAccessor.count);
+            fastgltf::iterateAccessorWithIndex<glm::vec3>(gltf, posAccessor,
+                [&](glm::vec3 v, size_t idx) { points[base + idx] = v; });
+        }
+    }
+    return !points.empty();
+}
+} // namespace
 //> loadimg
 //std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& asset, fastgltf::Image& image)
 
@@ -918,11 +1030,15 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         constants.emissiveTexID = 0;
 
         MaterialPass passType = MaterialPass::MainColor;
-        if (mat.alphaMode == fastgltf::AlphaMode::Blend) {
+        const float baseAlpha = constants.colorFactors.w;
+        const bool alphaFactorTransparent = baseAlpha < 0.999f;
+
+        // glTF BLEND => transparent pass.
+        // Fallback: if alpha factor is already < 1, treat as transparent even if alphaMode is OPAQUE.
+        if (mat.alphaMode == fastgltf::AlphaMode::Blend || alphaFactorTransparent) {
             passType = MaterialPass::Transparent;
         }
-        // Store alpha cutoff for Mask mode (extra[1].y).
-        // glTF MASK is alpha-tested and should remain in the opaque pass.
+        // glTF MASK is alpha-tested and should remain in opaque pass.
         if (mat.alphaMode == fastgltf::AlphaMode::Mask) {
             constants.extra[1].y = mat.alphaCutoff;
             passType = MaterialPass::MainColor;
@@ -1032,7 +1148,21 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         sceneMaterialConstants[data_index] = constants;
 
         // build material
-        newMat->data = engine->metalRoughMaterial.write_material(engine->_device, passType, materialResources, file.descriptorPool);
+        const bool isDoubleSided = mat.doubleSided;
+        newMat->data = engine->metalRoughMaterial.write_material(
+            engine->_device, passType, isDoubleSided, materialResources, file.descriptorPool);
+
+        const char* alphaModeStr = "OPAQUE";
+        if (mat.alphaMode == fastgltf::AlphaMode::Blend) alphaModeStr = "BLEND";
+        else if (mat.alphaMode == fastgltf::AlphaMode::Mask) alphaModeStr = "MASK";
+        const char* passStr = (passType == MaterialPass::Transparent) ? "Transparent" : "Opaque";
+        fmt::print("  [GLTF][Material:{}] alphaMode={} baseA={:.3f} cutoff={:.3f} doubleSided={} -> pass={}\n",
+            mat.name.empty() ? "<unnamed>" : mat.name,
+            alphaModeStr,
+            baseAlpha,
+            constants.extra[1].y,
+            isDoubleSided ? 1 : 0,
+            passStr);
         newMat->bufferOffset = materialResources.dataBufferOffset;  // Store for runtime updates
 
         data_index++;
@@ -1043,6 +1173,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         // often
     std::vector<uint32_t> indices;
     std::vector<Vertex> vertices;
+    std::vector<SkinVertexData> skinData;
 
     fmt::print("  Loading {} meshes...\n", gltf.meshes.size());
     size_t meshIndex = 0;
@@ -1063,6 +1194,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         // clear the mesh arrays each mesh, we dont want to merge them by error
         indices.clear();
         vertices.clear();
+        skinData.clear();
+        bool meshHasSkinData = false;
 
         for (auto&& p : mesh.primitives) {
             GeoSurface newSurface;
@@ -1086,6 +1219,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             {
                 fastgltf::Accessor& posAccessor = gltf.accessors[p.findAttribute("POSITION")->second];
                 vertices.resize(vertices.size() + posAccessor.count);
+                skinData.resize(skinData.size() + posAccessor.count);
 
                 fastgltf::iterateAccessorWithIndex<glm::vec3>(gltf, posAccessor,
                     [&](glm::vec3 v, size_t index) {
@@ -1096,6 +1230,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                         newvtx.uv_x = 0;
                         newvtx.uv_y = 0;
                         vertices[initial_vtx + index] = newvtx;
+                        skinData[initial_vtx + index] = SkinVertexData{};
                     });
             }
 
@@ -1139,6 +1274,29 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                     });
             }
 
+            // load skinning data (JOINTS_0, WEIGHTS_0) into dedicated skin buffer stream
+            auto jointsAttr = p.findAttribute("JOINTS_0");
+            if (jointsAttr != p.attributes.end()) {
+                meshHasSkinData = true;
+                fastgltf::iterateAccessorWithIndex<glm::uvec4>(gltf, gltf.accessors[(*jointsAttr).second],
+                    [&](glm::uvec4 v, size_t index) {
+                        skinData[initial_vtx + index].joints = glm::ivec4(v);
+                    });
+            }
+
+            auto weightsAttr = p.findAttribute("WEIGHTS_0");
+            if (weightsAttr != p.attributes.end()) {
+                meshHasSkinData = true;
+                fastgltf::iterateAccessorWithIndex<glm::vec4>(gltf, gltf.accessors[(*weightsAttr).second],
+                    [&](glm::vec4 v, size_t index) {
+                        glm::vec4 w = glm::max(v, glm::vec4(0.0f));
+                        float sum = w.x + w.y + w.z + w.w;
+                        skinData[initial_vtx + index].weights = (sum > 0.000001f)
+                            ? (w / sum)
+                            : glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+                    });
+            }
+
             if (p.materialIndex.has_value()) {
                 newSurface.material = materials[p.materialIndex.value()];
             }
@@ -1168,13 +1326,26 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         newmesh->hasCpuData = true;
 
         newmesh->meshBuffers = engine->uploadMesh(indices, vertices);
+        if (meshHasSkinData && skinData.size() == vertices.size()) {
+            newmesh->skinBuffer = engine->uploadSkinBuffer(skinData);
+            if (newmesh->skinBuffer.buffer != VK_NULL_HANDLE) {
+                VkBufferDeviceAddressInfo skinAddressInfo{
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                    .buffer = newmesh->skinBuffer.buffer
+                };
+                newmesh->skinBufferAddress = vkGetBufferDeviceAddress(engine->_device, &skinAddressInfo);
+                newmesh->hasSkinData = (newmesh->skinBufferAddress != 0);
+            }
+        }
         meshIndex++;
     }
 
     fmt::print("  Total: {} vertices, {} triangles\n", totalVertices, totalIndices / 3);
     //> load_nodes
         // load all nodes and their meshes
-    for (fastgltf::Node& node : gltf.nodes) {
+    std::vector<std::string> nodeNames(gltf.nodes.size());
+    for (size_t nodeIdx = 0; nodeIdx < gltf.nodes.size(); ++nodeIdx) {
+        fastgltf::Node& node = gltf.nodes[nodeIdx];
         std::shared_ptr<Node> newNode;
 
         // find if the node has a mesh, and if it does hook it to the mesh pointer and allocate it with the meshnode class
@@ -1187,7 +1358,9 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         nodes.push_back(newNode);
-        file.nodes[node.name.c_str()] = newNode;
+        std::string nodeName = node.name.empty() ? ("Node_" + std::to_string(nodeIdx)) : std::string(node.name);
+        nodeNames[nodeIdx] = nodeName;
+        file.nodes[nodeName] = newNode;
 
         std::visit(fastgltf::visitor{ [&](fastgltf::Node::TransformMatrix matrix) {
                                           memcpy(&newNode->localTransform, matrix.data(), sizeof(matrix));
@@ -1207,9 +1380,11 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                        } },
             node.transform);
     }
+    file.indexedNodes = nodes;
     //< load_nodes
     //> load_graph
         // run loop again to setup transform hierarchy
+    std::vector<int> parentIndices(gltf.nodes.size(), -1);
     for (int i = 0; i < gltf.nodes.size(); i++) {
         fastgltf::Node& node = gltf.nodes[i];
         std::shared_ptr<Node>& sceneNode = nodes[i];
@@ -1217,6 +1392,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         for (auto& c : node.children) {
             sceneNode->children.push_back(nodes[c]);
             nodes[c]->parent = sceneNode;
+            parentIndices[c] = i;
         }
     }
 
@@ -1227,6 +1403,214 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             node->refreshTransform(glm::mat4{ 1.f });
         }
     }
+
+    //> load_skins
+    std::vector<int> skinToSkeletonIndex(gltf.skins.size(), -1);
+    if (!gltf.skins.empty()) {
+        fmt::print("  Loading {} skins...\n", gltf.skins.size());
+
+        for (size_t skinIdx = 0; skinIdx < gltf.skins.size(); ++skinIdx) {
+            const auto& skin = gltf.skins[skinIdx];
+            SkeletonData skeleton;
+            skeleton.name = skin.name.empty() ? ("Skin_" + std::to_string(skinIdx)) : std::string(skin.name);
+            skeleton.sourceScene = path.string();
+            skeleton.bones.reserve(skin.joints.size());
+
+            std::unordered_map<int, int> nodeToBone;
+            for (size_t j = 0; j < skin.joints.size(); ++j) {
+                nodeToBone[static_cast<int>(skin.joints[j])] = static_cast<int>(j);
+            }
+
+            std::vector<glm::mat4> inverseBindMatrices;
+            if (skin.inverseBindMatrices.has_value() && skin.inverseBindMatrices.value() < gltf.accessors.size()) {
+                auto& ibmAccessor = gltf.accessors[skin.inverseBindMatrices.value()];
+                inverseBindMatrices.resize(ibmAccessor.count);
+                fastgltf::iterateAccessorWithIndex<glm::mat4>(gltf, ibmAccessor,
+                    [&](const glm::mat4& m, size_t i) {
+                        inverseBindMatrices[i] = m;
+                    });
+            }
+
+            for (size_t jointIdx = 0; jointIdx < skin.joints.size(); ++jointIdx) {
+                const int nodeIndex = static_cast<int>(skin.joints[jointIdx]);
+                SkeletonBoneData bone;
+                bone.nodeIndex = nodeIndex;
+                bone.name = (nodeIndex >= 0 && nodeIndex < static_cast<int>(nodeNames.size()))
+                    ? nodeNames[nodeIndex]
+                    : ("Joint_" + std::to_string(jointIdx));
+
+                int parentNodeIndex = (nodeIndex >= 0 && nodeIndex < static_cast<int>(parentIndices.size()))
+                    ? parentIndices[nodeIndex] : -1;
+                auto parentIt = nodeToBone.find(parentNodeIndex);
+                bone.parentIndex = (parentIt != nodeToBone.end()) ? parentIt->second : -1;
+
+                if (nodeIndex >= 0 && nodeIndex < static_cast<int>(nodes.size())) {
+                    glm::vec3 scale, translation, skew;
+                    glm::vec4 perspective;
+                    glm::quat rotation;
+                    if (glm::decompose(nodes[nodeIndex]->localTransform, scale, rotation, translation, skew, perspective)) {
+                        bone.localPosition = translation;
+                        bone.localRotation = rotation;
+                        bone.localScale = scale;
+                    }
+                }
+
+                if (jointIdx < inverseBindMatrices.size()) {
+                    bone.inverseBindMatrix = inverseBindMatrices[jointIdx];
+                }
+
+                skeleton.bones.push_back(bone);
+            }
+
+            engine->skeletons.push_back(skeleton);
+            skinToSkeletonIndex[skinIdx] = static_cast<int>(engine->skeletons.size()) - 1;
+            if (engine->activeSkeletonIndex < 0) {
+                engine->activeSkeletonIndex = skinToSkeletonIndex[skinIdx];
+            }
+        }
+    }
+    //< load_skins
+
+    //> load_animations
+    if (!gltf.animations.empty()) {
+        fmt::print("  Loading {} animations...\n", gltf.animations.size());
+
+        for (size_t animIdx = 0; animIdx < gltf.animations.size(); ++animIdx) {
+            const auto& anim = gltf.animations[animIdx];
+            AnimationClipData clip;
+            clip.name = anim.name.empty() ? ("Animation_" + std::to_string(animIdx)) : std::string(anim.name);
+            clip.sourceScene = path.string();
+            clip.duration = 0.0f;
+
+            for (const auto& channel : anim.channels) {
+                if (channel.samplerIndex >= anim.samplers.size()) {
+                    continue;
+                }
+                const auto& sampler = anim.samplers[channel.samplerIndex];
+                if (sampler.inputAccessor >= gltf.accessors.size() || sampler.outputAccessor >= gltf.accessors.size()) {
+                    continue;
+                }
+
+                std::vector<float> inputTimes;
+                fastgltf::iterateAccessor<float>(gltf, gltf.accessors[sampler.inputAccessor],
+                    [&](float t) { inputTimes.push_back(t); });
+                if (inputTimes.empty()) {
+                    continue;
+                }
+
+                for (float t : inputTimes) {
+                    clip.duration = std::max(clip.duration, t);
+                }
+
+                AnimationTrackData track;
+                track.sourceScene = clip.sourceScene;
+                track.targetNodeIndex = static_cast<int>(channel.nodeIndex);
+                if (track.targetNodeIndex >= 0 && track.targetNodeIndex < static_cast<int>(nodeNames.size())) {
+                    track.targetNode = nodeNames[track.targetNodeIndex];
+                } else {
+                    track.targetNode = "Node_" + std::to_string(track.targetNodeIndex);
+                }
+
+                switch (channel.path) {
+                case fastgltf::AnimationPath::Translation: track.property = "translation"; break;
+                case fastgltf::AnimationPath::Rotation: track.property = "rotation"; break;
+                case fastgltf::AnimationPath::Scale: track.property = "scale"; break;
+                default: track.property = "weights"; break;
+                }
+                if (track.property == "weights") {
+                    continue;
+                }
+
+                int interpolation = 1;
+                if (sampler.interpolation == fastgltf::AnimationInterpolation::Step) interpolation = 0;
+                if (sampler.interpolation == fastgltf::AnimationInterpolation::CubicSpline) interpolation = 2;
+
+                auto resolveBoneIndex = [&](int nodeIndex) -> int {
+                    for (int skelIndex : skinToSkeletonIndex) {
+                        if (skelIndex < 0 || skelIndex >= static_cast<int>(engine->skeletons.size())) continue;
+                        const auto& skel = engine->skeletons[skelIndex];
+                        for (size_t bi = 0; bi < skel.bones.size(); ++bi) {
+                            if (skel.bones[bi].nodeIndex == nodeIndex) {
+                                if (clip.skeletonIndex < 0) clip.skeletonIndex = skelIndex;
+                                return static_cast<int>(bi);
+                            }
+                        }
+                    }
+                    return -1;
+                };
+                track.targetBoneIndex = resolveBoneIndex(track.targetNodeIndex);
+
+                const auto& outputAccessor = gltf.accessors[sampler.outputAccessor];
+                if (interpolation == 2) {
+                    if (track.property == "rotation") {
+                        std::vector<glm::vec4> raw;
+                        fastgltf::iterateAccessor<glm::vec4>(gltf, outputAccessor, [&](glm::vec4 v) { raw.push_back(v); });
+                        size_t keyCount = std::min(inputTimes.size(), raw.size() / 3);
+                        for (size_t i = 0; i < keyCount; ++i) {
+                            AnimationKeyframeData key;
+                            key.time = inputTimes[i];
+                            key.interpolation = interpolation;
+                            key.inTangent = raw[i * 3 + 0];
+                            key.value = glm::normalize(raw[i * 3 + 1]);
+                            key.outTangent = raw[i * 3 + 2];
+                            key.hasTangents = true;
+                            track.keyframes.push_back(key);
+                        }
+                    } else {
+                        std::vector<glm::vec3> raw;
+                        fastgltf::iterateAccessor<glm::vec3>(gltf, outputAccessor, [&](glm::vec3 v) { raw.push_back(v); });
+                        size_t keyCount = std::min(inputTimes.size(), raw.size() / 3);
+                        for (size_t i = 0; i < keyCount; ++i) {
+                            AnimationKeyframeData key;
+                            key.time = inputTimes[i];
+                            key.interpolation = interpolation;
+                            key.inTangent = glm::vec4(raw[i * 3 + 0], 0.0f);
+                            key.value = glm::vec4(raw[i * 3 + 1], 0.0f);
+                            key.outTangent = glm::vec4(raw[i * 3 + 2], 0.0f);
+                            key.hasTangents = true;
+                            track.keyframes.push_back(key);
+                        }
+                    }
+                } else {
+                    if (track.property == "rotation") {
+                        std::vector<glm::vec4> values;
+                        fastgltf::iterateAccessor<glm::vec4>(gltf, outputAccessor, [&](glm::vec4 v) { values.push_back(v); });
+                        size_t keyCount = std::min(inputTimes.size(), values.size());
+                        for (size_t i = 0; i < keyCount; ++i) {
+                            AnimationKeyframeData key;
+                            key.time = inputTimes[i];
+                            key.value = glm::normalize(values[i]);
+                            key.interpolation = interpolation;
+                            track.keyframes.push_back(key);
+                        }
+                    } else {
+                        std::vector<glm::vec3> values;
+                        fastgltf::iterateAccessor<glm::vec3>(gltf, outputAccessor, [&](glm::vec3 v) { values.push_back(v); });
+                        size_t keyCount = std::min(inputTimes.size(), values.size());
+                        for (size_t i = 0; i < keyCount; ++i) {
+                            AnimationKeyframeData key;
+                            key.time = inputTimes[i];
+                            key.value = glm::vec4(values[i], 0.0f);
+                            key.interpolation = interpolation;
+                            track.keyframes.push_back(key);
+                        }
+                    }
+                }
+
+                if (!track.keyframes.empty()) {
+                    clip.tracks.push_back(track);
+                }
+            }
+
+            if (!clip.tracks.empty()) {
+                engine->animationClips.push_back(clip);
+                if (engine->activeAnimationIndex < 0) {
+                    engine->activeAnimationIndex = static_cast<int>(engine->animationClips.size()) - 1;
+                }
+            }
+        }
+    }
+    //< load_animations
 
     //> load_cameras
     // Load cameras from GLTF
@@ -1280,6 +1664,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
                     // Extract position from transform
                     file.cameras[camIdx].position = glm::vec3(worldTransform[3]);
+                    file.cameras[camIdx].sourceNode = nodes[nodeIdx].get();
 
                     // Extract forward and up vectors (GLTF cameras look down -Z)
                     file.cameras[camIdx].forward = glm::normalize(
@@ -1318,12 +1703,20 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                 glm::vec3 lightDir = glm::normalize(glm::vec3(-worldTransform[2]));
                 glm::vec3 lightColor(gltfLight.color[0], gltfLight.color[1], gltfLight.color[2]);
                 float intensity = gltfLight.intensity;
+                GLTFLight importedLight;
+                importedLight.name = gltfLight.name.empty() ? ("Light_" + std::to_string(lightIdx)) : std::string(gltfLight.name);
+                importedLight.position = lightPos;
+                importedLight.direction = lightDir;
+                importedLight.color = lightColor;
+                importedLight.sourceNode = nodes[nodeIdx].get();
 
                 if (gltfLight.type == fastgltf::LightType::Directional) {
+                    importedLight.type = 0;
                     // Apply as sun/directional light
                     // Convert intensity from lux to a reasonable engine scale
                     float scaledIntensity = std::min(intensity / 1000.0f, 10.0f);
                     if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+                    importedLight.intensity = scaledIntensity;
 
                     engine->sceneData.sunlightDirection = glm::vec4(-lightDir, scaledIntensity);
                     engine->sceneData.sunlightColor = glm::vec4(lightColor, 1.0f);
@@ -1333,42 +1726,47 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                         lightColor.r, lightColor.g, lightColor.b, scaledIntensity);
                 }
                 else if (gltfLight.type == fastgltf::LightType::Point) {
+                    importedLight.type = 1;
                     // Add as point light
-                    int lightCount = engine->sceneData.pointLightCount;
-                    if (lightCount < 64) {  // MAX_POINT_LIGHTS
-                        float range = gltfLight.range.has_value() ? gltfLight.range.value() : 25.0f;
-                        // Convert candela to engine intensity scale
-                        float scaledIntensity = std::min(intensity / 100.0f, 50.0f);
-                        if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+                    float range = gltfLight.range.has_value() ? gltfLight.range.value() : 25.0f;
+                    float scaledIntensity = std::min(intensity / 100.0f, 50.0f);
+                    if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+                    importedLight.range = range;
+                    importedLight.intensity = scaledIntensity;
 
-                        engine->sceneData.pointLights[lightCount].position = lightPos;
-                        engine->sceneData.pointLights[lightCount].radius = range;
-                        engine->sceneData.pointLights[lightCount].color = lightColor;
-                        engine->sceneData.pointLights[lightCount].intensity = scaledIntensity;
-                        engine->sceneData.pointLightCount = lightCount + 1;
+                    PointLight p{};
+                    p.position = lightPos;
+                    p.radius = range;
+                    p.color = lightColor;
+                    p.intensity = scaledIntensity;
+                    engine->scenePointLights.push_back(p);
+                    importedLight.runtimePointLightIndex = static_cast<int>(engine->scenePointLights.size()) - 1;
 
-                        fmt::print("    Point light '{}': pos=({:.2f},{:.2f},{:.2f}), range={:.1f}, intensity={:.2f}\n",
-                            std::string(gltfLight.name), lightPos.x, lightPos.y, lightPos.z, range, scaledIntensity);
-                    }
+                    fmt::print("    Point light '{}': pos=({:.2f},{:.2f},{:.2f}), range={:.1f}, intensity={:.2f}\n",
+                        std::string(gltfLight.name), lightPos.x, lightPos.y, lightPos.z, range, scaledIntensity);
                 }
                 else if (gltfLight.type == fastgltf::LightType::Spot) {
-                    // Treat spot lights as point lights (simplified)
-                    int lightCount = engine->sceneData.pointLightCount;
-                    if (lightCount < 64) {
-                        float range = gltfLight.range.has_value() ? gltfLight.range.value() : 25.0f;
-                        float scaledIntensity = std::min(intensity / 100.0f, 50.0f);
-                        if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+                    importedLight.type = 2;
+                    // Keep spot support lightweight by storing as point light runtime.
+                    float range = gltfLight.range.has_value() ? gltfLight.range.value() : 25.0f;
+                    float scaledIntensity = std::min(intensity / 100.0f, 50.0f);
+                    if (scaledIntensity < 0.01f) scaledIntensity = 1.0f;
+                    importedLight.range = range;
+                    importedLight.intensity = scaledIntensity;
 
-                        engine->sceneData.pointLights[lightCount].position = lightPos;
-                        engine->sceneData.pointLights[lightCount].radius = range;
-                        engine->sceneData.pointLights[lightCount].color = lightColor;
-                        engine->sceneData.pointLights[lightCount].intensity = scaledIntensity;
-                        engine->sceneData.pointLightCount = lightCount + 1;
+                    PointLight p{};
+                    p.position = lightPos;
+                    p.radius = range;
+                    p.color = lightColor;
+                    p.intensity = scaledIntensity;
+                    engine->scenePointLights.push_back(p);
+                    importedLight.runtimePointLightIndex = static_cast<int>(engine->scenePointLights.size()) - 1;
 
-                        fmt::print("    Spot light '{}' (as point): pos=({:.2f},{:.2f},{:.2f}), range={:.1f}\n",
-                            std::string(gltfLight.name), lightPos.x, lightPos.y, lightPos.z, range);
-                    }
+                    fmt::print("    Spot light '{}' (as point): pos=({:.2f},{:.2f},{:.2f}), range={:.1f}\n",
+                        std::string(gltfLight.name), lightPos.x, lightPos.y, lightPos.z, range);
                 }
+
+                file.lights.push_back(importedLight);
             }
         }
     }
@@ -1469,7 +1867,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
             }
         }
 
-        newMat->data = engine->metalRoughMaterial.write_material(engine->_device, MaterialPass::MainColor, res, file.descriptorPool);
+        newMat->data = engine->metalRoughMaterial.write_material(
+            engine->_device, MaterialPass::MainColor, false, res, file.descriptorPool);
     }
 
     std::vector<uint32_t> indices;
@@ -1549,8 +1948,122 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadObj(VulkanEngine* engine, std::st
         file.topNodes.push_back(node);
         node->refreshTransform(glm::mat4{ 1.f });
     }
+    file.indexedNodes = nodes;
 
     return scene;
+}
+
+std::optional<std::shared_ptr<LoadedGLTF>> loadSceneAsset(VulkanEngine* engine, std::string_view filePath) {
+    const std::string path(filePath);
+    std::filesystem::path p(path);
+    const std::string ext = toLower(p.extension().string());
+
+    if (ext == ".gltf" || ext == ".glb") {
+        return loadGltf(engine, path);
+    }
+    if (ext == ".obj") {
+        return loadObj(engine, path);
+    }
+    if (ext == ".mtl") {
+        std::filesystem::path objCandidate = p.parent_path() / (p.stem().string() + ".obj");
+        if (std::filesystem::exists(objCandidate)) {
+            return loadObj(engine, objCandidate.string());
+        }
+        Yalaz::UI::Console::Warn("MTL selected but matching OBJ not found: " + objCandidate.string());
+        return {};
+    }
+    if (ext == ".fbx" || ext == ".dae") {
+        std::filesystem::path convertedGlb;
+        if (!convertModelToGlb(p, convertedGlb)) {
+            Yalaz::UI::Console::Error(
+                "FBX/DAE conversion failed. Install Assimp CLI and ensure `assimp` is on PATH.");
+            return {};
+        }
+        return loadGltf(engine, convertedGlb.string());
+    }
+
+    Yalaz::UI::Console::Warn("Unsupported model format: " + path);
+    return {};
+}
+
+bool generateModelPreviewRGBA(std::string_view filePath, int maxSize, std::vector<uint8_t>& outRGBA, int& outW, int& outH) {
+    outRGBA.clear();
+    outW = std::max(64, maxSize);
+    outH = outW;
+
+    const std::string path(filePath);
+    std::filesystem::path p(path);
+    std::string ext = toLower(p.extension().string());
+
+    std::vector<glm::vec3> points;
+    if (ext == ".obj" || ext == ".mtl") {
+        std::filesystem::path objPath = (ext == ".obj") ? p : (p.parent_path() / (p.stem().string() + ".obj"));
+        if (!collectObjPoints(objPath.string(), points)) return false;
+    } else if (ext == ".gltf" || ext == ".glb") {
+        if (!collectGltfPoints(path, points)) return false;
+    } else if (ext == ".fbx" || ext == ".dae") {
+        std::filesystem::path convertedGlb;
+        if (!convertModelToGlb(p, convertedGlb)) return false;
+        if (!collectGltfPoints(convertedGlb.string(), points)) return false;
+    } else {
+        return false;
+    }
+
+    if (points.empty()) return false;
+
+    glm::vec3 minP(1e30f), maxP(-1e30f);
+    for (const auto& v : points) {
+        minP = glm::min(minP, v);
+        maxP = glm::max(maxP, v);
+    }
+    glm::vec3 center = (minP + maxP) * 0.5f;
+    glm::vec3 extents = glm::max((maxP - minP) * 0.5f, glm::vec3(1e-5f));
+    float maxE = std::max(extents.x, std::max(extents.y, extents.z));
+    if (maxE <= 1e-6f) maxE = 1.0f;
+
+    glm::mat4 rotY = glm::rotate(glm::mat4(1.0f), glm::radians(32.0f), glm::vec3(0, 1, 0));
+    glm::mat4 rotX = glm::rotate(glm::mat4(1.0f), glm::radians(-20.0f), glm::vec3(1, 0, 0));
+    glm::mat4 rot = rotY * rotX;
+
+    outRGBA.assign(static_cast<size_t>(outW) * static_cast<size_t>(outH) * 4u, 0);
+    for (int y = 0; y < outH; ++y) {
+        float t = static_cast<float>(y) / static_cast<float>(std::max(1, outH - 1));
+        uint8_t r = static_cast<uint8_t>(26 + t * 18);
+        uint8_t g = static_cast<uint8_t>(32 + t * 20);
+        uint8_t b = static_cast<uint8_t>(42 + t * 24);
+        for (int x = 0; x < outW; ++x) {
+            size_t idx = static_cast<size_t>(y) * outW * 4u + static_cast<size_t>(x) * 4u;
+            outRGBA[idx + 0] = r;
+            outRGBA[idx + 1] = g;
+            outRGBA[idx + 2] = b;
+            outRGBA[idx + 3] = 255;
+        }
+    }
+
+    auto putPx = [&](int x, int y, uint8_t r, uint8_t g, uint8_t b) {
+        if (x < 0 || y < 0 || x >= outW || y >= outH) return;
+        size_t idx = static_cast<size_t>(y) * outW * 4u + static_cast<size_t>(x) * 4u;
+        outRGBA[idx + 0] = r;
+        outRGBA[idx + 1] = g;
+        outRGBA[idx + 2] = b;
+        outRGBA[idx + 3] = 255;
+    };
+
+    // Draw a dense point-cloud style preview.
+    for (const auto& p3 : points) {
+        glm::vec3 n = (p3 - center) / maxE;
+        glm::vec4 rp = rot * glm::vec4(n, 1.0f);
+        float sx = (rp.x * 0.42f + 0.5f) * static_cast<float>(outW);
+        float sy = (0.5f - rp.y * 0.42f) * static_cast<float>(outH);
+        int x = static_cast<int>(sx);
+        int y = static_cast<int>(sy);
+        uint8_t shade = static_cast<uint8_t>(std::clamp(160.0f + rp.z * 60.0f, 90.0f, 240.0f));
+        putPx(x, y, shade, static_cast<uint8_t>(shade + 8), static_cast<uint8_t>(shade + 18));
+        putPx(x + 1, y, shade, static_cast<uint8_t>(shade + 8), static_cast<uint8_t>(shade + 18));
+        putPx(x, y + 1, shade, static_cast<uint8_t>(shade + 8), static_cast<uint8_t>(shade + 18));
+    }
+
+    return true;
 }
 
 
@@ -1568,10 +2081,9 @@ void LoadedGLTF::clearAll()
     if (!creator) return;
 
     VkDevice dv = creator->_device;
-
-    // CRITICAL: Wait for GPU to finish all operations before destroying resources
-    // This prevents crashes when resources are still in use by pending command buffers
-    vkDeviceWaitIdle(dv);
+    // IMPORTANT:
+    // Scene unload is deferred and executed after per-frame fence wait
+    // (VulkanEngine::processPendingSceneUnloads). Do not block the whole device here.
 
     // Clear all shared_ptr references first to prevent dangling pointers
     topNodes.clear();
@@ -1586,6 +2098,12 @@ void LoadedGLTF::clearAll()
             }
             if (v->meshBuffers.vertexBuffer.buffer != VK_NULL_HANDLE) {
                 creator->destroy_buffer(v->meshBuffers.vertexBuffer);
+            }
+            if (v->skinBuffer.buffer != VK_NULL_HANDLE) {
+                creator->destroy_buffer(v->skinBuffer);
+                v->skinBuffer = {};
+                v->skinBufferAddress = 0;
+                v->hasSkinData = false;
             }
         }
     }
