@@ -35,6 +35,11 @@ struct MaterialData {
     std::string normalTexturePath;
     float normalScale = 1.0f;
 
+    // === Displacement/Height Mapping ===
+    std::string displacementTexturePath;
+    float displacementScale = 0.0f;
+    float displacementBias = 0.0f;
+
     // === Emission ===
     glm::vec3 emissionColor = glm::vec3(0.0f);
     float emissionStrength = 0.0f;

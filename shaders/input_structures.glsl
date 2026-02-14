@@ -327,6 +327,9 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     uint emissiveTexID;          // Bindless texture ID for emissive map (0 = none)
     vec4 extra[13];              // extra[0] = emission (xyz=color, w=strength)
                                  // extra[1].x = reflection intensity (0=none, 1=full)
+                                 // extra[2].x = displacement scale, extra[2].y = displacement bias
+                                 // extra[11].x = displacement texture ID (float-encoded)
+                                 // extra[11].y = AO texture ID (float-encoded)
 } materialData;
 
 #endif // INPUT_STRUCTURES_GLSL

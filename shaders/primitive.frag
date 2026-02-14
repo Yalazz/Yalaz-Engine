@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 // =============================================================================
 // PRIMITIVE FRAGMENT SHADER - With Face Color Support + Full Lighting
@@ -77,6 +78,7 @@ layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 layout(set = 0, binding = 3) uniform samplerCube pointLightShadowMaps[4];
 // Environment cubemaps: [0]=sky, [1-4]=reflection probes
 layout(set = 0, binding = 4) uniform samplerCube envCubemaps[5];
+layout(set = 0, binding = 5) uniform sampler2D allTextures[];
 
 // =============================================================================
 // CASCADE SHADOW MAPPING - Full implementation with PCF soft shadows
@@ -296,12 +298,15 @@ float calculate_point_light_shadow(int shadowIndex, vec3 worldPos, vec3 lightPos
 
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 colorFactors;           // Base color RGBA multiplier
-    vec4 metal_rough_factors;    // x=metallic, y=roughness (texture multipliers)
-    uint colorTexID;             // Bindless texture ID (unused in non-bindless mode)
-    uint metalRoughTexID;        // Bindless texture ID (unused in non-bindless mode)
-    uint pad1;
-    uint pad2;
+    vec4 metal_rough_factors;    // x=metallic, y=roughness, z=ao, w=normalStrength
+    uint colorTexID;
+    uint metalRoughTexID;
+    uint normalTexID;
+    uint emissiveTexID;
     vec4 extra[13];              // extra[0] = emission (xyz=color, w=strength)
+                                 // extra[2].x = displacement scale, extra[2].y = displacement bias
+                                 // extra[11].x = displacement texture ID (float-encoded)
+                                 // extra[11].y = AO texture ID (float-encoded)
 } materialData;
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;
@@ -449,15 +454,38 @@ vec3 calculate_directional_light_pbr(vec3 N, vec3 V, vec3 albedo, float metallic
 
 void main()
 {
+    vec2 uv = fragUV;
+    uint displacementTexID = uint(max(materialData.extra[11].x, 0.0));
+    if (displacementTexID > 0u) {
+        float dispScale = materialData.extra[2].x;
+        float dispBias = materialData.extra[2].y;
+        if (abs(dispScale) > 0.0001) {
+            vec3 N0 = normalize(fragNormal);
+            vec3 V0 = normalize(sceneData.cameraPosition.xyz - fragWorldPos);
+            vec3 up = abs(N0.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+            vec3 T = normalize(cross(up, N0));
+            vec3 B = normalize(cross(N0, T));
+            mat3 TBN = mat3(T, B, N0);
+            vec3 viewTS = transpose(TBN) * V0;
+            float heightSample = texture(allTextures[displacementTexID], uv).r;
+            float parallax = (heightSample + dispBias - 0.5) * dispScale;
+            uv += viewTS.xy * parallax;
+        }
+    }
+
     // === SAMPLE TEXTURES ===
-    vec4 texColor = texture(colorTex, fragUV);
-    vec4 metalRoughSample = texture(metalRoughTex, fragUV);
+    vec4 texColor = texture(colorTex, uv);
+    vec4 metalRoughSample = texture(metalRoughTex, uv);
 
     // === EXTRACT PBR PARAMETERS (push constants * texture) ===
     // GLTF spec: G channel = roughness, B channel = metallic
     float metallic = push.pbrParams.x * metalRoughSample.b;
     float roughness = max(push.pbrParams.y * metalRoughSample.g, 0.04);
     float ao = push.pbrParams.z;
+    uint aoTexID = uint(max(materialData.extra[11].y, 0.0));
+    if (aoTexID > 0u) {
+        ao *= texture(allTextures[aoTexID], uv).r;
+    }
 
     // === DETERMINE ALBEDO (texture * material factors * face/main color) ===
     // Linearize sRGB texture (textures loaded as UNORM, not VK_FORMAT_*_SRGB)
@@ -495,6 +523,10 @@ void main()
     float emissionStrength = push.emission.w;
     // Also check material data emission
     vec3 matEmission = materialData.extra[0].rgb * materialData.extra[0].w;
+    if (materialData.emissiveTexID > 0u) {
+        vec3 emissiveTex = texture(allTextures[materialData.emissiveTexID], uv).rgb;
+        matEmission *= pow(emissiveTex, vec3(2.2));
+    }
     vec3 emission = emissionColor * emissionStrength + matEmission;
 
     // === MULTI-PROBE ENVIRONMENT REFLECTION (controlled by push.pbrParams.w) ===

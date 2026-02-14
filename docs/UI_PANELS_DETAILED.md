@@ -39,20 +39,30 @@ This document describes what each editor panel is for, what it edits/displays, a
 - Purpose:
   - Contextual editing for selected primitive/light/node/GLTF material surface.
   - Transform editing, material data, camera/light data, animation/skeleton sections.
+  - Works identically for all file formats (GLTF, GLB, FBX, DAE, OBJ).
+  - Source file path and type badge shown for imported assets.
+  - Mesh info: surface count, triangle count, skinning debug data.
+  - Actions: focus camera, move to origin, reset transform, uniform scale.
 - Engine links:
   - Selection fields + animation/skeleton runtime data.
+  - `sceneFilePaths` for source file display.
 
 ### Asset Browser
 - Type: `AssetBrowserView`
 - Files: `src/ui/views/AssetBrowserView.cpp`, `src/ui/views/AssetBrowserView.h`
 - Purpose:
   - Browse assets and directories.
-  - Scene loading from model files.
-  - Texture/HDRI thumbnail previews and drag/drop.
+  - Multi-format model loading (GLTF, GLB, FBX, DAE, OBJ).
+  - FBX/DAE files auto-converted to GLTF via Assimp CLI with animation preservation.
+  - Texture/HDRI thumbnail previews and drag/drop to material slots.
   - Loaded scene management (focus/unload).
+- Engine links:
+  - `loadSceneAsset()`, `convertModelToGltf()` in `vk_loader.cpp`
+  - `loadedScenes`, `sceneFilePaths`
 - Recent updates:
   - HDR/EXR preview tone-mapping path.
   - Direct path box + `Go` navigation.
+  - FBX/DAE skeletal animation import with axis conversion.
 
 ## Debug Panels
 
@@ -129,7 +139,17 @@ This document describes what each editor panel is for, what it edits/displays, a
 - Files: `src/ui/views/RenderSettingsView.cpp`, `src/ui/views/RenderSettingsView.h`
 - Purpose:
   - Global render/post-process/environment controls.
-  - Bloom/tonemap/SSR/IBL/path tracing and cubemap workflows.
+  - Tabs: Post Process, SSAO, SSR, Shadows, Lights, Reflections, Environment, Path Tracer, Performance.
+  - Bloom (threshold/intensity/mip levels), Tone mapping (ACES/Reinhard/Uncharted2/Linear).
+  - SSAO (samples/radius/intensity), SSR (ray march steps/distance/thickness).
+  - Shadow PCSS (blocker/PCF samples, light size), Contact shadows.
+  - Environment map (sky presets, IBL intensity, procedural sky colors).
+  - Reflection probes (position/radius/blend per probe).
+  - Path tracer (bounces, samples, accumulation, NEE, Russian Roulette).
+  - Quality presets for each effect.
+- Engine links:
+  - `_renderSettings` (RenderSettings struct in PostProcess.h)
+  - `_environmentMap`, `_pathTracer`, `_reflectionProbes`
 
 ## Animation Panels
 
@@ -161,6 +181,46 @@ This document describes what each editor panel is for, what it edits/displays, a
 - Files: `src/ui/views/PluginManagerView.cpp`, `src/ui/views/PluginManagerView.h`
 - Purpose:
   - Plugin list/state management UI.
+
+## Engine Systems
+
+### Save/Load System
+- File: `src/engine_state.cpp`, `src/engine_state.h`
+- Format: JSON (nlohmann-json)
+- Serializes all engine state:
+  - Camera (position, orientation, FOV, near/far, speeds)
+  - Lighting (sun direction/color/intensity, ambient)
+  - Point lights and spot lights
+  - Primitives (type, transform, materials, textures, face colors)
+  - Grid settings (size, colors, LOD, chunks)
+  - Render settings (SSAO, bloom, tonemap, color grading, SSR, shadows, spot lights, reflection probes)
+  - Background effect (current effect index + push constant data per effect)
+  - Shadow settings (bias, normal bias, sun enabled, saved intensity)
+  - Environment map (sky colors, IBL settings, rotation)
+  - Reflection probes (position, radius, sky blend, active per probe)
+  - Path tracer settings (bounces, samples, accumulation, NEE, RR)
+  - Physics settings (gravity, time step, sub-steps, debug)
+  - Snap settings (position/rotation/scale snap values)
+  - View state (view mode, grid visibility, outline)
+  - Loaded scene file paths (re-loaded on state restore)
+
+### Animation System
+- Files: `src/vk_engine.cpp` (updateAnimations), `src/vk_loader.cpp` (animation loading)
+- GPU skinning via buffer device addresses (`mesh_skinned.vert`)
+- Skeletal animation data: `AnimationClipData`, `SkeletonData`, `AnimationTrackData`
+- FBX/DAE axis conversion: `meshBindTransform` baked into inverse bind matrices at load time
+- Force TRS decomposition for FBX-converted bone nodes (handles negative determinant)
+- Skinned wireframe pipeline for correct debug visualization of animated meshes
+
+### Multi-Format Import Pipeline
+- GLTF/GLB: Direct loading via fastgltf
+- FBX/DAE: Auto-converted to GLB/GLTF via Assimp CLI (`assimp export`)
+  - Import cache with version-keyed hashing (avoids re-conversion)
+  - Best-format selection (prefers format with most animation/skin data)
+  - Source path remapping for animation-node matching
+  - Diagnostic warnings when conversion produces no animation data
+- OBJ: Direct loading with MTL material support
+- All formats appear identically in Hierarchy and Inspector panels
 
 ## Operational Notes
 

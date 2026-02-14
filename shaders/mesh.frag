@@ -144,13 +144,31 @@ mat3 constructTBN(vec3 N, vec4 tangentData) {
 
 void main()
 {
+    vec2 uv = inUV;
+    vec3 preN = normalize(inNormal);
+    vec3 preV = normalize(sceneData.cameraPosition.xyz - inWorldPos);
+    preN = faceforward(preN, -preV, preN);
+    uint displacementTexID = uint(max(materialData.extra[11].x, 0.0));
+
+    if (displacementTexID > 0u) {
+        float dispScale = materialData.extra[2].x;
+        float dispBias = materialData.extra[2].y;
+        if (abs(dispScale) > 0.0001) {
+            mat3 preTBN = constructTBN(preN, inTangent);
+            vec3 viewTS = transpose(preTBN) * preV;
+            float heightSample = texture(allTextures[displacementTexID], uv).r;
+            float parallax = (heightSample + dispBias - 0.5) * dispScale;
+            uv += viewTS.xy * parallax;
+        }
+    }
+
     // === BASE COLOR (ALBEDO) ===
     vec3 albedo = inColor * materialData.colorFactors.rgb;
 
 #ifdef USE_BINDLESS
-    vec4 texColor = texture(allTextures[materialData.colorTexID], inUV);
+    vec4 texColor = texture(allTextures[materialData.colorTexID], uv);
 #else
-    vec4 texColor = texture(colorTex, inUV);
+    vec4 texColor = texture(colorTex, uv);
 #endif
 
     // Linearize sRGB texture data (textures loaded as UNORM, not VK_FORMAT_*_SRGB)
@@ -164,12 +182,12 @@ void main()
     // Sample metallic-roughness map (G=roughness, B=metallic in GLTF spec)
 #ifdef USE_BINDLESS
     if (materialData.metalRoughTexID > 0u) {
-        vec4 metalRoughSample = texture(allTextures[materialData.metalRoughTexID], inUV);
+        vec4 metalRoughSample = texture(allTextures[materialData.metalRoughTexID], uv);
         roughness *= metalRoughSample.g;
         metallic *= metalRoughSample.b;
     }
 #else
-    vec4 metalRoughSample = texture(metalRoughTex, inUV);
+    vec4 metalRoughSample = texture(metalRoughTex, uv);
     roughness *= metalRoughSample.g;
     metallic *= metalRoughSample.b;
 #endif
@@ -187,7 +205,7 @@ void main()
     // Apply normal map if available (normalTexID > 0)
     if (materialData.normalTexID > 0u) {
         mat3 TBN = constructTBN(N, inTangent);
-        vec3 normalSample = texture(allTextures[materialData.normalTexID], inUV).rgb;
+        vec3 normalSample = texture(allTextures[materialData.normalTexID], uv).rgb;
         normalSample = normalSample * 2.0 - 1.0; // Convert from [0,1] to [-1,1]
         float normalStrength = materialData.metal_rough_factors.w;
         if (normalStrength <= 0.0) normalStrength = 1.0;
@@ -197,6 +215,14 @@ void main()
 #endif
 
     float NdotV = max(dot(N, V), 0.001);
+
+    float ao = materialData.metal_rough_factors.z;
+#ifdef USE_BINDLESS
+    uint aoTexID = uint(max(materialData.extra[11].y, 0.0));
+    if (aoTexID > 0u) {
+        ao *= texture(allTextures[aoTexID], uv).r;
+    }
+#endif
 
     // === F0 (base reflectance) ===
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
@@ -209,7 +235,7 @@ void main()
     // Metallic surfaces reflect ambient, dielectrics get diffuse ambient
     vec3 ambientDiffuse = albedo * hemiAmbient * (1.0 - metallic);
     vec3 ambientSpecular = F0 * hemiAmbient * 0.2;
-    vec3 ambient = ambientDiffuse + ambientSpecular;
+    vec3 ambient = (ambientDiffuse + ambientSpecular) * ao;
 
     // === DIRECTIONAL LIGHTING (SUN) with Cook-Torrance PBR ===
     vec3 sunDir = normalize(-sceneData.sunlightDirection.xyz);
@@ -228,7 +254,7 @@ void main()
 #ifdef USE_BINDLESS
     // Sample emissive texture if available (linearize sRGB)
     if (materialData.emissiveTexID > 0u) {
-        vec3 emissiveTex = texture(allTextures[materialData.emissiveTexID], inUV).rgb;
+        vec3 emissiveTex = texture(allTextures[materialData.emissiveTexID], uv).rgb;
         emission *= pow(emissiveTex, vec3(2.2));
     }
 #endif

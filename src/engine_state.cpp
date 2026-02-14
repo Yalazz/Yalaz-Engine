@@ -2,6 +2,8 @@
 #include "vk_engine.h"
 #include "vk_loader.h"
 #include "ui/EditorSelection.h"
+#include "renderer/EnvironmentMap.h"
+#include "renderer/PathTracer.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <fmt/core.h>
@@ -169,6 +171,9 @@ static json serializePrimitives(const std::vector<StaticMeshData>& shapes) {
         if (!s.albedoTexturePath.empty())    j["albedoTexturePath"]    = s.albedoTexturePath;
         if (!s.metalRoughTexturePath.empty()) j["metalRoughTexturePath"] = s.metalRoughTexturePath;
         if (!s.emissionTexturePath.empty())  j["emissionTexturePath"]  = s.emissionTexturePath;
+        if (!s.displacementTexturePath.empty()) j["displacementTexturePath"] = s.displacementTexturePath;
+        j["displacementScale"] = s.displacementScale;
+        j["displacementBias"] = s.displacementBias;
 
         json fc = json::array();
         for (int i = 0; i < 6; i++) {
@@ -210,6 +215,9 @@ static void deserializePrimitives(VulkanEngine& engine, std::vector<StaticMeshDa
         if (j.contains("albedoTexturePath"))    s.albedoTexturePath    = j["albedoTexturePath"].get<std::string>();
         if (j.contains("metalRoughTexturePath")) s.metalRoughTexturePath = j["metalRoughTexturePath"].get<std::string>();
         if (j.contains("emissionTexturePath"))  s.emissionTexturePath  = j["emissionTexturePath"].get<std::string>();
+        if (j.contains("displacementTexturePath")) s.displacementTexturePath = j["displacementTexturePath"].get<std::string>();
+        if (j.contains("displacementScale")) s.displacementScale = j["displacementScale"].get<float>();
+        if (j.contains("displacementBias")) s.displacementBias = j["displacementBias"].get<float>();
 
         if (j.contains("faceColors")) {
             const auto& fc = j["faceColors"];
@@ -320,6 +328,9 @@ static json serializeRenderSettings(const Yalaz::Renderer::RenderSettings& rs) {
     j["spotLightsEnabled"]        = rs.spotLightsEnabled;
     j["maxSpotLights"]            = rs.maxSpotLights;
     j["spotLightShadowsEnabled"]  = rs.spotLightShadowsEnabled;
+    // Reflection probes
+    j["reflectionProbesEnabled"]  = rs.reflectionProbesEnabled;
+    j["globalSkyBlend"]           = rs.globalSkyBlend;
     return j;
 }
 
@@ -368,6 +379,9 @@ static void deserializeRenderSettings(Yalaz::Renderer::RenderSettings& rs, const
     if (j.contains("spotLightsEnabled"))       rs.spotLightsEnabled       = j["spotLightsEnabled"].get<bool>();
     if (j.contains("maxSpotLights"))           rs.maxSpotLights           = j["maxSpotLights"].get<int>();
     if (j.contains("spotLightShadowsEnabled")) rs.spotLightShadowsEnabled = j["spotLightShadowsEnabled"].get<bool>();
+    // Reflection probes
+    if (j.contains("reflectionProbesEnabled")) rs.reflectionProbesEnabled = j["reflectionProbesEnabled"].get<bool>();
+    if (j.contains("globalSkyBlend"))          rs.globalSkyBlend          = j["globalSkyBlend"].get<float>();
 }
 
 // ================================================================
@@ -431,12 +445,251 @@ static void deserializeGrid(GridSettings& g, const json& j) {
 }
 
 // ================================================================
+// Serialize background effect
+// ================================================================
+
+static json serializeBackgroundEffect(const VulkanEngine& engine) {
+    json j;
+    j["currentEffect"] = engine.currentBackgroundEffect;
+    // Save the push constants data for each effect (the tweakable parameters)
+    json effects = json::array();
+    for (const auto& effect : engine.backgroundEffects) {
+        json e;
+        e["name"] = effect.name;
+        e["data1"] = vec4_to_json(effect.data.data1);
+        e["data2"] = vec4_to_json(effect.data.data2);
+        e["data3"] = vec4_to_json(effect.data.data3);
+        e["data4"] = vec4_to_json(effect.data.data4);
+        effects.push_back(e);
+    }
+    j["effects"] = effects;
+    return j;
+}
+
+static void deserializeBackgroundEffect(VulkanEngine& engine, const json& j) {
+    if (j.contains("currentEffect")) {
+        int idx = j["currentEffect"].get<int>();
+        if (idx >= 0 && idx < static_cast<int>(engine.backgroundEffects.size()))
+            engine.currentBackgroundEffect = idx;
+    }
+    if (j.contains("effects")) {
+        const auto& effects = j["effects"];
+        for (size_t i = 0; i < effects.size() && i < engine.backgroundEffects.size(); ++i) {
+            const auto& e = effects[i];
+            // Match by name to be robust against reordering
+            std::string savedName = e.value("name", "");
+            for (auto& engineEffect : engine.backgroundEffects) {
+                if (savedName == engineEffect.name) {
+                    if (e.contains("data1")) engineEffect.data.data1 = json_to_vec4(e["data1"]);
+                    if (e.contains("data2")) engineEffect.data.data2 = json_to_vec4(e["data2"]);
+                    if (e.contains("data3")) engineEffect.data.data3 = json_to_vec4(e["data3"]);
+                    if (e.contains("data4")) engineEffect.data.data4 = json_to_vec4(e["data4"]);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// ================================================================
+// Serialize shadow settings
+// ================================================================
+
+static json serializeShadowSettings(const VulkanEngine& engine) {
+    json j;
+    j["shadowsEnabled"]          = engine.shadowsEnabled;
+    j["pointLightShadowsEnabled"] = engine.pointLightShadowsEnabled;
+    j["shadowBias"]              = engine.shadowBias;
+    j["shadowNormalBias"]        = engine.shadowNormalBias;
+    j["sunEnabled"]              = engine.sunEnabled;
+    j["savedSunIntensity"]       = engine.savedSunIntensity;
+    return j;
+}
+
+static void deserializeShadowSettings(VulkanEngine& engine, const json& j) {
+    if (j.contains("shadowsEnabled"))           engine.shadowsEnabled           = j["shadowsEnabled"].get<bool>();
+    if (j.contains("pointLightShadowsEnabled")) engine.pointLightShadowsEnabled = j["pointLightShadowsEnabled"].get<bool>();
+    if (j.contains("shadowBias"))               engine.shadowBias               = j["shadowBias"].get<float>();
+    if (j.contains("shadowNormalBias"))          engine.shadowNormalBias         = j["shadowNormalBias"].get<float>();
+    if (j.contains("sunEnabled"))               engine.sunEnabled               = j["sunEnabled"].get<bool>();
+    if (j.contains("savedSunIntensity"))        engine.savedSunIntensity        = j["savedSunIntensity"].get<float>();
+}
+
+// ================================================================
+// Serialize environment map settings
+// ================================================================
+
+static json serializeEnvironmentSettings(const VulkanEngine& engine) {
+    json j;
+    if (engine._environmentMap) {
+        const auto& s = engine._environmentMap->settings;
+        j["skyColorTop"]       = vec3_to_json(s.skyColorTop);
+        j["skyColorHorizon"]   = vec3_to_json(s.skyColorHorizon);
+        j["groundColor"]       = vec3_to_json(s.groundColor);
+        j["skyIntensity"]      = s.skyIntensity;
+        j["exposure"]          = s.exposure;
+        j["rotation"]          = s.rotation;
+        j["useIBL"]            = s.useIBL;
+        j["iblIntensity"]      = s.iblIntensity;
+        j["irradianceSamples"] = s.irradianceSamples;
+        j["prefilterSamples"]  = s.prefilterSamples;
+    }
+    return j;
+}
+
+static void deserializeEnvironmentSettings(VulkanEngine& engine, const json& j) {
+    if (!engine._environmentMap) return;
+    auto& s = engine._environmentMap->settings;
+    if (j.contains("skyColorTop"))       s.skyColorTop       = json_to_vec3(j["skyColorTop"]);
+    if (j.contains("skyColorHorizon"))   s.skyColorHorizon   = json_to_vec3(j["skyColorHorizon"]);
+    if (j.contains("groundColor"))       s.groundColor       = json_to_vec3(j["groundColor"]);
+    if (j.contains("skyIntensity"))      s.skyIntensity      = j["skyIntensity"].get<float>();
+    if (j.contains("exposure"))          s.exposure          = j["exposure"].get<float>();
+    if (j.contains("rotation"))          s.rotation          = j["rotation"].get<float>();
+    if (j.contains("useIBL"))            s.useIBL            = j["useIBL"].get<bool>();
+    if (j.contains("iblIntensity"))      s.iblIntensity      = j["iblIntensity"].get<float>();
+    if (j.contains("irradianceSamples")) s.irradianceSamples = j["irradianceSamples"].get<int>();
+    if (j.contains("prefilterSamples"))  s.prefilterSamples  = j["prefilterSamples"].get<int>();
+    // Regenerate the procedural sky with new settings
+    engine._environmentMap->generateProceduralSky();
+}
+
+// ================================================================
+// Serialize reflection probes
+// ================================================================
+
+static json serializeReflectionProbes(const VulkanEngine& engine) {
+    json j;
+    j["probesReady"] = engine._probesReady;
+    json arr = json::array();
+    for (int i = 0; i < VulkanEngine::MAX_REFLECTION_PROBES; ++i) {
+        const auto& p = engine._reflectionProbes[i];
+        json probe;
+        probe["position"]       = vec3_to_json(p.position);
+        probe["radius"]         = p.radius;
+        probe["skyBlendFactor"] = p.skyBlendFactor;
+        probe["active"]         = p.active;
+        arr.push_back(probe);
+    }
+    j["probes"] = arr;
+    return j;
+}
+
+static void deserializeReflectionProbes(VulkanEngine& engine, const json& j) {
+    if (j.contains("probesReady")) engine._probesReady = j["probesReady"].get<bool>();
+    if (j.contains("probes")) {
+        const auto& arr = j["probes"];
+        for (size_t i = 0; i < arr.size() && i < VulkanEngine::MAX_REFLECTION_PROBES; ++i) {
+            const auto& p = arr[i];
+            auto& probe = engine._reflectionProbes[i];
+            if (p.contains("position"))       probe.position       = json_to_vec3(p["position"]);
+            if (p.contains("radius"))         probe.radius         = p["radius"].get<float>();
+            if (p.contains("skyBlendFactor")) probe.skyBlendFactor = p["skyBlendFactor"].get<float>();
+            if (p.contains("active"))         probe.active         = p["active"].get<bool>();
+            probe.needsUpdate = true; // Force re-render after load
+        }
+    }
+}
+
+// ================================================================
+// Serialize path tracer settings
+// ================================================================
+
+static json serializePathTracerSettings(const VulkanEngine& engine) {
+    json j;
+    if (engine._pathTracer) {
+        const auto& s = engine._pathTracer->settings;
+        j["maxBounces"]            = s.maxBounces;
+        j["samplesPerPixel"]       = s.samplesPerPixel;
+        j["maxAccumulatedFrames"]  = s.maxAccumulatedFrames;
+        j["enableAccumulation"]    = s.enableAccumulation;
+        j["enableNEE"]             = s.enableNEE;
+        j["enableRussianRoulette"] = s.enableRussianRoulette;
+        j["russianRouletteDepth"]  = s.russianRouletteDepth;
+        j["enableDenoising"]       = s.enableDenoising;
+        j["exposure"]              = s.exposure;
+        j["skyIntensity"]          = s.skyIntensity;
+        j["skyColor"]              = vec3_to_json(s.skyColor);
+    }
+    return j;
+}
+
+static void deserializePathTracerSettings(VulkanEngine& engine, const json& j) {
+    if (!engine._pathTracer) return;
+    auto& s = engine._pathTracer->settings;
+    if (j.contains("maxBounces"))            s.maxBounces            = j["maxBounces"].get<int>();
+    if (j.contains("samplesPerPixel"))       s.samplesPerPixel       = j["samplesPerPixel"].get<int>();
+    if (j.contains("maxAccumulatedFrames"))  s.maxAccumulatedFrames  = j["maxAccumulatedFrames"].get<int>();
+    if (j.contains("enableAccumulation"))    s.enableAccumulation    = j["enableAccumulation"].get<bool>();
+    if (j.contains("enableNEE"))             s.enableNEE             = j["enableNEE"].get<bool>();
+    if (j.contains("enableRussianRoulette")) s.enableRussianRoulette = j["enableRussianRoulette"].get<bool>();
+    if (j.contains("russianRouletteDepth"))  s.russianRouletteDepth  = j["russianRouletteDepth"].get<float>();
+    if (j.contains("enableDenoising"))       s.enableDenoising       = j["enableDenoising"].get<bool>();
+    if (j.contains("exposure"))              s.exposure              = j["exposure"].get<float>();
+    if (j.contains("skyIntensity"))          s.skyIntensity          = j["skyIntensity"].get<float>();
+    if (j.contains("skyColor"))              s.skyColor              = json_to_vec3(j["skyColor"]);
+    engine._pathTracer->resetAccumulation();
+}
+
+// ================================================================
+// Serialize physics settings
+// ================================================================
+
+static json serializePhysicsSettings(const VulkanEngine& engine) {
+    json j;
+    j["physicsEnabled"] = engine.physicsEnabled;
+    j["gravity"]        = vec3_to_json(engine.physicsSettings.gravity);
+    j["timeStep"]       = engine.physicsSettings.timeStep;
+    j["maxSubSteps"]    = engine.physicsSettings.maxSubSteps;
+    j["debugDraw"]      = engine.physicsSettings.debugDraw;
+    j["paused"]         = engine.physicsSettings.paused;
+    return j;
+}
+
+static void deserializePhysicsSettings(VulkanEngine& engine, const json& j) {
+    if (j.contains("physicsEnabled")) engine.physicsEnabled            = j["physicsEnabled"].get<bool>();
+    if (j.contains("gravity"))        engine.physicsSettings.gravity   = json_to_vec3(j["gravity"]);
+    if (j.contains("timeStep"))       engine.physicsSettings.timeStep  = j["timeStep"].get<float>();
+    if (j.contains("maxSubSteps"))    engine.physicsSettings.maxSubSteps = j["maxSubSteps"].get<int>();
+    if (j.contains("debugDraw"))      engine.physicsSettings.debugDraw = j["debugDraw"].get<bool>();
+    if (j.contains("paused"))         engine.physicsSettings.paused    = j["paused"].get<bool>();
+}
+
+// ================================================================
+// Serialize snap settings
+// ================================================================
+
+static json serializeSnapSettings(const VulkanEngine& engine) {
+    json j;
+    j["snapEnabled"]         = engine.snapEnabled;
+    j["snapPositionValue"]   = engine.snapPositionValue;
+    j["snapRotationEnabled"] = engine.snapRotationEnabled;
+    j["snapRotationAngle"]   = engine.snapRotationAngle;
+    j["snapScaleEnabled"]    = engine.snapScaleEnabled;
+    j["snapScaleValue"]      = engine.snapScaleValue;
+    return j;
+}
+
+static void deserializeSnapSettings(VulkanEngine& engine, const json& j) {
+    if (j.contains("snapEnabled"))         engine.snapEnabled         = j["snapEnabled"].get<bool>();
+    if (j.contains("snapPositionValue"))   engine.snapPositionValue   = j["snapPositionValue"].get<float>();
+    if (j.contains("snapRotationEnabled")) engine.snapRotationEnabled = j["snapRotationEnabled"].get<bool>();
+    if (j.contains("snapRotationAngle"))   engine.snapRotationAngle   = j["snapRotationAngle"].get<float>();
+    if (j.contains("snapScaleEnabled"))    engine.snapScaleEnabled    = j["snapScaleEnabled"].get<bool>();
+    if (j.contains("snapScaleValue"))      engine.snapScaleValue      = j["snapScaleValue"].get<float>();
+}
+
+// ================================================================
 // Public API: Save
 // ================================================================
 
 void saveEngineState(VulkanEngine& engine, const std::string& filepath) {
     json root;
 
+    // Version tag for forward compatibility
+    root["version"] = 2;
+
+    // Core scene state
     root["camera"]         = serializeCamera(engine.mainCamera);
     root["lighting"]       = serializeLighting(engine.sceneData);
     root["pointLights"]    = serializePointLights(engine.scenePointLights);
@@ -447,6 +700,31 @@ void saveEngineState(VulkanEngine& engine, const std::string& filepath) {
     root["viewMode"]       = static_cast<int>(engine._currentViewMode);
     root["showGrid"]       = engine._showGrid;
     root["showOutline"]    = engine._showOutline;
+
+    // Background / sky effect
+    root["backgroundEffect"] = serializeBackgroundEffect(engine);
+
+    // Shadow system
+    root["shadowSettings"] = serializeShadowSettings(engine);
+
+    // Environment map / IBL
+    root["environment"] = serializeEnvironmentSettings(engine);
+
+    // Reflection probes
+    root["reflectionProbes"] = serializeReflectionProbes(engine);
+
+    // Path tracer
+    root["pathTracer"] = serializePathTracerSettings(engine);
+
+    // Physics
+    root["physics"] = serializePhysicsSettings(engine);
+
+    // Snap settings
+    root["snap"] = serializeSnapSettings(engine);
+
+    // Additional render settings not in RenderSettings struct
+    root["reflectionProbesEnabled"] = engine._renderSettings.reflectionProbesEnabled;
+    root["globalSkyBlend"]          = engine._renderSettings.globalSkyBlend;
 
     // Save loaded scene file paths
     json scenes = json::object();
@@ -518,10 +796,12 @@ void loadEngineState(VulkanEngine& engine, const std::string& filepath) {
         for (auto& shape : engine.static_shapes) {
             bool hasTextures = !shape.albedoTexturePath.empty() ||
                               !shape.metalRoughTexturePath.empty() ||
-                              !shape.emissionTexturePath.empty();
+                              !shape.emissionTexturePath.empty() ||
+                              !shape.displacementTexturePath.empty();
             if (hasTextures) {
                 MaterialInstance mat = engine.create_primitive_material(
-                    shape.albedoTexturePath, shape.metalRoughTexturePath, shape.emissionTexturePath);
+                    shape.albedoTexturePath, shape.metalRoughTexturePath, shape.emissionTexturePath,
+                    shape.displacementTexturePath, shape.displacementScale, shape.displacementBias);
                 shape.material = std::make_shared<MaterialInstance>(mat);
             }
         }
@@ -547,6 +827,47 @@ void loadEngineState(VulkanEngine& engine, const std::string& filepath) {
     if (root.contains("showOutline")) {
         engine._showOutline = root["showOutline"].get<bool>();
     }
+
+    // Load background / sky effect
+    if (root.contains("backgroundEffect")) {
+        deserializeBackgroundEffect(engine, root["backgroundEffect"]);
+    }
+
+    // Load shadow settings
+    if (root.contains("shadowSettings")) {
+        deserializeShadowSettings(engine, root["shadowSettings"]);
+    }
+
+    // Load environment map / IBL
+    if (root.contains("environment")) {
+        deserializeEnvironmentSettings(engine, root["environment"]);
+    }
+
+    // Load reflection probes
+    if (root.contains("reflectionProbes")) {
+        deserializeReflectionProbes(engine, root["reflectionProbes"]);
+    }
+
+    // Load path tracer settings
+    if (root.contains("pathTracer")) {
+        deserializePathTracerSettings(engine, root["pathTracer"]);
+    }
+
+    // Load physics settings
+    if (root.contains("physics")) {
+        deserializePhysicsSettings(engine, root["physics"]);
+    }
+
+    // Load snap settings
+    if (root.contains("snap")) {
+        deserializeSnapSettings(engine, root["snap"]);
+    }
+
+    // Additional render settings
+    if (root.contains("reflectionProbesEnabled"))
+        engine._renderSettings.reflectionProbesEnabled = root["reflectionProbesEnabled"].get<bool>();
+    if (root.contains("globalSkyBlend"))
+        engine._renderSettings.globalSkyBlend = root["globalSkyBlend"].get<float>();
 
     // Load scenes
     if (root.contains("scenes")) {
@@ -622,16 +943,59 @@ void resetEngineState(VulkanEngine& engine) {
     engine._showGrid = true;
     engine._showOutline = true;
 
+    // Reset background effect
+    engine.currentBackgroundEffect = 0;
+
+    // Reset shadow settings
+    engine.shadowsEnabled = true;
+    engine.pointLightShadowsEnabled = true;
+    engine.shadowBias = 0.002f;
+    engine.shadowNormalBias = 0.015f;
+    engine.sunEnabled = true;
+    engine.savedSunIntensity = 3.0f;
+
+    // Reset environment map
+    if (engine._environmentMap) {
+        engine._environmentMap->settings = Yalaz::Renderer::EnvironmentSettings{};
+        engine._environmentMap->generateProceduralSky();
+    }
+
+    // Reset reflection probes
+    for (int i = 0; i < VulkanEngine::MAX_REFLECTION_PROBES; ++i) {
+        engine._reflectionProbes[i].position = glm::vec3(0.0f);
+        engine._reflectionProbes[i].radius = 50.0f;
+        engine._reflectionProbes[i].skyBlendFactor = 0.3f;
+        engine._reflectionProbes[i].active = true;
+        engine._reflectionProbes[i].needsUpdate = true;
+    }
+
+    // Reset path tracer
+    if (engine._pathTracer) {
+        engine._pathTracer->settings = Yalaz::Renderer::PathTracerSettings{};
+        engine._pathTracer->resetAccumulation();
+    }
+
+    // Reset render settings
+    engine._renderSettings = Yalaz::Renderer::RenderSettings{};
+
+    // Reset physics
+    engine.physicsEnabled = false;
+    engine.physicsSettings = PhysicsWorldSettings{};
+
+    // Reset snap settings
+    engine.snapEnabled = false;
+    engine.snapPositionValue = 1.0f;
+    engine.snapRotationEnabled = false;
+    engine.snapRotationAngle = 15.0f;
+    engine.snapScaleEnabled = false;
+    engine.snapScaleValue = 0.1f;
+
+    // Reset spot lights
+    engine.sceneSpotLights.clear();
+
     // Reload default scene
     engine.loadedScenes.clear();
     engine.sceneFilePaths.clear();
-
-    // auto gltfScene = loadGltf(&engine, "../../assets/monkeyHD.glb");
-    // if (gltfScene.has_value()) {
-    //     engine.loadedScenes["monkey"] = *gltfScene;
-    //     engine.sceneFilePaths["monkey"] = "../../assets/monkeyHD.glb";
-    //     fmt::print("[INFO] Default scene reloaded\n");
-    // }
 
     fmt::print("[INFO] Engine state reset to defaults\n");
 }

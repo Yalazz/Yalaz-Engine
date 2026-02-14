@@ -496,12 +496,14 @@
 #include <vk_loader.h>
 #include <fstream>
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cctype>
 #include <limits>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <nlohmann/json.hpp>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -522,6 +524,20 @@
 
 namespace {
 std::unordered_map<std::string, std::string> gConvertedObjSourceDir;
+using json = nlohmann::json;
+
+struct CachedMaterialImportMeta {
+    std::optional<size_t> baseColorImageIndex;
+    std::optional<size_t> metalRoughImageIndex;
+    std::optional<size_t> normalImageIndex;
+    std::optional<size_t> emissiveImageIndex;
+    std::optional<size_t> occlusionImageIndex;
+    std::optional<size_t> displacementImageIndex;
+    float normalScale = 1.0f;
+    float occlusionStrength = 1.0f;
+    float displacementScale = 0.03f;
+    float displacementBias = 0.0f;
+};
 
 std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -628,6 +644,228 @@ bool tryAssimpExport(const std::string& inputAbsPath, const std::filesystem::pat
     return false;
 }
 
+std::filesystem::path getImportMetadataPath(const std::filesystem::path& convertedPath) {
+    return std::filesystem::path(convertedPath.string() + ".importmeta.json");
+}
+
+bool loadGltfAssetForMetadata(const std::filesystem::path& p, fastgltf::Asset& outAsset) {
+    fastgltf::Parser parser(fastgltf::Extensions::KHR_lights_punctual);
+    constexpr auto opts = fastgltf::Options::DontRequireValidAssetMember
+        | fastgltf::Options::AllowDouble
+        | fastgltf::Options::LoadGLBBuffers
+        | fastgltf::Options::LoadExternalBuffers;
+
+    fastgltf::GltfDataBuffer data;
+    if (!data.loadFromFile(p.string())) return false;
+
+    auto type = fastgltf::determineGltfFileType(&data);
+    if (type == fastgltf::GltfType::glTF) {
+        auto res = parser.loadGLTF(&data, p.parent_path(), opts);
+        if (!res) return false;
+        outAsset = std::move(res.get());
+        return true;
+    }
+    if (type == fastgltf::GltfType::GLB) {
+        auto res = parser.loadBinaryGLTF(&data, p.parent_path(), opts);
+        if (!res) return false;
+        outAsset = std::move(res.get());
+        return true;
+    }
+    return false;
+}
+
+void writeImportCacheMetadata(const std::filesystem::path& sourcePath, const std::filesystem::path& convertedPath) {
+    try {
+        fastgltf::Asset asset;
+        if (!loadGltfAssetForMetadata(convertedPath, asset)) return;
+
+        std::vector<std::string> imageNamesLower;
+        imageNamesLower.reserve(asset.images.size());
+        for (size_t i = 0; i < asset.images.size(); ++i) {
+            std::string n = asset.images[i].name.empty()
+                ? (std::string("image_") + std::to_string(i))
+                : std::string(asset.images[i].name.c_str());
+            std::transform(n.begin(), n.end(), n.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            imageNamesLower.push_back(n);
+        }
+
+        auto getImageIdxFromTexture = [&](size_t textureIndex) -> std::optional<size_t> {
+            if (textureIndex >= asset.textures.size()) return std::nullopt;
+            const auto& tex = asset.textures[textureIndex];
+            if (!tex.imageIndex.has_value()) return std::nullopt;
+            size_t idx = tex.imageIndex.value();
+            if (idx >= imageNamesLower.size()) return std::nullopt;
+            return idx;
+        };
+        auto replaceOnce = [](std::string s, const std::string& from, const std::string& to) -> std::string {
+            size_t pos = s.find(from);
+            if (pos != std::string::npos) s.replace(pos, from.size(), to);
+            return s;
+        };
+        auto findImageByName = [&](const std::string& candidate) -> std::optional<size_t> {
+            for (size_t i = 0; i < imageNamesLower.size(); ++i) {
+                if (imageNamesLower[i] == candidate) return i;
+            }
+            return std::nullopt;
+        };
+        auto hasDispToken = [](const std::string& s) {
+            return s.find("displacement") != std::string::npos ||
+                s.find("height") != std::string::npos ||
+                s.find("disp") != std::string::npos ||
+                s.find("bump") != std::string::npos;
+        };
+        auto tryCompanionFrom = [&](size_t srcIdx) -> std::optional<size_t> {
+            if (srcIdx >= imageNamesLower.size()) return std::nullopt;
+            const std::string& srcName = imageNamesLower[srcIdx];
+            const std::array<std::pair<std::string, std::string>, 10> swaps = {{
+                {"_normal", "_height"},
+                {"_normal", "_disp"},
+                {"normal", "height"},
+                {"normal", "disp"},
+                {"_nrm", "_height"},
+                {"_nrm", "_disp"},
+                {"_n", "_h"},
+                {"_basecolor", "_height"},
+                {"_albedo", "_height"},
+                {"_diffuse", "_height"},
+            }};
+            for (const auto& [from, to] : swaps) {
+                if (srcName.find(from) == std::string::npos) continue;
+                std::string cand = replaceOnce(srcName, from, to);
+                if (auto idx = findImageByName(cand)) return idx;
+            }
+            return std::nullopt;
+        };
+
+        json root = json::object();
+        root["version"] = 1;
+        root["sourcePath"] = std::filesystem::absolute(sourcePath).string();
+        root["sourceWriteTime"] = static_cast<int64_t>(
+            std::filesystem::last_write_time(sourcePath).time_since_epoch().count());
+        root["convertedPath"] = convertedPath.string();
+        root["materials"] = json::array();
+
+        for (size_t matIdx = 0; matIdx < asset.materials.size(); ++matIdx) {
+            const auto& mat = asset.materials[matIdx];
+            std::optional<size_t> baseColorImageIdx;
+            std::optional<size_t> metalRoughImageIdx;
+            std::optional<size_t> normalImageIdx;
+            std::optional<size_t> emissiveImageIdx;
+            std::optional<size_t> occlusionImageIdx;
+            if (mat.pbrData.baseColorTexture.has_value()) {
+                baseColorImageIdx = getImageIdxFromTexture(mat.pbrData.baseColorTexture.value().textureIndex);
+            }
+            if (mat.pbrData.metallicRoughnessTexture.has_value()) {
+                metalRoughImageIdx = getImageIdxFromTexture(mat.pbrData.metallicRoughnessTexture.value().textureIndex);
+            }
+            if (mat.normalTexture.has_value()) {
+                normalImageIdx = getImageIdxFromTexture(mat.normalTexture.value().textureIndex);
+            }
+            if (mat.emissiveTexture.has_value()) {
+                emissiveImageIdx = getImageIdxFromTexture(mat.emissiveTexture.value().textureIndex);
+            }
+            if (mat.occlusionTexture.has_value()) {
+                occlusionImageIdx = getImageIdxFromTexture(mat.occlusionTexture.value().textureIndex);
+            }
+
+            std::optional<size_t> displacementImgIdx;
+            if (normalImageIdx.has_value()) displacementImgIdx = tryCompanionFrom(normalImageIdx.value());
+            if (!displacementImgIdx.has_value() && baseColorImageIdx.has_value()) {
+                displacementImgIdx = tryCompanionFrom(baseColorImageIdx.value());
+            }
+            if (!displacementImgIdx.has_value() && !mat.name.empty()) {
+                std::string matNameLower = std::string(mat.name.c_str());
+                std::transform(matNameLower.begin(), matNameLower.end(), matNameLower.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                for (size_t i = 0; i < imageNamesLower.size(); ++i) {
+                    if (!hasDispToken(imageNamesLower[i])) continue;
+                    if (imageNamesLower[i].find(matNameLower) != std::string::npos) {
+                        displacementImgIdx = i;
+                        break;
+                    }
+                }
+            }
+
+            json matMeta = json::object();
+            matMeta["index"] = matIdx;
+            matMeta["name"] = mat.name.empty() ? "" : std::string(mat.name.c_str());
+            if (baseColorImageIdx.has_value()) matMeta["baseColorImageIndex"] = baseColorImageIdx.value();
+            if (metalRoughImageIdx.has_value()) matMeta["metalRoughImageIndex"] = metalRoughImageIdx.value();
+            if (normalImageIdx.has_value()) matMeta["normalImageIndex"] = normalImageIdx.value();
+            if (emissiveImageIdx.has_value()) matMeta["emissiveImageIndex"] = emissiveImageIdx.value();
+            if (occlusionImageIdx.has_value()) matMeta["occlusionImageIndex"] = occlusionImageIdx.value();
+            if (mat.normalTexture.has_value()) matMeta["normalScale"] = mat.normalTexture.value().scale;
+            if (mat.occlusionTexture.has_value()) matMeta["occlusionStrength"] = mat.occlusionTexture.value().strength;
+            if (displacementImgIdx.has_value()) {
+                matMeta["displacementImageIndex"] = displacementImgIdx.value();
+                matMeta["displacementScale"] = 0.03f;
+                matMeta["displacementBias"] = 0.0f;
+            }
+            root["materials"].push_back(std::move(matMeta));
+        }
+
+        const std::filesystem::path metaPath = getImportMetadataPath(convertedPath);
+        std::ofstream out(metaPath, std::ios::out | std::ios::trunc);
+        if (!out.is_open()) return;
+        out << root.dump(2);
+    } catch (...) {
+    }
+}
+
+std::unordered_map<size_t, CachedMaterialImportMeta> readImportCacheMetadata(const std::filesystem::path& loadedPath) {
+    std::unordered_map<size_t, CachedMaterialImportMeta> out;
+    try {
+        const std::filesystem::path metaPath = getImportMetadataPath(loadedPath);
+        if (!std::filesystem::exists(metaPath) || std::filesystem::file_size(metaPath) == 0) return out;
+
+        std::ifstream in(metaPath);
+        if (!in.is_open()) return out;
+
+        json root = json::parse(in, nullptr, false);
+        if (root.is_discarded() || !root.contains("materials") || !root["materials"].is_array()) return out;
+
+        for (const auto& matMeta : root["materials"]) {
+            if (!matMeta.is_object() || !matMeta.contains("index")) continue;
+            const size_t idx = matMeta["index"].get<size_t>();
+            CachedMaterialImportMeta entry;
+            if (matMeta.contains("baseColorImageIndex")) {
+                entry.baseColorImageIndex = matMeta["baseColorImageIndex"].get<size_t>();
+            }
+            if (matMeta.contains("metalRoughImageIndex")) {
+                entry.metalRoughImageIndex = matMeta["metalRoughImageIndex"].get<size_t>();
+            }
+            if (matMeta.contains("normalImageIndex")) {
+                entry.normalImageIndex = matMeta["normalImageIndex"].get<size_t>();
+            }
+            if (matMeta.contains("emissiveImageIndex")) {
+                entry.emissiveImageIndex = matMeta["emissiveImageIndex"].get<size_t>();
+            }
+            if (matMeta.contains("occlusionImageIndex")) {
+                entry.occlusionImageIndex = matMeta["occlusionImageIndex"].get<size_t>();
+            }
+            if (matMeta.contains("displacementImageIndex")) {
+                entry.displacementImageIndex = matMeta["displacementImageIndex"].get<size_t>();
+            }
+            if (matMeta.contains("normalScale")) {
+                entry.normalScale = matMeta["normalScale"].get<float>();
+            }
+            if (matMeta.contains("occlusionStrength")) {
+                entry.occlusionStrength = matMeta["occlusionStrength"].get<float>();
+            }
+            if (matMeta.contains("displacementScale")) {
+                entry.displacementScale = matMeta["displacementScale"].get<float>();
+            }
+            if (matMeta.contains("displacementBias")) {
+                entry.displacementBias = matMeta["displacementBias"].get<float>();
+            }
+            out[idx] = entry;
+        }
+    } catch (...) {
+    }
+    return out;
+}
+
 bool convertModelToGltf(const std::filesystem::path& inputPath, std::filesystem::path& outPath) {
     try {
         const auto absIn = std::filesystem::absolute(inputPath).string();
@@ -679,6 +917,7 @@ bool convertModelToGltf(const std::filesystem::path& inputPath, std::filesystem:
             const int gltfScoreVal = gltfScore(outGltf);
             if (glbScore < 0 && gltfScoreVal < 0) return false;
             outPath = (gltfScoreVal > glbScore) ? outGltf : outGlb;
+            writeImportCacheMetadata(inputPath, outPath);
             return true;
         };
 
@@ -1184,6 +1423,20 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
     fmt::print("  Loaded {}/{} textures successfully\n", loadedTextures, gltf.images.size());
 
+    std::vector<std::string> imageNamesLower;
+    imageNamesLower.reserve(gltf.images.size());
+    for (size_t i = 0; i < gltf.images.size(); ++i) {
+        std::string n = gltf.images[i].name.empty()
+            ? (std::string("image_") + std::to_string(i))
+            : std::string(gltf.images[i].name.c_str());
+        std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        imageNamesLower.push_back(n);
+    }
+    const auto importMetaByMaterial = readImportCacheMetadata(path);
+    if (!importMetaByMaterial.empty()) {
+        fmt::print("  Import cache metadata: {} material overrides loaded\n", importMetaByMaterial.size());
+    }
+
 
 
 
@@ -1228,6 +1481,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             constants.extra[1].y = mat.alphaCutoff;
             passType = MaterialPass::MainColor;
         }
+        constants.extra[2] = glm::vec4(0.0f); // displacement scale/bias
 
         GLTFMetallic_Roughness::MaterialResources materialResources;
         // default the material textures
@@ -1254,12 +1508,72 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             outSampler = file.samplers[samplerIndex];
             return true;
         };
+        const CachedMaterialImportMeta* matMeta = nullptr;
+        if (auto it = importMetaByMaterial.find(static_cast<size_t>(data_index)); it != importMetaByMaterial.end()) {
+            matMeta = &it->second;
+        }
+        auto resolveMetaImage = [&](const std::optional<size_t>& metaImageIndex, size_t& outImg, VkSampler& outSampler) -> bool {
+            if (!metaImageIndex.has_value()) return false;
+            outImg = metaImageIndex.value();
+            if (outImg >= images.size()) return false;
+            outSampler = engine->_defaultSamplerLinear;
+            return true;
+        };
+
+        std::optional<size_t> baseColorImageIdx;
+        std::optional<size_t> metalRoughImageIdx;
+        std::optional<size_t> normalImageIdx;
+        auto replaceOnce = [](std::string s, const std::string& from, const std::string& to) -> std::string {
+            size_t pos = s.find(from);
+            if (pos != std::string::npos) s.replace(pos, from.size(), to);
+            return s;
+        };
+        auto findImageByName = [&](const std::string& candidate) -> std::optional<size_t> {
+            for (size_t i = 0; i < imageNamesLower.size(); ++i) {
+                if (imageNamesLower[i] == candidate) return i;
+            }
+            return std::nullopt;
+        };
+        auto hasDispToken = [](const std::string& s) {
+            return s.find("displacement") != std::string::npos ||
+                   s.find("height") != std::string::npos ||
+                   s.find("disp") != std::string::npos ||
+                   s.find("bump") != std::string::npos;
+        };
+        auto tryCompanionFrom = [&](size_t srcIdx) -> std::optional<size_t> {
+            if (srcIdx >= imageNamesLower.size()) return std::nullopt;
+            const std::string& srcName = imageNamesLower[srcIdx];
+            const std::array<std::pair<std::string, std::string>, 10> swaps = {{
+                {"_normal", "_height"},
+                {"_normal", "_disp"},
+                {"normal", "height"},
+                {"normal", "disp"},
+                {"_nrm", "_height"},
+                {"_nrm", "_disp"},
+                {"_n", "_h"},
+                {"_basecolor", "_height"},
+                {"_albedo", "_height"},
+                {"_diffuse", "_height"},
+            }};
+            for (const auto& [from, to] : swaps) {
+                if (srcName.find(from) == std::string::npos) continue;
+                std::string cand = replaceOnce(srcName, from, to);
+                if (auto idx = findImageByName(cand)) return idx;
+            }
+            return std::nullopt;
+        };
 
         // Load base color (albedo) texture
-        if (mat.pbrData.baseColorTexture.has_value()) {
+        {
             size_t img = 0;
             VkSampler sampler = engine->_defaultSamplerLinear;
-            if (resolveTextureBinding(mat.pbrData.baseColorTexture.value().textureIndex, img, sampler)) {
+            bool hasBinding = false;
+            if (matMeta) hasBinding = resolveMetaImage(matMeta->baseColorImageIndex, img, sampler);
+            if (!hasBinding && mat.pbrData.baseColorTexture.has_value()) {
+                hasBinding = resolveTextureBinding(mat.pbrData.baseColorTexture.value().textureIndex, img, sampler);
+            }
+            if (hasBinding) {
+                baseColorImageIdx = img;
                 materialResources.colorImage = images[img];
                 materialResources.colorSampler = sampler;
 
@@ -1275,10 +1589,16 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         // Load metallic-roughness texture
-        if (mat.pbrData.metallicRoughnessTexture.has_value()) {
+        {
             size_t img = 0;
             VkSampler sampler = engine->_defaultSamplerLinear;
-            if (resolveTextureBinding(mat.pbrData.metallicRoughnessTexture.value().textureIndex, img, sampler)) {
+            bool hasBinding = false;
+            if (matMeta) hasBinding = resolveMetaImage(matMeta->metalRoughImageIndex, img, sampler);
+            if (!hasBinding && mat.pbrData.metallicRoughnessTexture.has_value()) {
+                hasBinding = resolveTextureBinding(mat.pbrData.metallicRoughnessTexture.value().textureIndex, img, sampler);
+            }
+            if (hasBinding) {
+                metalRoughImageIdx = img;
                 materialResources.metalRoughImage = images[img];
                 materialResources.metalRoughSampler = sampler;
 
@@ -1310,10 +1630,16 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         // Load normal map texture
-        if (mat.normalTexture.has_value()) {
+        {
             size_t img = 0;
             VkSampler ignoredSampler = engine->_defaultSamplerLinear;
-            if (resolveTextureBinding(mat.normalTexture.value().textureIndex, img, ignoredSampler)) {
+            bool hasBinding = false;
+            if (matMeta) hasBinding = resolveMetaImage(matMeta->normalImageIndex, img, ignoredSampler);
+            if (!hasBinding && mat.normalTexture.has_value()) {
+                hasBinding = resolveTextureBinding(mat.normalTexture.value().textureIndex, img, ignoredSampler);
+            }
+            if (hasBinding) {
+                normalImageIdx = img;
                 // Store normal texture in the texture cache and set the ID
                 auto& normalImage = images[img];
                 if (normalImage.image != VK_NULL_HANDLE && normalImage.image != engine->_whiteImage.image &&
@@ -1322,16 +1648,25 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                         normalImage.imageView, engine->_defaultSamplerLinear,
                         std::string("normal_") + std::to_string(data_index));
                     constants.normalTexID = normalTexID.Index;
-                    constants.metal_rough_factors.w = mat.normalTexture.value().scale; // normal strength
+                    if (matMeta) {
+                        constants.metal_rough_factors.w = matMeta->normalScale;
+                    } else if (mat.normalTexture.has_value()) {
+                        constants.metal_rough_factors.w = mat.normalTexture.value().scale; // normal strength
+                    }
                 }
             }
         }
 
         // Load emissive texture
-        if (mat.emissiveTexture.has_value()) {
+        {
             size_t img = 0;
             VkSampler ignoredSampler = engine->_defaultSamplerLinear;
-            if (resolveTextureBinding(mat.emissiveTexture.value().textureIndex, img, ignoredSampler)) {
+            bool hasBinding = false;
+            if (matMeta) hasBinding = resolveMetaImage(matMeta->emissiveImageIndex, img, ignoredSampler);
+            if (!hasBinding && mat.emissiveTexture.has_value()) {
+                hasBinding = resolveTextureBinding(mat.emissiveTexture.value().textureIndex, img, ignoredSampler);
+            }
+            if (hasBinding) {
                 auto& emissiveImage = images[img];
                 if (emissiveImage.image != VK_NULL_HANDLE && emissiveImage.image != engine->_whiteImage.image &&
                     emissiveImage.image != engine->_errorCheckerboardImage.image) {
@@ -1348,8 +1683,91 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         // Load occlusion texture (stored in metalRough R channel or extra field)
-        if (mat.occlusionTexture.has_value()) {
+        if (matMeta) {
+            constants.metal_rough_factors.z = matMeta->occlusionStrength; // AO strength
+            if (matMeta->occlusionImageIndex.has_value() && matMeta->occlusionImageIndex.value() < images.size()) {
+                auto& aoImage = images[matMeta->occlusionImageIndex.value()];
+                if (aoImage.image != VK_NULL_HANDLE &&
+                    aoImage.image != engine->_whiteImage.image &&
+                    aoImage.image != engine->_errorCheckerboardImage.image) {
+                    TextureID aoTexID = engine->texCache.AddTexture(
+                        aoImage.imageView, engine->_defaultSamplerLinear,
+                        std::string("ao_") + std::to_string(data_index));
+                    constants.extra[11].y = static_cast<float>(aoTexID.Index);
+                }
+            } else if (mat.occlusionTexture.has_value()) {
+                size_t img = 0;
+                VkSampler ignoredSampler = engine->_defaultSamplerLinear;
+                if (resolveTextureBinding(mat.occlusionTexture.value().textureIndex, img, ignoredSampler)) {
+                    auto& aoImage = images[img];
+                    if (aoImage.image != VK_NULL_HANDLE &&
+                        aoImage.image != engine->_whiteImage.image &&
+                        aoImage.image != engine->_errorCheckerboardImage.image) {
+                        TextureID aoTexID = engine->texCache.AddTexture(
+                            aoImage.imageView, engine->_defaultSamplerLinear,
+                            std::string("ao_") + std::to_string(data_index));
+                        constants.extra[11].y = static_cast<float>(aoTexID.Index);
+                    }
+                }
+            }
+        } else if (mat.occlusionTexture.has_value()) {
             constants.metal_rough_factors.z = mat.occlusionTexture.value().strength; // AO strength
+            size_t img = 0;
+            VkSampler ignoredSampler = engine->_defaultSamplerLinear;
+            if (resolveTextureBinding(mat.occlusionTexture.value().textureIndex, img, ignoredSampler)) {
+                auto& aoImage = images[img];
+                if (aoImage.image != VK_NULL_HANDLE &&
+                    aoImage.image != engine->_whiteImage.image &&
+                    aoImage.image != engine->_errorCheckerboardImage.image) {
+                    TextureID aoTexID = engine->texCache.AddTexture(
+                        aoImage.imageView, engine->_defaultSamplerLinear,
+                        std::string("ao_") + std::to_string(data_index));
+                    constants.extra[11].y = static_cast<float>(aoTexID.Index);
+                }
+            }
+        }
+
+        // Prefer deterministic displacement mapping from import-cache metadata.
+        std::optional<size_t> displacementImgIdx;
+        if (matMeta) {
+            if (matMeta->displacementImageIndex.has_value() && matMeta->displacementImageIndex.value() < images.size()) {
+                displacementImgIdx = matMeta->displacementImageIndex.value();
+                constants.extra[2].x = matMeta->displacementScale;
+                constants.extra[2].y = matMeta->displacementBias;
+            }
+        }
+        // Fallback heuristic when metadata has no mapping for this material.
+        if (!displacementImgIdx.has_value() && normalImageIdx.has_value()) {
+            displacementImgIdx = tryCompanionFrom(normalImageIdx.value());
+        }
+        if (!displacementImgIdx.has_value() && baseColorImageIdx.has_value()) {
+            displacementImgIdx = tryCompanionFrom(baseColorImageIdx.value());
+        }
+        if (!displacementImgIdx.has_value() && !mat.name.empty()) {
+            std::string matNameLower = std::string(mat.name.c_str());
+            std::transform(matNameLower.begin(), matNameLower.end(), matNameLower.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            for (size_t i = 0; i < imageNamesLower.size(); ++i) {
+                if (!hasDispToken(imageNamesLower[i])) continue;
+                if (imageNamesLower[i].find(matNameLower) != std::string::npos) {
+                    displacementImgIdx = i;
+                    break;
+                }
+            }
+        }
+        if (displacementImgIdx.has_value() && displacementImgIdx.value() < images.size()) {
+            auto& dispImage = images[displacementImgIdx.value()];
+            if (dispImage.image != VK_NULL_HANDLE &&
+                dispImage.image != engine->_whiteImage.image &&
+                dispImage.image != engine->_errorCheckerboardImage.image) {
+                TextureID displacementTexID = engine->texCache.AddTexture(
+                    dispImage.imageView, engine->_defaultSamplerLinear,
+                    std::string("displacement_") + std::to_string(data_index));
+                constants.extra[11].x = static_cast<float>(displacementTexID.Index);
+                if (constants.extra[2].x == 0.0f) {
+                    constants.extra[2].x = 0.03f; // conservative default
+                }
+            }
         }
 
         // Write final material constants to GPU buffer (after all textures loaded)

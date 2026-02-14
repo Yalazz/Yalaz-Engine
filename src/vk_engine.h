@@ -140,6 +140,9 @@ struct StaticMeshData {
     std::string albedoTexturePath;
     std::string metalRoughTexturePath;
     std::string emissionTexturePath;
+    std::string displacementTexturePath;
+    float displacementScale = 0.0f;
+    float displacementBias = 0.0f;
 
     // Helper to get material descriptor set (returns default if no custom material)
     VkDescriptorSet getMaterialDescriptorSet(class VulkanEngine* engine) const;
@@ -381,6 +384,9 @@ struct GLTFMetallic_Roughness {
         uint32_t emissiveTexID;          // Bindless texture ID for emissive map (0 = none)
         glm::vec4 extra[13];             // extra[0] = emission (xyz=color, w=strength)
                                          // extra[1].x = reflection intensity
+                                         // extra[2].x = displacement scale, extra[2].y = displacement bias
+                                         // extra[11].x = displacement texture ID (float-encoded)
+                                         // extra[11].y = AO texture ID (float-encoded)
     };
 
 
@@ -559,6 +565,7 @@ public:
     GPUMeshBuffers generate_capsule_mesh();
     GPUMeshBuffers generate_torus_mesh();
     GPUMeshBuffers generate_triangle_mesh();
+    GPUMeshBuffers generateMeshForPrimitiveType(PrimitiveType type);
     void draw_shaded(
         VkCommandBuffer cmd,
         VkDescriptorSet globalDescriptor,
@@ -767,7 +774,10 @@ public:
     MaterialInstance create_primitive_material(
         const std::string& albedoPath = "",
         const std::string& metalRoughPath = "",
-        const std::string& emissionPath = ""
+        const std::string& emissionPath = "",
+        const std::string& displacementPath = "",
+        float displacementScale = 0.0f,
+        float displacementBias = 0.0f
     );
     void init_default_primitive_material();
 

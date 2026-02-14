@@ -582,10 +582,12 @@ constexpr TextureID INVALID_TEXTURE_ID = { UINT32_MAX };
 struct TextureCache {
     std::vector<VkDescriptorImageInfo> Cache;
     std::unordered_map<std::string, TextureID> NameMap;
+    std::vector<std::string> IndexToName;
 
     TextureID AddTexture(const VkDescriptorImageInfo& info, const std::string& name = "") {
         TextureID id{ static_cast<uint32_t>(Cache.size()) };
         Cache.push_back(info);
+        IndexToName.push_back(name);
         if (!name.empty()) {
             NameMap[name] = id;
         }
@@ -604,11 +606,15 @@ struct TextureCache {
     // This prevents use-after-free when a scene is unloaded and its images destroyed.
     void InvalidateImageViews(const std::vector<VkImageView>& deadViews,
                               VkImageView fallbackView, VkSampler fallbackSampler) {
-        for (auto& entry : Cache) {
+        for (size_t i = 0; i < Cache.size(); ++i) {
+            auto& entry = Cache[i];
             for (auto dv : deadViews) {
                 if (entry.imageView == dv) {
                     entry.imageView = fallbackView;
                     entry.sampler = fallbackSampler;
+                    if (i < IndexToName.size()) {
+                        IndexToName[i].clear();
+                    }
                     break;
                 }
             }
@@ -622,6 +628,13 @@ struct TextureCache {
                 ++it;
             }
         }
+    }
+
+    std::string GetTextureName(uint32_t index) const {
+        if (index < IndexToName.size() && !IndexToName[index].empty()) {
+            return IndexToName[index];
+        }
+        return {};
     }
 };
 

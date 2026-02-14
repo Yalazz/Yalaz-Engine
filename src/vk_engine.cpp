@@ -3936,6 +3936,20 @@ GPUMeshBuffers load_obj_mesh(VulkanEngine* engine, const std::string& filename) 
     return engine->uploadMesh(indices, vertices);
 }
 
+GPUMeshBuffers VulkanEngine::generateMeshForPrimitiveType(PrimitiveType type) {
+    switch (type) {
+        case PrimitiveType::Cube:     return generate_cube_mesh();
+        case PrimitiveType::Sphere:   return generate_sphere_mesh();
+        case PrimitiveType::Capsule:  return generate_capsule_mesh();
+        case PrimitiveType::Cylinder: return generate_cylinder_mesh();
+        case PrimitiveType::Plane:    return generate_plane_mesh();
+        case PrimitiveType::Cone:     return generate_cone_mesh();
+        case PrimitiveType::Torus:    return generate_torus_mesh();
+        case PrimitiveType::Triangle: return generate_triangle_mesh();
+        default:                      return generate_cube_mesh();
+    }
+}
+
 GPUMeshBuffers VulkanEngine::generate_triangle_mesh() {
     // Triangle facing +Z with proper normals for lighting
     glm::vec3 normal(0.0f, 0.0f, 1.0f);
@@ -5854,6 +5868,10 @@ void VulkanEngine::init_default_primitive_material() {
         _primitiveMaterialDataBuffer.info.pMappedData);
     constants->colorFactors = glm::vec4(1.0f);  // No color modification
     constants->metal_rough_factors = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);  // Pass through
+    constants->colorTexID = 0;
+    constants->metalRoughTexID = 0;
+    constants->normalTexID = 0;
+    constants->emissiveTexID = 0;
     // Clear extra data
     for (int i = 0; i < 13; ++i) {
         constants->extra[i] = glm::vec4(0.0f);
@@ -5892,9 +5910,14 @@ VkDescriptorSet StaticMeshData::getMaterialDescriptorSet(VulkanEngine* engine) c
 MaterialInstance VulkanEngine::create_primitive_material(
     const std::string& albedoPath,
     const std::string& metalRoughPath,
-    const std::string& emissionPath)
+    const std::string& emissionPath,
+    const std::string& displacementPath,
+    float displacementScale,
+    float displacementBias)
 {
     GLTFMetallic_Roughness::MaterialResources resources;
+    AllocatedImage emissiveImage{};
+    AllocatedImage displacementImage{};
 
     // Load albedo texture or use default white
     if (!albedoPath.empty()) {
@@ -5944,10 +5967,71 @@ MaterialInstance VulkanEngine::create_primitive_material(
         materialBuffer.info.pMappedData);
     constants->colorFactors = glm::vec4(1.0f);
     constants->metal_rough_factors = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+    constants->colorTexID = 0;
+    constants->metalRoughTexID = 0;
+    constants->normalTexID = 0;
+    constants->emissiveTexID = 0;
 
     // Handle emission
     for (int i = 0; i < 13; ++i) {
         constants->extra[i] = glm::vec4(0.0f);
+    }
+    constants->extra[2].x = displacementScale;
+    constants->extra[2].y = displacementBias;
+
+    // Add loaded textures to bindless cache so shader can sample optional maps.
+    if (resources.colorImage.image != VK_NULL_HANDLE && resources.colorImage.image != _whiteImage.image) {
+        TextureID colorTexID = texCache.AddTexture(
+            resources.colorImage.imageView,
+            resources.colorSampler,
+            std::string("prim_albedo_") + albedoPath);
+        constants->colorTexID = colorTexID.Index;
+    }
+    if (resources.metalRoughImage.image != VK_NULL_HANDLE && resources.metalRoughImage.image != _whiteImage.image) {
+        TextureID mrTexID = texCache.AddTexture(
+            resources.metalRoughImage.imageView,
+            resources.metalRoughSampler,
+            std::string("prim_mr_") + metalRoughPath);
+        constants->metalRoughTexID = mrTexID.Index;
+    }
+
+    if (!emissionPath.empty()) {
+        int width, height, channels;
+        unsigned char* data = stbi_load(emissionPath.c_str(), &width, &height, &channels, 4);
+        if (data) {
+            VkExtent3D size = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+            emissiveImage = create_image(data, size, VK_FORMAT_R8G8B8A8_SRGB,
+                VK_IMAGE_USAGE_SAMPLED_BIT, true);
+            stbi_image_free(data);
+            if (emissiveImage.image != VK_NULL_HANDLE) {
+                TextureID emTexID = texCache.AddTexture(
+                    emissiveImage.imageView, _defaultSamplerLinear,
+                    std::string("prim_emissive_") + emissionPath);
+                constants->emissiveTexID = emTexID.Index;
+                constants->extra[0] = glm::vec4(1.0f);
+            }
+        } else {
+            fmt::print("[Material] Warning: Failed to load emissive texture: {}\n", emissionPath);
+        }
+    }
+
+    if (!displacementPath.empty()) {
+        int width, height, channels;
+        unsigned char* data = stbi_load(displacementPath.c_str(), &width, &height, &channels, 4);
+        if (data) {
+            VkExtent3D size = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+            displacementImage = create_image(data, size, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_SAMPLED_BIT, true);
+            stbi_image_free(data);
+            if (displacementImage.image != VK_NULL_HANDLE) {
+                TextureID dispTexID = texCache.AddTexture(
+                    displacementImage.imageView, _defaultSamplerLinear,
+                    std::string("prim_disp_") + displacementPath);
+                constants->extra[11].x = static_cast<float>(dispTexID.Index);
+            }
+        } else {
+            fmt::print("[Material] Warning: Failed to load displacement texture: {}\n", displacementPath);
+        }
     }
 
     resources.dataBuffer = materialBuffer.buffer;
@@ -5977,10 +6061,19 @@ MaterialInstance VulkanEngine::create_primitive_material(
     if (resources.metalRoughImage.image != VK_NULL_HANDLE && resources.metalRoughImage.image != _whiteImage.image) {
         _dynamicPrimitiveMaterialImages.push_back(resources.metalRoughImage);
     }
+    if (emissiveImage.image != VK_NULL_HANDLE && emissiveImage.image != _whiteImage.image) {
+        _dynamicPrimitiveMaterialImages.push_back(emissiveImage);
+    }
+    if (displacementImage.image != VK_NULL_HANDLE && displacementImage.image != _whiteImage.image) {
+        _dynamicPrimitiveMaterialImages.push_back(displacementImage);
+    }
     _dynamicPrimitiveMaterialBuffers.push_back(materialBuffer);
 
-    fmt::print("[Material] Created persistent primitive material (albedo={}, metalRough={})\n",
-        albedoPath.empty() ? "default" : albedoPath, metalRoughPath.empty() ? "default" : metalRoughPath);
+    fmt::print("[Material] Created persistent primitive material (albedo={}, metalRough={}, emission={}, displacement={})\n",
+        albedoPath.empty() ? "default" : albedoPath,
+        metalRoughPath.empty() ? "default" : metalRoughPath,
+        emissionPath.empty() ? "none" : emissionPath,
+        displacementPath.empty() ? "none" : displacementPath);
     return matData;
 }
 

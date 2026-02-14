@@ -436,10 +436,15 @@ void HierarchyView::SpawnPrimitive() {
         newMesh.faceColors[i] = m_FaceColors[i];
     }
 
-    // Get mesh from engine's default meshes
+    // Get mesh from engine's default meshes (with fallback regeneration)
     auto it = m_Engine->defaultMeshes.find(newMesh.type);
     if (it != m_Engine->defaultMeshes.end()) {
         newMesh.mesh = it->second;
+    } else {
+        // Regenerate missing mesh and cache it
+        GPUMeshBuffers generated = m_Engine->generateMeshForPrimitiveType(newMesh.type);
+        m_Engine->defaultMeshes[newMesh.type] = generated;
+        newMesh.mesh = generated;
     }
 
     newMesh.materialType = ShaderOnlyMaterial::DEFAULT;
@@ -489,10 +494,15 @@ void HierarchyView::SpawnPrimitiveQuick(int type, const char* name) {
     newMesh.materialType = ShaderOnlyMaterial::DEFAULT;
     newMesh.passType = MaterialPass::MainColor;
 
-    // Get mesh from engine's default meshes
+    // Get mesh from engine's default meshes (with fallback regeneration)
     auto it = m_Engine->defaultMeshes.find(newMesh.type);
     if (it != m_Engine->defaultMeshes.end()) {
         newMesh.mesh = it->second;
+    } else {
+        // Regenerate missing mesh and cache it
+        GPUMeshBuffers generated = m_Engine->generateMeshForPrimitiveType(newMesh.type);
+        m_Engine->defaultMeshes[newMesh.type] = generated;
+        newMesh.mesh = generated;
     }
 
     m_Engine->static_shapes.push_back(newMesh);
@@ -825,15 +835,15 @@ void HierarchyView::RenderLights() {
 void HierarchyView::RenderCreateMenu() {
     // Quick create - spawns in front of camera
     if (ImGui::BeginMenu("Quick Create (In Front)")) {
-        if (ImGui::MenuItem("Cube")) SpawnPrimitiveQuick(0, "Cube");
-        if (ImGui::MenuItem("Sphere")) SpawnPrimitiveQuick(1, "Sphere");
-        if (ImGui::MenuItem("Cylinder")) SpawnPrimitiveQuick(2, "Cylinder");
-        if (ImGui::MenuItem("Cone")) SpawnPrimitiveQuick(3, "Cone");
-        if (ImGui::MenuItem("Capsule")) SpawnPrimitiveQuick(4, "Capsule");
-        if (ImGui::MenuItem("Torus")) SpawnPrimitiveQuick(5, "Torus");
+        if (ImGui::MenuItem("Cube")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Cube), "Cube");
+        if (ImGui::MenuItem("Sphere")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Sphere), "Sphere");
+        if (ImGui::MenuItem("Cylinder")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Cylinder), "Cylinder");
+        if (ImGui::MenuItem("Cone")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Cone), "Cone");
+        if (ImGui::MenuItem("Capsule")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Capsule), "Capsule");
+        if (ImGui::MenuItem("Torus")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Torus), "Torus");
         ImGui::Separator();
-        if (ImGui::MenuItem("Plane")) SpawnPrimitiveQuick(6, "Plane");
-        if (ImGui::MenuItem("Triangle")) SpawnPrimitiveQuick(7, "Triangle");
+        if (ImGui::MenuItem("Plane")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Plane), "Plane");
+        if (ImGui::MenuItem("Triangle")) SpawnPrimitiveQuick(static_cast<int>(PrimitiveType::Triangle), "Triangle");
         ImGui::EndMenu();
     }
 

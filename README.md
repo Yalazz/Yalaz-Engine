@@ -1,11 +1,42 @@
 # Yalaz Engine
 
-A professional, cross-platform 3D rendering engine built with **Vulkan** featuring PBR materials, real-time lighting, and a modern editor interface.
+A professional, cross-platform 3D rendering engine built with **Vulkan** featuring physically-based rendering, real-time post-processing, skeletal animation, path tracing, and a full-featured editor interface.
 
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3+-red.svg)
 ![C++20](https://img.shields.io/badge/C++-20-blue.svg)
 ![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+
+---
+
+## Features
+
+### Rendering
+- **PBR Pipeline** -- Cook-Torrance BRDF with GGX NDF, Smith geometry, Schlick Fresnel
+- **HDR Rendering** -- Linear-space lighting with configurable tone mapping (ACES, Reinhard, Uncharted2, Linear)
+- **Post-Processing** -- Bloom (13-tap downsample, tent upsample), SSAO (HBAO-style), SSR (Hi-Z ray march)
+- **Color Grading** -- Exposure, contrast, saturation, temperature, tint (GPU compute)
+- **Path Tracer** -- BVH-accelerated, NEE, Russian Roulette, progressive accumulation
+- **Shadow System** -- 4-cascade CSM (4096x4096 atlas), point light cubemap shadows, PCF/PCSS, contact shadows
+
+### Environment & Lighting
+- **Environment Maps** -- Procedural sky generation with presets (Clear Day, Sunset, Overcast, Night, Studio)
+- **IBL** -- Irradiance maps, pre-filtered specular maps, BRDF LUT
+- **Multi-Probe Reflections** -- 4 real-time reflection probes with distance-based blending
+- **Point & Spot Lights** -- Dynamic lights with shadow casting
+
+### Animation
+- **Skeletal Animation** -- GPU-skinned meshes via buffer device addresses
+- **Multi-Format Import** -- GLTF, GLB, FBX, DAE, OBJ (FBX/DAE auto-converted via Assimp CLI)
+- **Animation Graph** -- State machine with blend transitions
+- **FBX Axis Conversion** -- Automatic Z-up to Y-up handling with IBM baking
+
+### Editor
+- **19 Editor Panels** -- Scene, Hierarchy, Inspector, Asset Browser, Material Editor, Animation, and more
+- **Primitive System** -- Cube, Sphere, Cylinder, Cone, Capsule, Torus, Plane, Triangle with PBR materials
+- **Comprehensive Save/Load** -- Full scene state serialization (camera, lights, materials, environment, probes, physics, render settings)
+- **Asset Browser** -- Thumbnail previews, drag-drop textures, multi-format model loading
+- **Gizmo System** -- Translation, rotation, scale with configurable snapping
 
 ---
 
@@ -584,32 +615,64 @@ Yalaz-Engine/
 │
 ├── src/                              # Source code
 │   ├── main.cpp                      # Entry point
-│   ├── vk_engine.cpp/h               # Core Vulkan engine
-│   ├── vk_types.h                    # Type definitions
+│   ├── vk_engine.cpp/h               # Core Vulkan engine (rendering, pipelines, scene)
+│   ├── vk_types.h                    # Type definitions (GPU structs, nodes, materials)
 │   ├── vk_initializers.cpp/h         # Vulkan helpers
 │   ├── vk_images.cpp/h               # Texture handling
-│   ├── vk_descriptors.cpp/h          # Descriptor sets
-│   ├── vk_pipelines.cpp/h            # Graphics pipelines
-│   ├── vk_loader.cpp/h               # Model loading
+│   ├── vk_descriptors.cpp/h          # Descriptor set management
+│   ├── vk_pipelines.cpp/h            # Graphics pipeline builder
+│   ├── vk_loader.cpp/h               # Model loading (GLTF/GLB/FBX/DAE/OBJ)
 │   ├── camera.cpp/h                  # Camera system
-│   └── ui/                           # Editor UI
+│   ├── engine_state.cpp/h            # Save/Load scene state (JSON)
+│   ├── renderer/                     # Advanced rendering subsystems
+│   │   ├── PostProcess.h             # Post-processing framework + RenderSettings
+│   │   ├── BloomPass.cpp/h           # Bloom (downsample/upsample chain)
+│   │   ├── ToneMappingPass.cpp/h     # Tone mapping operators
+│   │   ├── SSAOPass.cpp/h            # Screen-space ambient occlusion
+│   │   ├── SSRPass.cpp/h             # Screen-space reflections
+│   │   ├── PathTracer.cpp/h          # BVH path tracer (compute)
+│   │   └── EnvironmentMap.cpp/h      # Skybox, IBL, procedural sky
+│   ├── scene/                        # Scene management
+│   │   └── SceneManager.cpp/h        # Scene load/unload orchestration
+│   ├── geometry/                     # Primitive mesh generation
+│   │   └── PrimitiveType.h           # Primitive type enum
+│   └── ui/                           # Editor UI (19 panels)
 │       ├── EditorUI.cpp/h            # Main UI class
-│       └── panels/                   # UI panels
+│       ├── EditorTheme.h             # Theme / styling
+│       └── views/                    # Individual editor panels
+│           ├── SceneView.cpp/h       # Main 3D viewport
+│           ├── HierarchyView.cpp/h   # Scene hierarchy + primitive creation
+│           ├── ObjectInspectorView.cpp/h # Property inspector
+│           ├── AssetBrowserView.cpp/h    # File browser with thumbnails
+│           ├── AnimationView.cpp/h       # Animation timeline + graph
+│           ├── RenderSettingsView.cpp/h  # Post-process / env / path tracer UI
+│           ├── MaterialView.cpp/h        # Material editor
+│           └── ...                       # Console, Profiler, GPU Debug, etc.
 │
 ├── shaders/                          # GLSL shaders
-│   ├── *.vert                        # Vertex shaders
-│   ├── *.frag                        # Fragment shaders
-│   ├── *.comp                        # Compute shaders
-│   └── *.spv                         # Compiled (generated)
+│   ├── mesh.vert / mesh.frag         # Standard PBR mesh rendering
+│   ├── mesh_skinned.vert             # GPU skeletal animation
+│   ├── primitive.vert / .frag        # Primitive rendering
+│   ├── bloom_*.comp                  # Bloom downsample/upsample
+│   ├── tonemap_final.comp            # Tone mapping + color grading
+│   ├── ssao.comp                     # SSAO
+│   ├── ssr.comp                      # SSR
+│   ├── pathtrace_bvh.comp            # Path tracer
+│   ├── skybox_bg.comp                # Skybox background
+│   └── *.spv                         # Compiled (generated by CMake)
 │
 ├── assets/                           # 3D models & textures
+├── docs/                             # Documentation
+│   ├── UI_PANELS_DETAILED.md         # Panel specifications
+│   └── UI_PANELS_QUICK_REFERENCE.md  # Panel lookup table
 │
 ├── third_party/                      # Dependencies (submodules)
 │   ├── SDL/                          # Window & input
 │   ├── imgui/                        # UI framework
 │   ├── glm/                          # Math library
-│   ├── vma/                          # Memory allocator
-│   ├── fastgltf/                     # glTF loader
+│   ├── vma/                          # Vulkan memory allocator
+│   ├── fastgltf/                     # glTF 2.0 loader
+│   ├── nlohmann-json/                # JSON (save/load)
 │   └── ...
 │
 ├── cmake/                            # CMake modules
@@ -767,13 +830,16 @@ GitHub Actions automatically:
 
 | Library | Purpose | License |
 |---------|---------|---------|
-| Vulkan SDK | Graphics API | Apache 2.0 |
-| SDL2 | Windowing | zlib |
-| Dear ImGui | UI | MIT |
-| GLM | Math | MIT |
-| VMA | Memory | MIT |
-| fastgltf | glTF loading | MIT |
-| stb_image | Image loading | Public Domain |
+| Vulkan SDK | Graphics API + shader compiler | Apache 2.0 |
+| SDL2 | Windowing & input | zlib |
+| Dear ImGui | Editor UI framework | MIT |
+| GLM | Math (vectors, matrices, quaternions) | MIT |
+| VMA | Vulkan memory allocator | MIT |
+| fastgltf | glTF 2.0 loading | MIT |
+| stb_image | Image loading (PNG, JPG, HDR, TGA) | Public Domain |
+| nlohmann-json | JSON serialization (save/load) | MIT |
+| fmt | String formatting | MIT |
+| Assimp CLI | FBX/DAE conversion (optional, runtime) | BSD |
 
 ---
 
@@ -786,9 +852,5 @@ MIT License - see [LICENSE](LICENSE) file.
 <p align="center">
   <b>Yalaz Engine</b><br>
   Professional Vulkan Rendering Engine<br>
-  C++20 • Vulkan 1.3 • Cross-Platform
+  C++20 | Vulkan 1.3 | Cross-Platform
 </p>
-refresh
-analytics trigger Sun Jan 25 15:48:03 +03 2026
-analytics trigger Sun Jan 25 15:52:43 +03 2026
-trigger Sun Jan 25 16:07:27 +03 2026

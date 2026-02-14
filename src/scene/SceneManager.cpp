@@ -267,6 +267,8 @@ bool SceneManager::SaveScene(const std::string& filePath) {
                             m["metalRoughTexID"] = c->metalRoughTexID;
                             m["normalTexID"] = c->normalTexID;
                             m["emissiveTexID"] = c->emissiveTexID;
+                            m["displacementTexID"] = static_cast<uint32_t>(std::max(c->extra[11].x, 0.0f));
+                            m["aoTexID"] = static_cast<uint32_t>(std::max(c->extra[11].y, 0.0f));
 
                             json extra = json::array();
                             for (int i = 0; i < 13; ++i) {
@@ -319,6 +321,9 @@ bool SceneManager::SaveScene(const std::string& filePath) {
                 primData["albedoTexturePath"] = prim.albedoTexturePath;
                 primData["metalRoughTexturePath"] = prim.metalRoughTexturePath;
                 primData["emissionTexturePath"] = prim.emissionTexturePath;
+                primData["displacementTexturePath"] = prim.displacementTexturePath;
+                primData["displacementScale"] = prim.displacementScale;
+                primData["displacementBias"] = prim.displacementBias;
 
                 // Save face colors
                 json faceColorsArray = json::array();
@@ -708,6 +713,9 @@ bool SceneManager::LoadScene(const std::string& filePath) {
                 prim.albedoTexturePath = primData.value("albedoTexturePath", std::string{});
                 prim.metalRoughTexturePath = primData.value("metalRoughTexturePath", std::string{});
                 prim.emissionTexturePath = primData.value("emissionTexturePath", std::string{});
+                prim.displacementTexturePath = primData.value("displacementTexturePath", std::string{});
+                prim.displacementScale = primData.value("displacementScale", 0.0f);
+                prim.displacementBias = primData.value("displacementBias", 0.0f);
 
                 // Face colors
                 if (primData.contains("faceColors")) {
@@ -717,10 +725,28 @@ bool SceneManager::LoadScene(const std::string& filePath) {
                     }
                 }
 
-                // Get mesh from default meshes
+                // Get mesh from default meshes (with fallback regeneration)
                 auto it = m_Engine->defaultMeshes.find(prim.type);
                 if (it != m_Engine->defaultMeshes.end()) {
                     prim.mesh = it->second;
+                } else {
+                    GPUMeshBuffers generated = m_Engine->generateMeshForPrimitiveType(prim.type);
+                    m_Engine->defaultMeshes[prim.type] = generated;
+                    prim.mesh = generated;
+                }
+
+                if (!prim.albedoTexturePath.empty() ||
+                    !prim.metalRoughTexturePath.empty() ||
+                    !prim.emissionTexturePath.empty() ||
+                    !prim.displacementTexturePath.empty()) {
+                    MaterialInstance mat = m_Engine->create_primitive_material(
+                        prim.albedoTexturePath,
+                        prim.metalRoughTexturePath,
+                        prim.emissionTexturePath,
+                        prim.displacementTexturePath,
+                        prim.displacementScale,
+                        prim.displacementBias);
+                    prim.material = std::make_shared<MaterialInstance>(mat);
                 }
 
                 m_Engine->static_shapes.push_back(prim);
@@ -898,6 +924,10 @@ bool SceneManager::LoadScene(const std::string& filePath) {
                                         constants.metalRoughTexID = matData.value("metalRoughTexID", constants.metalRoughTexID);
                                         constants.normalTexID = matData.value("normalTexID", constants.normalTexID);
                                         constants.emissiveTexID = matData.value("emissiveTexID", constants.emissiveTexID);
+                                        constants.extra[11].x = static_cast<float>(
+                                            matData.value("displacementTexID", static_cast<uint32_t>(std::max(constants.extra[11].x, 0.0f))));
+                                        constants.extra[11].y = static_cast<float>(
+                                            matData.value("aoTexID", static_cast<uint32_t>(std::max(constants.extra[11].y, 0.0f))));
 
                                         if (matData.contains("extra") && matData["extra"].is_array()) {
                                             const auto& e = matData["extra"];

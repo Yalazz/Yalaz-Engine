@@ -244,9 +244,13 @@ void MaterialView::SyncWithSelection() {
             m_MetallicRoughnessSlot.isLoaded = !newShape.metalRoughTexturePath.empty();
             m_EmissionSlot.path = newShape.emissionTexturePath;
             m_EmissionSlot.isLoaded = !newShape.emissionTexturePath.empty();
+            m_DisplacementSlot.path = newShape.displacementTexturePath;
+            m_DisplacementSlot.isLoaded = !newShape.displacementTexturePath.empty();
             // Clear slots that don't have per-primitive paths
             m_NormalSlot = {"Normal", "", false, 0};
             m_AOSlot = {"Ambient Occlusion", "", false, 0};
+            m_DisplacementScale = newShape.displacementScale;
+            m_DisplacementBias = newShape.displacementBias;
         }
 
         // Always sync from the shape's current values (ObjectInspectorView may have changed them)
@@ -254,6 +258,8 @@ void MaterialView::SyncWithSelection() {
         m_BaseColor = shape.mainColor;
         m_Metallic = shape.metallic;
         m_Roughness = shape.roughness;
+        m_DisplacementScale = shape.displacementScale;
+        m_DisplacementBias = shape.displacementBias;
 
         float emissionLen = glm::length(shape.emission);
         if (emissionLen > 0.001f) {
@@ -323,6 +329,8 @@ void MaterialView::LoadGLTFMaterialData() {
                 m_NormalStrength = constants->metal_rough_factors.w;
                 m_Emission = glm::vec3(constants->extra[0]);
                 m_EmissionStrength = constants->extra[0].w;
+                m_DisplacementScale = constants->extra[2].x;
+                m_DisplacementBias = constants->extra[2].y;
 
                 vmaUnmapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation);
                 return;
@@ -338,6 +346,8 @@ void MaterialView::LoadGLTFMaterialData() {
     m_NormalStrength = 1.0f;
     m_Emission = glm::vec3(0.0f);
     m_EmissionStrength = 0.0f;
+    m_DisplacementScale = 0.0f;
+    m_DisplacementBias = 0.0f;
 }
 
 void MaterialView::RenderGLTFMaterialList() {
@@ -832,6 +842,12 @@ void MaterialView::RenderMaterialProperties() {
     if (ImGui::SliderFloat("Normal Strength", &m_NormalStrength, 0.0f, 2.0f)) {
         changed = true;
     }
+    if (ImGui::SliderFloat("Displacement Scale", &m_DisplacementScale, -1.0f, 1.0f)) {
+        changed = true;
+    }
+    if (ImGui::SliderFloat("Displacement Bias", &m_DisplacementBias, -1.0f, 1.0f)) {
+        changed = true;
+    }
 
     ImGui::Spacing();
     SectionHeader("Emission");
@@ -925,12 +941,24 @@ void MaterialView::ApplyToSelection() {
             shape.metallic = m_Metallic;
             shape.roughness = m_Roughness;
             shape.emission = m_Emission * m_EmissionStrength;
+            shape.displacementScale = m_DisplacementScale;
+            shape.displacementBias = m_DisplacementBias;
 
             // Update pass type based on alpha
             if (m_BaseColor.a < 1.0f) {
                 shape.passType = MaterialPass::Transparent;
             } else {
                 shape.passType = MaterialPass::MainColor;
+            }
+
+            if (!shape.albedoTexturePath.empty() ||
+                !shape.metalRoughTexturePath.empty() ||
+                !shape.emissionTexturePath.empty() ||
+                !shape.displacementTexturePath.empty()) {
+                MaterialInstance mat = m_Engine->create_primitive_material(
+                    shape.albedoTexturePath, shape.metalRoughTexturePath, shape.emissionTexturePath,
+                    shape.displacementTexturePath, shape.displacementScale, shape.displacementBias);
+                shape.material = std::make_shared<MaterialInstance>(mat);
             }
         }
     }
@@ -992,6 +1020,7 @@ void MaterialView::UpdateGLTFMaterialBuffer() {
 
                 // Store emission in extra[0] (x,y,z = color, w = strength)
                 constants->extra[0] = glm::vec4(m_Emission, m_EmissionStrength);
+                constants->extra[2] = glm::vec4(m_DisplacementScale, m_DisplacementBias, 0.0f, 0.0f);
 
                 vmaUnmapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation);
 
@@ -999,10 +1028,11 @@ void MaterialView::UpdateGLTFMaterialBuffer() {
                 vmaFlushAllocation(m_Engine->_allocator, scene->materialDataBuffer.allocation, bufferOffset,
                     sizeof(GLTFMetallic_Roughness::MaterialConstants));
 
-                fmt::print("[MaterialView] Updated GLTF material - Base: ({:.2f},{:.2f},{:.2f},{:.2f}), Metal: {:.2f}, Rough: {:.2f}, Emission: ({:.2f},{:.2f},{:.2f}) x {:.2f}\n",
+                fmt::print("[MaterialView] Updated GLTF material - Base: ({:.2f},{:.2f},{:.2f},{:.2f}), Metal: {:.2f}, Rough: {:.2f}, Emission: ({:.2f},{:.2f},{:.2f}) x {:.2f}, DispScale: {:.3f}\n",
                     m_BaseColor.r, m_BaseColor.g, m_BaseColor.b, m_BaseColor.a,
                     m_Metallic, m_Roughness,
-                    m_Emission.r, m_Emission.g, m_Emission.b, m_EmissionStrength);
+                    m_Emission.r, m_Emission.g, m_Emission.b, m_EmissionStrength,
+                    m_DisplacementScale);
             }
             return;
         }
@@ -1025,6 +1055,9 @@ void MaterialView::RenderTextureSlots() {
     RenderTextureSlot("Metallic/Roughness", m_MetallicRoughnessSlot, "TEXTURE_PATH");
     RenderTextureSlot("Ambient Occlusion", m_AOSlot, "TEXTURE_PATH");
     RenderTextureSlot("Emission", m_EmissionSlot, "TEXTURE_PATH");
+    RenderTextureSlot("Displacement (Height)", m_DisplacementSlot, "TEXTURE_PATH");
+    ImGui::SliderFloat("Displacement Scale", &m_DisplacementScale, -1.0f, 1.0f, "%.3f");
+    ImGui::SliderFloat("Displacement Bias", &m_DisplacementBias, -1.0f, 1.0f, "%.3f");
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1037,12 +1070,15 @@ void MaterialView::RenderTextureSlots() {
         m_MetallicRoughnessSlot = {"Metallic/Roughness", "", false, 0};
         m_AOSlot = {"Ambient Occlusion", "", false, 0};
         m_EmissionSlot = {"Emission", "", false, 0};
+        m_DisplacementSlot = {"Displacement", "", false, 0};
+        m_DisplacementScale = 0.0f;
+        m_DisplacementBias = 0.0f;
     }
 
     // Apply textures button for GLTF
     if (m_SelectionType == MaterialSelectionType::GLTFMaterial) {
         bool hasTextures = m_AlbedoSlot.isLoaded || m_MetallicRoughnessSlot.isLoaded ||
-                           m_NormalSlot.isLoaded || m_EmissionSlot.isLoaded;
+                           m_NormalSlot.isLoaded || m_EmissionSlot.isLoaded || m_DisplacementSlot.isLoaded;
 
         if (hasTextures) {
             ImGui::Spacing();
@@ -1073,6 +1109,22 @@ void MaterialView::RenderTextureSlots() {
                     }
                 }
 
+                // Load emissive texture
+                if (m_EmissionSlot.isLoaded && !m_EmissionSlot.path.empty()) {
+                    uint32_t texID = 0;
+                    if (LoadTextureFromFile(m_EmissionSlot.path, texID)) {
+                        m_EmissionSlot.textureID = texID;
+                    }
+                }
+
+                // Load displacement texture
+                if (m_DisplacementSlot.isLoaded && !m_DisplacementSlot.path.empty()) {
+                    uint32_t texID = 0;
+                    if (LoadTextureFromFile(m_DisplacementSlot.path, texID)) {
+                        m_DisplacementSlot.textureID = texID;
+                    }
+                }
+
                 // Update material with new texture IDs
                 RebuildMaterialDescriptorSet();
             }
@@ -1085,7 +1137,8 @@ void MaterialView::RenderTextureSlots() {
 
     // Apply textures button for PRIMITIVES
     if (m_SelectionType == MaterialSelectionType::Primitive) {
-        bool hasTextures = m_AlbedoSlot.isLoaded || m_MetallicRoughnessSlot.isLoaded;
+        bool hasTextures = m_AlbedoSlot.isLoaded || m_MetallicRoughnessSlot.isLoaded ||
+                           m_EmissionSlot.isLoaded || m_DisplacementSlot.isLoaded;
 
         if (hasTextures) {
             ImGui::Spacing();
@@ -1224,7 +1277,7 @@ bool MaterialView::LoadTextureFromFile(const std::string& texturePath, uint32_t&
     return true;
 }
 
-void MaterialView::UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoughTexID) {
+void MaterialView::UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoughTexID, uint32_t normalTexID, uint32_t emissiveTexID, uint32_t displacementTexID, uint32_t aoTexID) {
     if (!m_Engine || !m_SelectedMeshNode || !m_SelectedMeshNode->mesh) return;
 
     auto& surfaces = m_SelectedMeshNode->mesh->surfaces;
@@ -1262,13 +1315,18 @@ void MaterialView::UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoug
                 // Update texture IDs
                 constants->colorTexID = colorTexID;
                 constants->metalRoughTexID = metalRoughTexID;
+                constants->normalTexID = normalTexID;
+                constants->emissiveTexID = emissiveTexID;
+                constants->extra[11].x = static_cast<float>(displacementTexID);
+                constants->extra[11].y = static_cast<float>(aoTexID);
 
                 vmaUnmapMemory(m_Engine->_allocator, scene->materialDataBuffer.allocation);
 
                 vmaFlushAllocation(m_Engine->_allocator, scene->materialDataBuffer.allocation, bufferOffset,
                     sizeof(GLTFMetallic_Roughness::MaterialConstants));
 
-                fmt::print("Updated material texture IDs: color={}, metalRough={}\n", colorTexID, metalRoughTexID);
+                fmt::print("Updated material texture IDs: color={}, metalRough={}, normal={}, emissive={}, displacement={}, ao={}\n",
+                    colorTexID, metalRoughTexID, normalTexID, emissiveTexID, displacementTexID, aoTexID);
             }
             return;
         }
@@ -1297,8 +1355,12 @@ void MaterialView::RebuildMaterialDescriptorSet() {
 
     uint32_t colorTexID = m_AlbedoSlot.isLoaded ? m_AlbedoSlot.textureID : 0;
     uint32_t metalRoughTexID = m_MetallicRoughnessSlot.isLoaded ? m_MetallicRoughnessSlot.textureID : 0;
+    uint32_t normalTexID = m_NormalSlot.isLoaded ? m_NormalSlot.textureID : 0;
+    uint32_t emissiveTexID = m_EmissionSlot.isLoaded ? m_EmissionSlot.textureID : 0;
+    uint32_t displacementTexID = m_DisplacementSlot.isLoaded ? m_DisplacementSlot.textureID : 0;
+    uint32_t aoTexID = m_AOSlot.isLoaded ? m_AOSlot.textureID : 0;
 
-    UpdateMaterialTexture(colorTexID, metalRoughTexID);
+    UpdateMaterialTexture(colorTexID, metalRoughTexID, normalTexID, emissiveTexID, displacementTexID, aoTexID);
 }
 
 void MaterialView::ApplyTexturesToPrimitive() {
@@ -1314,8 +1376,11 @@ void MaterialView::ApplyTexturesToPrimitive() {
     std::string albedoPath = m_AlbedoSlot.isLoaded ? m_AlbedoSlot.path : "";
     std::string metalRoughPath = m_MetallicRoughnessSlot.isLoaded ? m_MetallicRoughnessSlot.path : "";
     std::string emissionPath = m_EmissionSlot.isLoaded ? m_EmissionSlot.path : "";
+    std::string displacementPath = m_DisplacementSlot.isLoaded ? m_DisplacementSlot.path : "";
 
-    MaterialInstance newMaterial = m_Engine->create_primitive_material(albedoPath, metalRoughPath, emissionPath);
+    MaterialInstance newMaterial = m_Engine->create_primitive_material(
+        albedoPath, metalRoughPath, emissionPath,
+        displacementPath, m_DisplacementScale, m_DisplacementBias);
 
     // Create a shared_ptr and assign to the shape
     shape.material = std::make_shared<MaterialInstance>(newMaterial);
@@ -1324,10 +1389,15 @@ void MaterialView::ApplyTexturesToPrimitive() {
     shape.albedoTexturePath = albedoPath;
     shape.metalRoughTexturePath = metalRoughPath;
     shape.emissionTexturePath = emissionPath;
+    shape.displacementTexturePath = displacementPath;
+    shape.displacementScale = m_DisplacementScale;
+    shape.displacementBias = m_DisplacementBias;
 
     fmt::print("[MaterialView] Applied textures to primitive '{}'\n", shape.name);
     fmt::print("  Albedo: {}\n", albedoPath.empty() ? "[default white]" : albedoPath);
     fmt::print("  MetalRough: {}\n", metalRoughPath.empty() ? "[default white]" : metalRoughPath);
+    fmt::print("  Displacement: {} (scale={}, bias={})\n",
+        displacementPath.empty() ? "[none]" : displacementPath, m_DisplacementScale, m_DisplacementBias);
 }
 
 void MaterialView::RenderPreview() {
@@ -1523,6 +1593,11 @@ void MaterialView::SetEmissionTexture(const std::string& path) {
     m_EmissionSlot.isLoaded = !path.empty();
 }
 
+void MaterialView::SetDisplacementTexture(const std::string& path) {
+    m_DisplacementSlot.path = path;
+    m_DisplacementSlot.isLoaded = !path.empty();
+}
+
 void MaterialView::ClearGLTFSelection() {
     m_SelectionType = MaterialSelectionType::None;
     m_SelectedMeshNode = nullptr;
@@ -1716,6 +1791,11 @@ MaterialFile::MaterialData MaterialView::GetCurrentMaterialData() const {
     if (m_EmissionSlot.isLoaded) {
         data.emissionTexturePath = m_EmissionSlot.path;
     }
+    if (m_DisplacementSlot.isLoaded) {
+        data.displacementTexturePath = m_DisplacementSlot.path;
+    }
+    data.displacementScale = m_DisplacementScale;
+    data.displacementBias = m_DisplacementBias;
 
     // Metadata
     data.category = m_MaterialCategory;
@@ -1750,6 +1830,8 @@ void MaterialView::ApplyMaterialData(const MaterialFile::MaterialData& data) {
 
     // Normal scale
     m_NormalStrength = data.normalScale;
+    m_DisplacementScale = data.displacementScale;
+    m_DisplacementBias = data.displacementBias;
 
     // Texture paths
     if (!data.albedoTexturePath.empty()) {
@@ -1786,6 +1868,15 @@ void MaterialView::ApplyMaterialData(const MaterialFile::MaterialData& data) {
         uint32_t texID = 0;
         if (LoadTextureFromFile(data.emissionTexturePath, texID)) {
             m_EmissionSlot.textureID = texID;
+        }
+    }
+
+    if (!data.displacementTexturePath.empty()) {
+        m_DisplacementSlot.path = data.displacementTexturePath;
+        m_DisplacementSlot.isLoaded = true;
+        uint32_t texID = 0;
+        if (LoadTextureFromFile(data.displacementTexturePath, texID)) {
+            m_DisplacementSlot.textureID = texID;
         }
     }
 

@@ -22,6 +22,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
 #include <functional>
+#include <filesystem>
 #include <cstring>
 #include <cstdlib>
 
@@ -480,11 +481,15 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
         if (renderTextureDropSlot("Albedo (Base Color)", shape.albedoTexturePath)) texturesChanged = true;
         if (renderTextureDropSlot("Metallic/Roughness", shape.metalRoughTexturePath)) texturesChanged = true;
         if (renderTextureDropSlot("Emission", shape.emissionTexturePath)) texturesChanged = true;
+        if (renderTextureDropSlot("Displacement (Height)", shape.displacementTexturePath)) texturesChanged = true;
+        if (ImGui::DragFloat("Displacement Scale", &shape.displacementScale, 0.005f, -1.0f, 1.0f, "%.3f")) texturesChanged = true;
+        if (ImGui::DragFloat("Displacement Bias", &shape.displacementBias, 0.005f, -1.0f, 1.0f, "%.3f")) texturesChanged = true;
 
         // Auto-rebuild material when textures change
         if (texturesChanged) {
             MaterialInstance newMaterial = m_Engine->create_primitive_material(
-                shape.albedoTexturePath, shape.metalRoughTexturePath, shape.emissionTexturePath);
+                shape.albedoTexturePath, shape.metalRoughTexturePath, shape.emissionTexturePath,
+                shape.displacementTexturePath, shape.displacementScale, shape.displacementBias);
             shape.material = std::make_shared<MaterialInstance>(newMaterial);
         }
 
@@ -495,13 +500,17 @@ void ObjectInspectorView::RenderPrimitiveInspector(int index) {
         // Clear all textures button
         bool hasTextures = !shape.albedoTexturePath.empty() ||
                           !shape.metalRoughTexturePath.empty() ||
-                          !shape.emissionTexturePath.empty();
+                          !shape.emissionTexturePath.empty() ||
+                          !shape.displacementTexturePath.empty();
         if (hasTextures) {
             if (ImGui::Button("Clear All Textures", ImVec2(-1, 0))) {
                 shape.material = nullptr;  // Reverts to default material
                 shape.albedoTexturePath.clear();
                 shape.metalRoughTexturePath.clear();
                 shape.emissionTexturePath.clear();
+                shape.displacementTexturePath.clear();
+                shape.displacementScale = 0.0f;
+                shape.displacementBias = 0.0f;
             }
         }
 
@@ -970,6 +979,21 @@ void ObjectInspectorView::RenderSceneNodeInspector() {
             }
         }
         if (ownerScene) break;
+    }
+
+    // Show scene name and source file path
+    if (!ownerSceneName.empty()) {
+        ImGui::TextDisabled("Scene: %s", ownerSceneName.c_str());
+        auto pathIt = m_Engine->sceneFilePaths.find(ownerSceneName);
+        if (pathIt != m_Engine->sceneFilePaths.end()) {
+            // Show file type badge
+            std::string ext = std::filesystem::path(pathIt->second).extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::toupper);
+            if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "[%s]", ext.c_str());
+            ImGui::TextDisabled("Source: %s", pathIt->second.c_str());
+        }
     }
 
     // Focus button
@@ -1699,8 +1723,15 @@ void ObjectInspectorView::RenderGLTFMaterialEditor(MeshNode* node) {
     glm::vec3 emission = glm::vec3(constants->extra[0]);
     float emissionStrength = constants->extra[0].w;
     float reflectionIntensity = constants->extra[1].x;
+    float displacementScale = constants->extra[2].x;
+    float displacementBias = constants->extra[2].y;
+    uint32_t displacementTexID = static_cast<uint32_t>(std::max(constants->extra[11].x, 0.0f));
+    bool useDisplacementTexture = (displacementTexID > 0);
+    uint32_t aoTexID = static_cast<uint32_t>(std::max(constants->extra[11].y, 0.0f));
+    bool useAOTexture = (aoTexID > 0);
     uint32_t emissiveTexID = constants->emissiveTexID;
     uint32_t emissiveTexBackup = static_cast<uint32_t>(std::max(constants->extra[12].x, 0.0f));
+    uint32_t aoTexBackup = static_cast<uint32_t>(std::max(constants->extra[12].y, 0.0f));
     bool useEmissiveTexture = (emissiveTexID > 0);
 
     vmaUnmapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation);
@@ -1745,6 +1776,18 @@ void ObjectInspectorView::RenderGLTFMaterialEditor(MeshNode* node) {
     ImGui::SameLine(ImGui::GetWindowWidth() - 60);
     ImGui::TextDisabled("%.0f%%", ao * 100);
     if (ImGui::SliderFloat("##GLTFAO", &ao, 0.0f, 1.0f, "")) changed = true;
+    const std::string aoTexName = (m_Engine && aoTexID > 0) ? m_Engine->texCache.GetTextureName(aoTexID) : std::string();
+    ImGui::TextDisabled("AO Texture ID: %u", aoTexID);
+    ImGui::TextDisabled("AO Texture Name: %s", aoTexName.empty() ? "<unnamed>" : aoTexName.c_str());
+    if (ImGui::Checkbox("Use AO Texture", &useAOTexture)) {
+        changed = true;
+        if (!useAOTexture) {
+            aoTexBackup = aoTexID;
+            aoTexID = 0;
+        } else if (aoTexID == 0 && aoTexBackup > 0) {
+            aoTexID = aoTexBackup;
+        }
+    }
 
     // Reflection
     ImGui::Spacing();
@@ -1754,6 +1797,13 @@ void ObjectInspectorView::RenderGLTFMaterialEditor(MeshNode* node) {
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.3f, 0.6f, 0.9f, 1.0f));
     if (ImGui::SliderFloat("##GLTFReflection", &reflectionIntensity, 0.0f, 1.0f, "")) changed = true;
     ImGui::PopStyleColor();
+
+    ImGui::Text("Displacement Scale");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 60);
+    ImGui::TextDisabled("%.3f", displacementScale);
+    if (ImGui::SliderFloat("##GLTFDispScale", &displacementScale, -1.0f, 1.0f, "")) changed = true;
+    if (ImGui::SliderFloat("Displacement Bias##GLTFDispBias", &displacementBias, -1.0f, 1.0f, "%.3f")) changed = true;
+    if (ImGui::Checkbox("Use Displacement Texture", &useDisplacementTexture)) changed = true;
 
     // Quick PBR presets
     ImGui::Spacing();
@@ -1838,8 +1888,13 @@ void ObjectInspectorView::RenderGLTFMaterialEditor(MeshNode* node) {
             writeConstants->metal_rough_factors = glm::vec4(metallic, roughness, ao, normalStrength);
             writeConstants->extra[0] = glm::vec4(emission, emissionStrength);
             writeConstants->extra[1].x = reflectionIntensity;
+            writeConstants->extra[2].x = displacementScale;
+            writeConstants->extra[2].y = displacementBias;
             writeConstants->emissiveTexID = useEmissiveTexture ? emissiveTexID : 0;
+            writeConstants->extra[11].x = static_cast<float>(useDisplacementTexture ? displacementTexID : 0u);
+            writeConstants->extra[11].y = static_cast<float>(useAOTexture ? aoTexID : 0u);
             writeConstants->extra[12].x = static_cast<float>(emissiveTexBackup);
+            writeConstants->extra[12].y = static_cast<float>(aoTexBackup);
 
             vmaUnmapMemory(m_Engine->_allocator, ownerScene->materialDataBuffer.allocation);
 

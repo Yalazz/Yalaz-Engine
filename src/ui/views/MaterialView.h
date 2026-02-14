@@ -64,6 +64,7 @@ public:
     void SetMetallicRoughnessTexture(const std::string& path);
     void SetAOTexture(const std::string& path);
     void SetEmissionTexture(const std::string& path);
+    void SetDisplacementTexture(const std::string& path);
 
     // Scene lifecycle - call when a scene is being unloaded
     void OnSceneUnloading(const std::string& sceneName);
@@ -92,7 +93,7 @@ private:
 
     // Dynamic texture loading system
     bool LoadTextureFromFile(const std::string& texturePath, uint32_t& outTextureID);
-    void UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoughTexID);
+    void UpdateMaterialTexture(uint32_t colorTexID, uint32_t metalRoughTexID, uint32_t normalTexID, uint32_t emissiveTexID, uint32_t displacementTexID, uint32_t aoTexID);
     void RebuildMaterialDescriptorSet();
     void ApplyTexturesToPrimitive();  // Apply textures to selected primitive
 
@@ -119,6 +120,8 @@ private:
     glm::vec3 m_Emission = glm::vec3(0.0f);
     float m_EmissionStrength = 0.0f;
     float m_NormalStrength = 1.0f;
+    float m_DisplacementScale = 0.0f;
+    float m_DisplacementBias = 0.0f;
 
     // Texture slots (dynamic loading)
     TextureSlot m_AlbedoSlot{"Albedo", "", false, 0};
@@ -126,6 +129,7 @@ private:
     TextureSlot m_MetallicRoughnessSlot{"Metallic/Roughness", "", false, 0};
     TextureSlot m_AOSlot{"Ambient Occlusion", "", false, 0};
     TextureSlot m_EmissionSlot{"Emission", "", false, 0};
+    TextureSlot m_DisplacementSlot{"Displacement", "", false, 0};
 
     // Material presets
     std::vector<MaterialPreset> m_Presets;

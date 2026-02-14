@@ -64,6 +64,13 @@ bool save(const std::string& filepath, const MaterialData& material) {
             j["normalScale"] = material.normalScale;
         }
 
+        // Displacement
+        if (!material.displacementTexturePath.empty()) {
+            j["displacementTexture"] = material.displacementTexturePath;
+            j["displacementScale"] = material.displacementScale;
+            j["displacementBias"] = material.displacementBias;
+        }
+
         // Emission
         if (material.emissionStrength > 0.0f || !material.emissionTexturePath.empty()) {
             j["emission"] = {
@@ -167,6 +174,9 @@ std::optional<MaterialData> load(const std::string& filepath) {
         // Normal
         material.normalTexturePath = j.value("normalTexture", "");
         material.normalScale = j.value("normalScale", 1.0f);
+        material.displacementTexturePath = j.value("displacementTexture", "");
+        material.displacementScale = j.value("displacementScale", 0.0f);
+        material.displacementBias = j.value("displacementBias", 0.0f);
 
         // Emission
         if (j.contains("emission")) {
