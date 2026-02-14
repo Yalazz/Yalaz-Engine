@@ -87,6 +87,8 @@ public:
      * @brief Add a scene to recent list
      */
     void AddRecentScene(const std::string& path);
+    void RemoveRecentScene(const std::string& path);
+    bool DeleteSceneFile(const std::string& filePath);
 
     // =========================================================================
     // Scene Access

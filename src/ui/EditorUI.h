@@ -112,6 +112,7 @@ private:
     float m_LastViewportHeight = 0.0f;
     bool m_ForceLayoutRecalc = true;  // Force recalc on startup
     bool m_LayoutLocked = true;       // When true, panels auto-position; when false, panels are freely movable
+    std::unordered_map<std::string, bool> m_PreviousOpenStates;
 };
 
 } // namespace Yalaz::UI

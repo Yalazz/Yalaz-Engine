@@ -565,6 +565,10 @@ void RenderSettingsView::drawEnvironmentSettings() {
                 m_Engine->_pathTracer->resetAccumulation();
             }
             m_Engine->updateSkyboxBgDescriptor();
+            for (auto& probe : m_Engine->_reflectionProbes) {
+                probe.needsUpdate = true;
+            }
+            m_Engine->_reflectionFrameCounter = VulkanEngine::REFLECTION_UPDATE_INTERVAL;
 
             // Auto-switch to skybox background
             for (int i = 0; i < static_cast<int>(m_Engine->backgroundEffects.size()); i++) {
@@ -600,7 +604,7 @@ void RenderSettingsView::drawEnvironmentSettings() {
                     if (isCurrent) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
                     if (ImGui::Button(buttonLabel.c_str(), ImVec2(-1, 0))) {
                         if (loadCubemapFromFolder(entry.path().string())) {
-                            m_Engine->_environmentMap->stats.loadedPath = name;
+                            m_Engine->_environmentMap->stats.loadedPath = entry.path().string();
                         }
                     }
                     if (isCurrent) ImGui::PopStyleColor();
@@ -621,7 +625,7 @@ void RenderSettingsView::drawEnvironmentSettings() {
         ImGui::SameLine();
         if (ImGui::Button("Load")) {
             if (loadCubemapFromFolder(_cubemapPath)) {
-                m_Engine->_environmentMap->stats.loadedPath = std::filesystem::path(_cubemapPath).filename().string();
+                m_Engine->_environmentMap->stats.loadedPath = std::filesystem::path(_cubemapPath).string();
             }
         }
 
@@ -652,6 +656,10 @@ void RenderSettingsView::drawEnvironmentSettings() {
             }
             // Update skybox background descriptor with new cubemap
             m_Engine->updateSkyboxBgDescriptor();
+            for (auto& probe : m_Engine->_reflectionProbes) {
+                probe.needsUpdate = true;
+            }
+            m_Engine->_reflectionFrameCounter = VulkanEngine::REFLECTION_UPDATE_INTERVAL;
         }
     }
 
@@ -695,6 +703,10 @@ void RenderSettingsView::drawEnvironmentSettings() {
                 m_Engine->_pathTracer->resetAccumulation();
             }
             m_Engine->updateSkyboxBgDescriptor();
+            for (auto& probe : m_Engine->_reflectionProbes) {
+                probe.needsUpdate = true;
+            }
+            m_Engine->_reflectionFrameCounter = VulkanEngine::REFLECTION_UPDATE_INTERVAL;
         };
 
         if (ImGui::Button("Clear Day")) {

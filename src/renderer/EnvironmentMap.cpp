@@ -747,6 +747,8 @@ bool EnvironmentMap::loadCubemapFaces(const std::string paths[6]) {
         vmaUnmapMemory(_engine->_allocator, staging.allocation);
         stbi_image_free(data);
 
+        const int layer = face;
+
         _engine->immediate_submit([&](VkCommandBuffer cmd) {
             VkImageMemoryBarrier barrier{};
             barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -758,7 +760,7 @@ bool EnvironmentMap::loadCubemapFaces(const std::string paths[6]) {
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.baseMipLevel = 0;
             barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.baseArrayLayer = face;
+            barrier.subresourceRange.baseArrayLayer = layer;
             barrier.subresourceRange.layerCount = 1;
             barrier.srcAccessMask = 0;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -770,7 +772,7 @@ bool EnvironmentMap::loadCubemapFaces(const std::string paths[6]) {
             region.bufferOffset = 0;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.imageSubresource.mipLevel = 0;
-            region.imageSubresource.baseArrayLayer = face;
+            region.imageSubresource.baseArrayLayer = layer;
             region.imageSubresource.layerCount = 1;
             region.imageOffset = {0, 0, 0};
             region.imageExtent = {faceSize, faceSize, 1};
@@ -807,7 +809,15 @@ bool EnvironmentMap::loadCubemapFaces(const std::string paths[6]) {
 
     stats.cubemapSize = faceSize;
     stats.isHDR = false;
-    stats.loadedPath = "cubemap faces";
+    // Persist the actual cubemap directory so scene save/load can restore the same pack.
+    fs::path parent = fs::path(paths[0]).parent_path();
+    bool sameParent = !parent.empty();
+    for (int i = 1; i < 6 && sameParent; ++i) {
+        if (fs::path(paths[i]).parent_path() != parent) {
+            sameParent = false;
+        }
+    }
+    stats.loadedPath = sameParent ? parent.string() : std::string("cubemap faces");
 
     fmt::print("[Environment] Cubemap loaded successfully ({}x{} per face)\n", faceSize, faceSize);
     return true;

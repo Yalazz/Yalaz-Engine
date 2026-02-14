@@ -91,129 +91,71 @@ void EditorUI::CalculateLayout() {
     if (vh < 100) vh = 720;
 
     float menuH = s_Layout.menuBarHeight;
+    const bool relayoutAll = m_ForceLayoutRecalc;
 
     auto& views = ViewManager::Get().GetViews();
 
-    // Count open views (excluding Scene which is handled separately)
-    int openCount = 0;
+    // === STANDARD LAYOUT - Core views are dynamically resized, secondary views are only placed on open ===
+    float leftW = std::max(200.0f, vw * 0.18f);   // ~18% of width, min 200
+    float rightW = std::max(280.0f, vw * 0.22f);  // ~22% of width, min 280
+    float bottomH = std::max(150.0f, vh * 0.25f); // ~25% of height, min 150
+    float centerW = vw - leftW - rightW;
+    float topH = vh - menuH - bottomH;
+
+    int cascadeIdx = 0;
+    const float cascadeStep = 30.0f;
+
     for (auto& view : views) {
-        if (view->IsOpen() && view->GetName() != "Scene") {
-            openCount++;
+        const std::string& name = view->GetName();
+        const bool isOpen = view->IsOpen();
+        const bool wasOpen = m_PreviousOpenStates[name];
+        const bool justOpened = isOpen && !wasOpen;
+
+        if (!isOpen) {
+            view->ClearDynamicLayout();
+            m_PreviousOpenStates[name] = false;
+            continue;
         }
-    }
 
-    // Dynamic layout - positions update every frame based on viewport size
-    // This ensures panels resize/reposition when window is resized or fullscreen
+        // Core editor panes stay responsive to viewport resize.
+        if (name == "Hierarchy") {
+            view->SetDynamicLayout(ImVec2(0, menuH), ImVec2(leftW, topH));
+        } else if (name == "Inspector") {
+            view->SetDynamicLayout(ImVec2(vw - rightW, menuH), ImVec2(rightW, topH));
+        } else if (name == "Console") {
+            view->SetDynamicLayout(ImVec2(0, vh - bottomH), ImVec2(vw * 0.5f, bottomH));
+        } else if (name == "Asset Browser") {
+            view->SetDynamicLayout(ImVec2(vw * 0.5f, vh - bottomH), ImVec2(vw * 0.5f, bottomH));
+        } else if (name == "Scene") {
+            // Scene toolbar is handled in SceneView::OnRender.
+            view->ClearDynamicLayout();
+        } else {
+            // Secondary/tool windows: place once when opened, then let user resize/move.
+            float cascadeX = leftW + 10 + (cascadeIdx * cascadeStep);
+            float cascadeY = menuH + 10 + (cascadeIdx * cascadeStep);
+            float maxCascadeX = vw - rightW - 350;
+            float maxCascadeY = vh - bottomH - 250;
 
-    if (openCount >= 6) {
-        // === TILE LAYOUT - Grid arrangement to avoid overlap ===
-        int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(openCount))));
-        int rows = static_cast<int>(std::ceil(static_cast<float>(openCount) / cols));
+            if (cascadeX > maxCascadeX) cascadeX = leftW + 10 + ((cascadeIdx % 3) * cascadeStep);
+            if (cascadeY > maxCascadeY) cascadeY = menuH + 10 + ((cascadeIdx % 4) * cascadeStep);
 
-        float cellW = vw / cols;
-        float cellH = (vh - menuH) / rows;
-        float padding = 2.0f;
+            float viewW = std::min(450.0f, centerW * 0.7f);
+            float viewH = std::min(350.0f, topH * 0.8f);
 
-        int idx = 0;
-        for (auto& view : views) {
-            if (view->GetName() == "Scene") continue;
-
-            if (view->IsOpen()) {
-                int col = idx % cols;
-                int row = idx / cols;
-
-                float x = col * cellW + padding;
-                float y = menuH + row * cellH + padding;
-                float w = cellW - padding * 2;
-                float h = cellH - padding * 2;
-
-                view->SetDynamicLayout(ImVec2(x, y), ImVec2(w, h));
-                idx++;
+            if (justOpened || relayoutAll) {
+                view->SetDynamicLayout(ImVec2(cascadeX, cascadeY), ImVec2(viewW, viewH));
             } else {
                 view->ClearDynamicLayout();
             }
+            cascadeIdx++;
         }
+
+        m_PreviousOpenStates[name] = true;
     }
-    else {
-        // === STANDARD LAYOUT - Professional editor arrangement ===
-        // All positions are dynamic and scale with viewport
 
-        // Proportional sizing based on viewport
-        float leftW = std::max(200.0f, vw * 0.18f);   // ~18% of width, min 200
-        float rightW = std::max(280.0f, vw * 0.22f);  // ~22% of width, min 280
-        float bottomH = std::max(150.0f, vh * 0.25f); // ~25% of height, min 150
-        float centerW = vw - leftW - rightW;
-        float topH = vh - menuH - bottomH;
-
-        // Track cascade offset for secondary views
-        int cascadeIdx = 0;
-        float cascadeStep = 30.0f;
-
-        for (auto& view : views) {
-            const std::string& name = view->GetName();
-
-            if (!view->IsOpen()) {
-                view->ClearDynamicLayout();
-                continue;
-            }
-
-            // === CORE VIEWS - Dynamic positions that scale with window ===
-            if (name == "Hierarchy") {
-                view->SetDynamicLayout(
-                    ImVec2(0, menuH),
-                    ImVec2(leftW, topH)
-                );
-            }
-            else if (name == "Inspector") {
-                view->SetDynamicLayout(
-                    ImVec2(vw - rightW, menuH),
-                    ImVec2(rightW, topH)
-                );
-            }
-            else if (name == "Console") {
-                view->SetDynamicLayout(
-                    ImVec2(0, vh - bottomH),
-                    ImVec2(vw * 0.5f, bottomH)
-                );
-            }
-            else if (name == "Asset Browser") {
-                view->SetDynamicLayout(
-                    ImVec2(vw * 0.5f, vh - bottomH),
-                    ImVec2(vw * 0.5f, bottomH)
-                );
-            }
-            else if (name == "Scene") {
-                // Scene toolbar is handled in SceneView::OnRender
-                view->ClearDynamicLayout();
-            }
-            // === SECONDARY VIEWS - Cascade in center area ===
-            else {
-                float cascadeX = leftW + 10 + (cascadeIdx * cascadeStep);
-                float cascadeY = menuH + 10 + (cascadeIdx * cascadeStep);
-
-                // Wrap cascade if it goes too far
-                float maxCascadeX = vw - rightW - 350;
-                float maxCascadeY = vh - bottomH - 250;
-
-                if (cascadeX > maxCascadeX) {
-                    cascadeX = leftW + 10 + ((cascadeIdx % 3) * cascadeStep);
-                }
-                if (cascadeY > maxCascadeY) {
-                    cascadeY = menuH + 10 + ((cascadeIdx % 4) * cascadeStep);
-                }
-
-                // Size based on available center space
-                float viewW = std::min(450.0f, centerW * 0.7f);
-                float viewH = std::min(350.0f, topH * 0.8f);
-
-                view->SetDynamicLayout(
-                    ImVec2(cascadeX, cascadeY),
-                    ImVec2(viewW, viewH)
-                );
-                cascadeIdx++;
-            }
-        }
-    }
+    m_LastViewportWidth = vw;
+    m_LastViewportHeight = vh;
+    m_ForceLayoutRecalc = false;
 }
 
 // =============================================================================
@@ -358,6 +300,47 @@ void EditorUI::RenderMenuBar() {
                     std::filesystem::path p(recent);
                     if (ImGui::MenuItem(p.stem().string().c_str())) {
                         Yalaz::Scene::SceneManager::Get().LoadScene(recent);
+                    }
+                }
+
+                ImGui::EndMenu();
+            }
+
+            // Delete Scene submenu
+            if (ImGui::BeginMenu("Delete Scene...")) {
+                ImGui::TextDisabled("Saved Scenes:");
+                bool anyScene = false;
+
+                std::filesystem::path savesDir("saves");
+                if (std::filesystem::exists(savesDir)) {
+                    for (const auto& entry : std::filesystem::directory_iterator(savesDir)) {
+                        if (entry.path().extension() == ".yscene") {
+                            anyScene = true;
+                            std::string name = entry.path().stem().string();
+                            std::string label = "Delete " + name;
+                            if (ImGui::MenuItem(label.c_str())) {
+                                Yalaz::Scene::SceneManager::Get().DeleteSceneFile(entry.path().string());
+                            }
+                        }
+                    }
+                }
+
+                if (!anyScene) {
+                    ImGui::TextDisabled("No saved scenes found");
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Recent:");
+                const auto& recentScenes = Yalaz::Scene::SceneManager::Get().GetRecentScenes();
+                if (recentScenes.empty()) {
+                    ImGui::TextDisabled("No recent scenes");
+                } else {
+                    for (const auto& recent : recentScenes) {
+                        std::filesystem::path p(recent);
+                        std::string label = "Delete " + p.stem().string();
+                        if (ImGui::MenuItem(label.c_str())) {
+                            Yalaz::Scene::SceneManager::Get().DeleteSceneFile(recent);
+                        }
                     }
                 }
 
